@@ -1,7 +1,6 @@
-version: "3.9"
-
 services:
   neo4j:
+    restart: unless-stopped
     image: neo4j:5-community
     ports:
       - "17474:7474"
@@ -14,6 +13,7 @@ services:
       - neo4j_data:/data
 
   qdrant:
+    restart: unless-stopped
     image: qdrant/qdrant:v1.17.0
     ports:
       - "16333:6333"
@@ -22,6 +22,7 @@ services:
       - qdrant_data:/qdrant/storage
 
   redis:
+    restart: unless-stopped
     image: redis:7-alpine
     ports:
       - "16379:6379"
@@ -30,6 +31,7 @@ services:
 
   # Phase 9: Observability stack (optional — for ClickHouse analytics + OTEL log export)
   otel-collector:
+    restart: unless-stopped
     image: otel/opentelemetry-collector-contrib:latest
     ports:
       - "4317:4317"
@@ -42,6 +44,7 @@ services:
       - observability
 
   clickhouse:
+    restart: unless-stopped
     image: clickhouse/clickhouse-server:latest
     ports:
       - "8123:8123"
@@ -57,6 +60,7 @@ services:
       - observability
 
   jaeger:
+    restart: unless-stopped
     image: jaegertracing/all-in-one:latest
     ports:
       - "16686:16686"
@@ -68,6 +72,7 @@ services:
       - observability
 
   grafana:
+    restart: unless-stopped
     image: grafana/grafana:latest
     ports:
       - "13000:3000"
