@@ -394,6 +394,24 @@ class TestTurnIngestPipeline:
         assert "memory_class_assigned" in event_types
         assert "cognee_cognify_completed" in event_types
 
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    async def test_cognee_cognify_failure_records_error_metric(self, mock_cognee):
+        mock_cognee.add = AsyncMock()
+        mock_cognee.cognify = AsyncMock(side_effect=RuntimeError("cognify failed"))
+        metrics = MagicMock()
+        trace = _make_trace()
+        pipe = _make_pipeline(metrics=metrics, trace=trace)
+
+        result = await pipe.run(
+            "session:test",
+            [{"role": "user", "content": "Should survive cognify failure"}],
+        )
+
+        metrics.inc_cognify.assert_called_once_with("error")
+        assert result.facts_stored > 0
+        event_types = [call.args[0].event_type for call in trace.append_event.call_args_list]
+        assert TraceEventType.COGNEE_COGNIFY_COMPLETED not in event_types
+
     # --- Edge-creation tests (supersession / contradiction) ---
 
     @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")

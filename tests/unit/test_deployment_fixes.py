@@ -274,8 +274,9 @@ class TestOtelImportWarning:
 # ---------------------------------------------------------------------------
 
 class TestCogneeTelemetryEnvVar:
-    """Deployment Fix #30: COGNEE_DISABLE_TELEMETRY must be set at import time."""
+    """Deployment Fix #30: Cognee telemetry disable flags must be set at import time."""
 
     def test_telemetry_env_var_set_after_import(self):
         import elephantbroker  # noqa: F401
         assert os.environ.get("COGNEE_DISABLE_TELEMETRY") == "true"
+        assert os.environ.get("TELEMETRY_DISABLED") == "true"
