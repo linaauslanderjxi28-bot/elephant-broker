@@ -23,7 +23,7 @@ class TestCogneeConfig:
 
     def test_embedding_defaults(self):
         c = CogneeConfig()
-        assert c.embedding_provider == "openai"
+        assert c.embedding_provider == "openai_compatible"
         assert c.embedding_model == "gemini/text-embedding-004"
         assert c.embedding_endpoint == "http://localhost:8811/v1"
         assert c.embedding_api_key == ""
@@ -176,15 +176,15 @@ class TestElephantBrokerConfig:
         ability to spot misspelled YAML.
         """
         with pytest.raises(ValidationError, match="extra"):
-            ElephantBrokerConfig(unknown_top_level=42)
+            ElephantBrokerConfig.model_validate({"unknown_top_level": 42})
 
     def test_extra_forbid_nested_typo(self):
         """Nested submodels (GuardConfig, GatewayConfig, ...) must also reject typos."""
         from elephantbroker.schemas.config import GatewayConfig, GuardConfig
         with pytest.raises(ValidationError, match="extra"):
-            GuardConfig(enabld=True)  # 'enabled' typo
+            GuardConfig.model_validate({"enabld": True})  # 'enabled' typo
         with pytest.raises(ValidationError, match="extra"):
-            GatewayConfig(gatway_id="oops")  # 'gateway_id' typo
+            GatewayConfig.model_validate({"gatway_id": "oops"})  # 'gateway_id' typo
 
     def test_extra_forbid_via_from_yaml(self, tmp_path):
         """`from_yaml()` must surface unknown YAML keys as ValidationError, not swallow them."""

@@ -108,7 +108,7 @@ class TestConfigureCognee:
             assert call_args["llm_provider"] == "openai"
 
     async def test_sets_telemetry_and_connection_env_vars(self, monkeypatch):
-        """G1: configure_cognee sets COGNEE_DISABLE_TELEMETRY + COGNEE_SKIP_CONNECTION_TEST to 'true'
+        """G1: configure_cognee sets Cognee telemetry + connection flags to 'true'
         via setdefault semantics (preserves operator-set custom values on re-entry).
 
         Uses ``monkeypatch`` for env-var manipulation so test teardown auto-restores the
@@ -119,24 +119,28 @@ class TestConfigureCognee:
         """
         # Fresh: both env vars absent -> configure_cognee sets them to "true"
         monkeypatch.delenv("COGNEE_DISABLE_TELEMETRY", raising=False)
+        monkeypatch.delenv("TELEMETRY_DISABLED", raising=False)
         monkeypatch.delenv("COGNEE_SKIP_CONNECTION_TEST", raising=False)
         mock_config_module = MagicMock()
         with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
             await configure_cognee(CogneeConfig())
         assert os.environ.get("COGNEE_DISABLE_TELEMETRY") == "true"
+        assert os.environ.get("TELEMETRY_DISABLED") == "true"
         assert os.environ.get("COGNEE_SKIP_CONNECTION_TEST") == "true"
 
         # setdefault semantics: operator-set custom values must be preserved on re-entry
         monkeypatch.setenv("COGNEE_DISABLE_TELEMETRY", "custom")
+        monkeypatch.setenv("TELEMETRY_DISABLED", "custom")
         monkeypatch.setenv("COGNEE_SKIP_CONNECTION_TEST", "custom")
         mock_config_module2 = MagicMock()
         with patch.dict("sys.modules", _cognee_mocks(mock_config_module2, MagicMock())):
             await configure_cognee(CogneeConfig())
         assert os.environ.get("COGNEE_DISABLE_TELEMETRY") == "custom"
+        assert os.environ.get("TELEMETRY_DISABLED") == "custom"
         assert os.environ.get("COGNEE_SKIP_CONNECTION_TEST") == "custom"
 
     async def test_init_sets_telemetry_env_var_at_import_time(self):
-        """G2: elephantbroker.__init__ sets COGNEE_DISABLE_TELEMETRY at import time.
+        """G2: elephantbroker.__init__ sets Cognee telemetry disables at import time.
 
         Must happen in __init__.py (not at first configure_cognee call) because Cognee reads
         this env var at import time -- any cognee import before configure_cognee would phone home.
@@ -146,6 +150,7 @@ class TestConfigureCognee:
 
         import elephantbroker
         assert "COGNEE_DISABLE_TELEMETRY" in inspect.getsource(elephantbroker)
+        assert "TELEMETRY_DISABLED" in inspect.getsource(elephantbroker)
 
     async def test_fallback_emits_warning_log(self, caplog):
         """G3: When llm_config is None, fallback branch emits a WARNING log.

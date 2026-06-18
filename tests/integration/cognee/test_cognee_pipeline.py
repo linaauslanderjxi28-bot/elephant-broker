@@ -105,7 +105,7 @@ class TestCogneePipeline:
     async def test_search_scoped_by_dataset(self, configured_cognee):
         """Verify dataset scoping works for search.
 
-        Note: Cognee v0.5.3 CHUNKS search may not fully isolate by dataset
+        Note: Cognee v0.5.6 CHUNKS search may not fully isolate by dataset
         (returns results across datasets). We test that searching dataset A
         at least returns results, and searching an empty dataset B returns
         fewer results. Strict isolation is a Cognee SDK concern.
