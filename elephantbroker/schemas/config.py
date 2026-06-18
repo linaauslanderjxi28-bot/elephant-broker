@@ -76,7 +76,7 @@ class CogneeConfig(_StrictBase):
     neo4j_password: str = ""
     qdrant_url: str = "http://localhost:6333"
     default_dataset: str = "elephantbroker"  # DANGER: changing this orphans all existing Cognee data
-    embedding_provider: str = "openai"  # API client style — openai SDK shape works for any LiteLLM-routed backend
+    embedding_provider: str = "openai_compatible"  # Cognee 0.5.6 OpenAI-compatible /v1/embeddings path; avoids tiktoken model lookup for non-OpenAI models
     embedding_model: str = "gemini/text-embedding-004"
     embedding_endpoint: str = "http://localhost:8811/v1"
     embedding_api_key: str = ""
@@ -717,7 +717,7 @@ class ElephantBrokerConfig(_StrictBase):
     # Override via EB_TIER env var ("memory_only" | "context_only" | "full")
     # or `tier:` key in YAML. RuntimeContainer.from_config() reads this to
     # gate which interfaces are wired (see TIER_CAPABILITIES in schemas/tiers.py).
-    tier: BusinessTier = BusinessTier.FULL
+    tier: BusinessTier = Field(default=BusinessTier.FULL)
     enable_trace_ledger: bool = True
     max_concurrent_sessions: int = Field(default=100, ge=1)
     # Phase 5 config sections
