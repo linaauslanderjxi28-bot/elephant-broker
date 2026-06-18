@@ -13,7 +13,7 @@ from elephantbroker.schemas.config import CogneeConfig, LLMConfig
 # cognee.datasets.delete_data) whose signatures are NOT stabilized across
 # Cognee minor versions. Bumping this requires re-verifying each call site.
 # See local/TECHNICAL-DEBT.md §"Load-bearing dependency pins".
-_SUPPORTED_COGNEE_VERSION = "0.5.3"
+_SUPPORTED_COGNEE_VERSION = "0.5.6"
 
 _log = logging.getLogger("elephantbroker.adapters.cognee.config")
 
@@ -78,6 +78,7 @@ async def configure_cognee(
 
     # Disable Cognee's built-in usage telemetry (phones home to Cognee servers)
     os.environ.setdefault("COGNEE_DISABLE_TELEMETRY", "true")
+    os.environ.setdefault("TELEMETRY_DISABLED", "true")
 
     # Graph database: Neo4j (not the default Kuzu)
     cognee.config.set_graph_database_provider("neo4j")
@@ -118,7 +119,7 @@ async def configure_cognee(
                 return _orig_get_client(self)
 
             QDrantAdapter.get_qdrant_client = _patched_get_client
-            QDrantAdapter._eb_patched = True
+            setattr(QDrantAdapter, "_eb_patched", True)
     except ImportError:
         pass  # adapter not installed
     except AttributeError:

@@ -20,7 +20,7 @@ that are NOT part of Cognee's public API stability contract:
   - `cognee.modules.data.methods.delete_data` (same recovery path —
     removes the Data ↔ Dataset association that Cognee's outer
     delete_data would have finalized on its last line)
-The `cognee==0.5.3` pin in pyproject.toml is load-bearing — bumping
+The `cognee==0.5.6` pin in pyproject.toml is load-bearing — bumping
 Cognee without re-verifying each call site (signature, kwargs, return
 shape) will silently break the TD-50 cascade path.
 See local/TECHNICAL-DEBT.md §"Load-bearing dependency pins" for the
@@ -139,7 +139,7 @@ async def cascade_cognee_data(
             )
         except UnexpectedResponse as exc:
             # TD-Cognee-Qdrant-404 upstream-bug workaround:
-            # Cognee 0.5.3's delete_data → delete_data_nodes_and_edges
+            # Cognee 0.5.6's delete_data → delete_data_nodes_and_edges
             # → delete_from_graph_and_vector calls
             # QdrantAdapter.delete_data_points without a has_collection
             # guard. When a Data row exists (cognee.add()) but was never

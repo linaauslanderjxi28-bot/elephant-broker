@@ -14,8 +14,8 @@ license = "AGPL-3.0-only"
 # To upgrade a dependency, see deploy/UPDATING-DEPS.md.
 dependencies = [
     "pydantic==2.12.5",
-    "cognee[neo4j]==0.5.3",
-    "cognee-community-vector-adapter-qdrant==0.2.2",
+    "cognee[neo4j]==0.5.6",
+    "cognee-community-vector-adapter-qdrant==0.2.4",
     "httpx==0.28.1",
     "qdrant-client==1.17.1",
     "redis==7.4.0",
