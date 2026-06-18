@@ -147,7 +147,7 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 | Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
 |----------|----------|---------|------|---------|----------------|---------|--------------|
 | `EB_EMBEDDING_API_KEY` | No | `""` | string | Python runtime | API key | **Yes** | Yes |
-| `EB_EMBEDDING_PROVIDER` | No | `"openai"` | string | Python runtime | `openai` | No | Yes |
+| `EB_EMBEDDING_PROVIDER` | No | `"openai_compatible"` | string | Python runtime | `openai_compatible` | No | Yes |
 | `EB_EMBEDDING_MODEL` | No | `"gemini/text-embedding-004"` | string | Python runtime | `gemini/text-embedding-004`, `openai/text-embedding-3-large` | No | Yes |
 | `EB_EMBEDDING_ENDPOINT` | No | `"http://localhost:8811/v1"` | string | Python runtime | `http://litellm:8811/v1` | No | Yes |
 | `EB_EMBEDDING_DIMENSIONS` | No | `768` | int | Python runtime | `768`, `1024`, `3072` | No | Yes |
@@ -466,7 +466,7 @@ Path prefix: `cognee.*`
 | `cognee.neo4j_password` | `str` | `"elephant_dev"` | `EB_NEO4J_PASSWORD` | -- | Neo4j authentication password | Wrong password = auth failure, runtime cannot start | `elephant_dev` / `staging_pw` / `<vault-secret>` |
 | `cognee.qdrant_url` | `str` | `"http://localhost:6333"` | `EB_QDRANT_URL` | -- | Qdrant vector store HTTP URL for embedding storage and similarity search | Wrong URL = no vector search; retrieval degrades to graph-only | `http://localhost:6333` / `http://qdrant-staging:6333` / `http://qdrant-prod:6333` |
 | `cognee.default_dataset` | `str` | `"elephantbroker"` | `EB_DEFAULT_DATASET` | -- | Default Cognee dataset name (prefixed with `{gateway_id}__` at runtime) | Wrong name = data isolation issues between deployments | `elephantbroker` / `elephantbroker` / `elephantbroker` |
-| `cognee.embedding_provider` | `str` | `"openai"` | `EB_EMBEDDING_PROVIDER` | -- | Embedding provider name passed to Cognee config; must be `"openai"` for LiteLLM-compatible endpoints | Wrong provider = embedding calls fail | `openai` / `openai` / `openai` |
+| `cognee.embedding_provider` | `str` | `"openai_compatible"` | `EB_EMBEDDING_PROVIDER` | -- | Embedding provider name passed to Cognee config; use `"openai_compatible"` for LiteLLM/OpenAI-compatible embedding endpoints | Wrong provider = embedding calls fail | `openai_compatible` / `openai_compatible` / `openai_compatible` |
 | `cognee.embedding_model` | `str` | `"gemini/text-embedding-004"` | `EB_EMBEDDING_MODEL` | -- | Embedding model name routed by LiteLLM. Provider-prefixed (`gemini/`, `openai/`, etc.). Cognee uses the OpenAI client style regardless of backend. | Wrong model = dimension mismatch or API errors; must match what your LiteLLM proxy actually serves | `gemini/text-embedding-004` / same / `openai/text-embedding-3-large` |
 | `cognee.embedding_endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_EMBEDDING_ENDPOINT` | -- | OpenAI-compatible embedding API endpoint (typically LiteLLM proxy) | Wrong endpoint = all embedding operations fail, no vector search, no dedup | `http://localhost:8811/v1` / `http://litellm-staging:8811/v1` / `http://litellm-prod:8811/v1` |
 | `cognee.embedding_api_key` | `str` | `""` | `EB_EMBEDDING_API_KEY` | -- | API key for embedding endpoint; also used as fallback for `llm.api_key` via `_apply_inheritance_fallbacks()` (post-F2/F3 unification) | Missing key = 401 from embedding endpoint (unless endpoint is unauthenticated) | `""` (local) / `sk-...` / `sk-...` |
@@ -956,7 +956,7 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 | `EB_EMBEDDING_DIMENSIONS` | `cognee.embedding_dimensions` | `int` | `768` |
 | `EB_EMBEDDING_ENDPOINT` | `cognee.embedding_endpoint` | `str` | `http://localhost:8811/v1` |
 | `EB_EMBEDDING_MODEL` | `cognee.embedding_model` | `str` | `gemini/text-embedding-004` |
-| `EB_EMBEDDING_PROVIDER` | `cognee.embedding_provider` | `str` | `openai` |
+| `EB_EMBEDDING_PROVIDER` | `cognee.embedding_provider` | `str` | `openai_compatible` |
 | `EB_GUARDS_ENABLED` | `guards.enabled` | `bool` | `true` |
 | `EB_ENABLE_TRACE_LEDGER` | `enable_trace_ledger` | `bool` | `true` |
 | `EB_EXTRACTION_CONTEXT_FACTS` | `llm.extraction_context_facts` | `int` | `20` |
@@ -2131,8 +2131,8 @@ See `deploy/UPDATING-DEPS.md` for the upgrade workflow.
 
 ```
 pydantic==2.12.5
-cognee[neo4j]==0.5.3
-cognee-community-vector-adapter-qdrant==0.2.2
+cognee[neo4j]==0.5.6
+cognee-community-vector-adapter-qdrant==0.2.4
 httpx==0.28.1
 qdrant-client==1.17.1
 redis==7.4.0
@@ -3317,7 +3317,7 @@ cognee.config.set_vector_db_config({
 })
 ```
 
-Requires the community adapter: `cognee-community-vector-adapter-qdrant >= 0.2.2` (registered via `from cognee_community_vector_adapter_qdrant import register`).
+Requires the community adapter: `cognee-community-vector-adapter-qdrant==0.2.4` (registered via `from cognee_community_vector_adapter_qdrant import register`).
 
 #### Named Vectors
 
@@ -3981,7 +3981,7 @@ cognee:
   neo4j_password: "elephant_dev"                     # EB_NEO4J_PASSWORD
   qdrant_url: "http://localhost:6333"                # EB_QDRANT_URL
   default_dataset: "elephantbroker"                  # EB_DEFAULT_DATASET
-  embedding_provider: "openai"                       # EB_EMBEDDING_PROVIDER (API client style, not vendor)
+  embedding_provider: "openai_compatible"            # EB_EMBEDDING_PROVIDER (OpenAI-compatible endpoint style, not vendor)
   embedding_model: "gemini/text-embedding-004"       # EB_EMBEDDING_MODEL
   embedding_endpoint: "http://localhost:8811/v1"      # EB_EMBEDDING_ENDPOINT
   embedding_api_key: ""                              # EB_EMBEDDING_API_KEY
@@ -4235,7 +4235,7 @@ All env vars use the `EB_` prefix. Below is the complete set recognized by `ENV_
 | `EB_NEO4J_PASSWORD` | `cognee.neo4j_password` | `"elephant_dev"` |
 | `EB_QDRANT_URL` | `cognee.qdrant_url` | `"http://localhost:6333"` |
 | `EB_DEFAULT_DATASET` | `cognee.default_dataset` | `"elephantbroker"` |
-| `EB_EMBEDDING_PROVIDER` | `cognee.embedding_provider` | `"openai"` |
+| `EB_EMBEDDING_PROVIDER` | `cognee.embedding_provider` | `"openai_compatible"` |
 | `EB_EMBEDDING_MODEL` | `cognee.embedding_model` | `"gemini/text-embedding-004"` |
 | `EB_EMBEDDING_ENDPOINT` | `cognee.embedding_endpoint` | `"http://localhost:8811/v1"` |
 | `EB_EMBEDDING_API_KEY` | `cognee.embedding_api_key` | `""` |
@@ -5902,7 +5902,7 @@ No explicit compatibility matrix exists. Versions are scattered across files:
 | qdrant-client | `pyproject.toml` | `>=1.7` (unbounded upper) | Not documented |
 | Redis server | `docker-compose.yml` | `redis:7-alpine` (any 7.x) | Not documented |
 | redis (Python) | `pyproject.toml` | `>=5.0` (unbounded upper) | Not documented |
-| Cognee | `pyproject.toml` | `==0.5.3` (exact pin) | 0.5.3 |
+| Cognee | `pyproject.toml` | `==0.5.6` (exact pin) | 0.5.6 |
 | FastAPI | `pyproject.toml` | `>=0.110` | Not documented |
 | Pydantic | `pyproject.toml` | `>=2.0,<3.0` | Not documented |
 | OTEL Collector | `docker-compose.yml` | `latest` (unpinned) | Not documented |
@@ -5973,7 +5973,7 @@ the lockfile against pyproject.toml). Still missing:
 
 ###### 7.5 Cognee Upgrade
 
-- Cognee is pinned to `==0.5.3` -- what breaks if upgraded?
+- Cognee is pinned to `==0.5.6` -- what breaks if upgraded?
 - No documented breaking changes between Cognee 0.5.x versions
 - No migration path for Cognee's internal state databases
 - The mistralai workaround is no longer needed when using uv (uv resolves cleanly), but if Cognee changes its transitive dep tree, the install.sh belt-and-suspenders cleanup may need updating
@@ -7243,7 +7243,7 @@ The chain runs identically in both YAML+env and env-only modes (via `load(None)`
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `ImportError: No module named 'cognee_community_vector_adapter_qdrant'` at startup | The community Qdrant adapter package is not installed. `configure_cognee()` imports it at line 20. | `pip install cognee-community-vector-adapter-qdrant>=0.2.2` |
+| `ImportError: No module named 'cognee_community_vector_adapter_qdrant'` at startup | The community Qdrant adapter package is not installed. `configure_cognee()` imports it at line 20. | `pip install cognee-community-vector-adapter-qdrant==0.2.4` |
 | `cognee.cognify()` hangs indefinitely | (1) Model name without `openai/` prefix causes Cognee routing failure. (2) LLM endpoint unreachable -- Cognee's internal HTTP client may not have a timeout. (3) Cognee telemetry is trying to phone home and DNS resolution hangs. | (1) Add `openai/` prefix. (2) Fix endpoint. (3) Ensure `COGNEE_DISABLE_TELEMETRY=true` (set in `elephantbroker/__init__.py`). |
 | `cognee.search()` returns empty list for all query types | (1) No data has been stored yet. (2) Wrong dataset name (deployment fix section 32). (3) `cognee.cognify()` was never run (keyword and semantic search require it). | (1) Store data first. (2) Check that `RetrievalOrchestrator` uses `self._dataset_name` not `session_key`. (3) Run ingest pipeline which calls `cognee.add()` + `cognee.cognify()`. |
 
