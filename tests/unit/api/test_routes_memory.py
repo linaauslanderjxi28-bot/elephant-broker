@@ -1,7 +1,9 @@
 """Tests for memory routes."""
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from elephantbroker.runtime.memory.facade import MemoryStoreFacade
 from elephantbroker.runtime.memory.facade import DedupSkipped
 from elephantbroker.schemas.base import Scope
 from elephantbroker.schemas.fact import FactAssertion, MemoryClass
@@ -44,7 +46,61 @@ class TestMemoryRoutes:
         container.memory_store = None
         body = {"fact": {"text": "Test fact", "category": "general"}}
         r = await client.post("/memory/store", json=body)
-        assert r.status_code == 500
+        assert r.status_code == 503
+
+    async def test_store_fact_skips_embedding_health_probe(self, client, container):
+        fact = FactAssertion(text="stored without probe")
+        container.memory_store.store = AsyncMock(return_value=fact)
+
+        r = await client.post(
+            "/memory/store",
+            json={"fact": {"text": "stored without probe", "category": "general"}},
+        )
+
+        assert r.status_code == 200
+        container.embeddings.embed_text.assert_not_awaited()
+        assert isinstance(container.memory_store, MemoryStoreFacade)
+
+    async def test_store_degraded_dependency_returns_503_payload(self, client, container):
+        container.memory_store.store = AsyncMock(side_effect=RuntimeError("backend down"))
+
+        r = await client.post(
+            "/memory/store",
+            json={"fact": {"text": "backend failure", "category": "general"}},
+        )
+
+        assert r.status_code == 503
+        assert r.json() == {
+            "code": "memory_store_degraded",
+            "message": "Memory store dependency is degraded; retry later or use ingest-turn.",
+            "retryable": True,
+        }
+
+    async def test_store_permission_error_returns_403(self, client, container):
+        container.memory_store.store = AsyncMock(side_effect=PermissionError("wrong gateway"))
+
+        r = await client.post(
+            "/memory/store",
+            json={"fact": {"text": "cross tenant attempt", "category": "general"}},
+        )
+
+        assert r.status_code == 403
+        assert r.json() == {"detail": "wrong gateway"}
+
+    async def test_store_timeout_returns_503_payload(self, client, container):
+        container.memory_store.store = AsyncMock(side_effect=TimeoutError())
+
+        r = await client.post(
+            "/memory/store",
+            json={"fact": {"text": "timeout", "category": "general"}},
+        )
+
+        assert r.status_code == 503
+        assert r.json() == {
+            "code": "memory_store_degraded",
+            "message": "Memory store timed out; retry later or use ingest-turn.",
+            "retryable": True,
+        }
 
     async def test_search_with_max_results_zero(self, client):
         r = await client.post("/memory/search", json={"query": "test", "max_results": 0})
@@ -79,6 +135,53 @@ class TestMemoryRoutes:
             json={"query": "test", "profile_name": "coding", "auto_recall": True},
         )
         assert r.status_code == 200
+
+    async def test_search_degraded_header_when_embeddings_unavailable(self, client, container):
+        container.embeddings = None
+
+        r = await client.post("/memory/search", json={"query": "test"})
+
+        assert r.status_code == 200
+        assert r.json() == []
+        assert r.headers.get("x-eb-degraded") == "true"
+
+    async def test_search_degraded_header_on_retrieval_failure(self, client, container):
+        profile = SimpleNamespace(
+            retrieval=object(),
+            autorecall=SimpleNamespace(
+                retrieval=object(),
+                auto_recall_injection_top_k=5,
+                min_similarity=0.0,
+            ),
+        )
+        container.profile_registry.resolve_profile = AsyncMock(return_value=profile)
+        container.retrieval.retrieve_candidates = AsyncMock(side_effect=RuntimeError("retrieval down"))
+
+        r = await client.post(
+            "/memory/search",
+            json={"query": "test", "profile_name": "coding"},
+        )
+
+        assert r.status_code == 200
+        assert r.json() == []
+        assert r.headers.get("x-eb-degraded") == "true"
+
+    async def test_search_degraded_header_on_facade_failure(self, client, container):
+        container.memory_store.search = AsyncMock(side_effect=RuntimeError("facade down"))
+
+        r = await client.post("/memory/search", json={"query": "test"})
+
+        assert r.status_code == 200
+        assert r.json() == []
+        assert r.headers.get("x-eb-degraded") == "true"
+
+    async def test_search_permission_error_is_not_degraded(self, client, container):
+        container.memory_store.search = AsyncMock(side_effect=PermissionError("wrong gateway"))
+
+        r = await client.post("/memory/search", json={"query": "test"})
+
+        assert r.status_code == 403
+        assert r.json() == {"detail": "wrong gateway"}
 
     async def test_get_by_id_returns_fact(self, client, container):
         fact = FactAssertion(text="hello world")

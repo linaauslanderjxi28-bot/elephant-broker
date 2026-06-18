@@ -115,28 +115,13 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 except Exception as exc:
                     logger.warning("Dedup check failed, proceeding with store: %s", exc)
 
-            # Store via Cognee. Call cognee.add() first to capture the data_id,
-            # then persist the FactDataPoint with the captured id in a single
-            # add_data_points() MERGE. Rationale:
-            #   (a) avoids a double MERGE on the store hot path, and
-            #   (b) eliminates the partial-failure window where the graph node
-            #       existed with cognee_data_id=None — such a fact would
-            #       permanently orphan the cognee-owned artifacts on delete
-            #       because the cascade call had no data_id to pass.
             cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
-            # TODO-5-003 / TODO-5-211: explicit UUID coercion at capture. A
-            # malformed data_id must surface as a capture failure here so it
-            # never reaches the cascade parse (TODO-5-109) as a poisoned row.
-            # The except tuple includes ValueError so every shape AND every
-            # non-UUID-parseable value routes through _emit_capture_failure —
-            # one metric + DEGRADED_OPERATION trace regardless of which part
-            # of the capture failed.
-            # TODO-5-307: the captured id lives as a local string passed to
-            # FactDataPoint.from_schema(cognee_data_id=...) below — not on
-            # FactAssertion, which is pure semantic schema per layer hygiene.
             captured_data_id: str | None = None
             try:
-                raw_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
+                ingestion_info = getattr(cognee_add_result, "data_ingestion_info", None)
+                if not ingestion_info:
+                    raise AttributeError("missing data_ingestion_info")
+                raw_data_id = ingestion_info[0]["data_id"]
                 coerced = (
                     raw_data_id if isinstance(raw_data_id, uuid.UUID)
                     else uuid.UUID(str(raw_data_id))

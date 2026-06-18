@@ -15,6 +15,7 @@ from tests.fixtures.factories import make_fact_assertion
 class TestMemoryStoreFacade:
     def _make(self):
         graph = AsyncMock()
+        graph.get_entity = AsyncMock(return_value=None)
         vector = AsyncMock()
         embeddings = AsyncMock()
         embeddings.embed_text = AsyncMock(return_value=[0.1] * 1024)
@@ -359,6 +360,7 @@ class TestMemoryStoreFacadePhase4:
 
     def _make(self):
         graph = AsyncMock()
+        graph.get_entity = AsyncMock(return_value=None)
         vector = AsyncMock()
         embeddings = AsyncMock()
         embeddings.embed_text = AsyncMock(return_value=[0.1] * 1024)
@@ -1881,6 +1883,7 @@ class TestCogneeDataIdCaptureObservability:
 
     def _make(self):
         graph = AsyncMock()
+        graph.get_entity = AsyncMock(return_value=None)
         vector = AsyncMock()
         embeddings = AsyncMock()
         embeddings.embed_text = AsyncMock(return_value=[0.1] * 1024)
@@ -2263,7 +2266,7 @@ class TestCascadeCogneeDataGuards:
         assert mock_cognee.datasets.delete_data.await_count == 2
 
     # --- TD-Cognee-Qdrant-404 (Cluster Cfx) ---
-    # Cognee 0.5.3's delete_from_graph_and_vector calls
+    # Cognee 0.5.6's delete_from_graph_and_vector calls
     # vector_engine.delete_data_points without a has_collection guard.
     # When a Data row is added but never cognify()'d, the derived Qdrant
     # collection doesn't exist → 404 → UnexpectedResponse → outer
@@ -2466,6 +2469,7 @@ class TestCascadePointerPreservation:
 
     def _make(self, gateway_id: str = "gw-test"):
         graph = AsyncMock()
+        graph.get_entity = AsyncMock(return_value=None)
         vector = AsyncMock()
         embeddings = AsyncMock()
         embeddings.embed_text = AsyncMock(return_value=[0.1] * 1024)

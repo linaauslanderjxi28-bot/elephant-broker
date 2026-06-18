@@ -1,6 +1,7 @@
 """Memory routes."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 
@@ -119,10 +120,13 @@ async def store_fact(body: StoreRequest, request: Request):
     if _state_gw is not None:
         fact.gateway_id = _state_gw
     try:
-        result = await ms.store(
-            fact,
-            dedup_threshold=body.dedup_threshold,
-            profile_name=body.profile_name,
+        result = await asyncio.wait_for(
+            ms.store(
+                fact,
+                dedup_threshold=body.dedup_threshold,
+                profile_name=body.profile_name,
+            ),
+            timeout=30.0,
         )
     except DedupSkipped as e:
         return JSONResponse(
@@ -133,6 +137,28 @@ async def store_fact(body: StoreRequest, request: Request):
                 "existing_fact_id": e.existing_fact_id,
             },
         )
+    except TimeoutError:
+        logger.warning("memory/store degraded: timed out while storing fact_id=%s", fact.id)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "code": "memory_store_degraded",
+                "message": "Memory store timed out; retry later or use ingest-turn.",
+                "retryable": True,
+            },
+        )
+    except PermissionError as e:
+        return JSONResponse(status_code=403, content={"detail": str(e)})
+    except Exception as exc:
+        logger.warning("memory/store degraded: %s", exc, exc_info=True)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "code": "memory_store_degraded",
+                "message": "Memory store dependency is degraded; retry later or use ingest-turn.",
+                "retryable": True,
+            },
+        )
     return result.model_dump(mode="json")
 
 
@@ -140,6 +166,8 @@ async def store_fact(body: StoreRequest, request: Request):
 async def search_memory(body: SearchRequest, request: Request):
     container = get_container(request)
     ms = get_memory_store(request)
+    if not container.embeddings:
+        return JSONResponse(content=[], headers={"X-EB-Degraded": "true"})
     scope = Scope(body.scope) if body.scope else None
     mc = MemoryClass(body.memory_class) if body.memory_class else None
 
@@ -165,17 +193,26 @@ async def search_memory(body: SearchRequest, request: Request):
             min_score = body.min_score
 
         caller_gw = getattr(request.state, "gateway_id", "")
-        candidates = await container.retrieval.retrieve_candidates(
-            body.query,
-            policy=policy,
-            scope=body.scope,
-            actor_id=body.actor_id,
-            memory_class=mc,
-            session_key=body.session_key,
-            session_id=body.session_id,
-            auto_recall=body.auto_recall,
-            caller_gateway_id=caller_gw,
-        )
+        try:
+            candidates = await asyncio.wait_for(
+                container.retrieval.retrieve_candidates(
+                    body.query,
+                    policy=policy,
+                    scope=body.scope,
+                    actor_id=body.actor_id,
+                    memory_class=mc,
+                    session_key=body.session_key,
+                    session_id=body.session_id,
+                    auto_recall=body.auto_recall,
+                    caller_gateway_id=caller_gw,
+                ),
+                timeout=30.0,
+            )
+        except PermissionError as e:
+            return JSONResponse(status_code=403, content={"detail": str(e)})
+        except (TimeoutError, RuntimeError, ConnectionError, OSError) as exc:
+            logger.warning("memory/search degraded in retrieval path: %s", exc, exc_info=True)
+            return JSONResponse(content=[], headers={"X-EB-Degraded": "true"})
         # Return enriched results with score and source (TS SearchResult contract)
         results = []
         for c in candidates[:max_results]:
@@ -193,19 +230,28 @@ async def search_memory(body: SearchRequest, request: Request):
 
     # Fallback: simple facade search (no profile, no orchestrator)
     caller_gw = getattr(request.state, "gateway_id", "")
-    results = await ms.search(
-        body.query,
-        body.max_results,
-        body.min_score,
-        scope=scope,
-        actor_id=body.actor_id,
-        memory_class=mc,
-        session_key=body.session_key,
-        session_id=body.session_id,
-        profile_name=body.profile_name or "default",
-        auto_recall=body.auto_recall,
-        caller_gateway_id=caller_gw,
-    )
+    try:
+        results = await asyncio.wait_for(
+            ms.search(
+                body.query,
+                body.max_results,
+                body.min_score,
+                scope=scope,
+                actor_id=body.actor_id,
+                memory_class=mc,
+                session_key=body.session_key,
+                session_id=body.session_id,
+                profile_name=body.profile_name or "default",
+                auto_recall=body.auto_recall,
+                caller_gateway_id=caller_gw,
+            ),
+            timeout=30.0,
+        )
+    except PermissionError as e:
+        return JSONResponse(status_code=403, content={"detail": str(e)})
+    except (TimeoutError, RuntimeError, ConnectionError, OSError) as exc:
+        logger.warning("memory/search degraded in facade path: %s", exc, exc_info=True)
+        return JSONResponse(content=[], headers={"X-EB-Degraded": "true"})
     # Add score/source for TS SearchResult contract compatibility
     return [
         {**r.model_dump(mode="json"), "score": r.freshness_score or 0.5, "source": "hybrid"}
