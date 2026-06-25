@@ -11,6 +11,35 @@ from __future__ import annotations
 import sys
 
 import click
+import uuid
+
+# Robust monkey patch uuid.UUID to handle numeric values (floats, etc.) converted by database drivers
+_original_uuid_init = uuid.UUID.__init__
+def _patched_uuid_init(self, *args, **kwargs):
+    if len(args) > 0:
+        hex_val = args[0]
+        if hex_val is not None and not isinstance(hex_val, (str, bytes)):
+            try:
+                val = int(hex_val)
+                hex_str = f"{val:032x}"
+                if len(hex_str) > 32:
+                    hex_str = hex_str[-32:]
+                args = (hex_str,) + args[1:]
+            except Exception:
+                pass
+    elif "hex" in kwargs:
+        hex_val = kwargs["hex"]
+        if hex_val is not None and not isinstance(hex_val, (str, bytes)):
+            try:
+                val = int(hex_val)
+                hex_str = f"{val:032x}"
+                if len(hex_str) > 32:
+                    hex_str = hex_str[-32:]
+                kwargs["hex"] = hex_str
+            except Exception:
+                pass
+    _original_uuid_init(self, *args, **kwargs)
+uuid.UUID.__init__ = _patched_uuid_init
 
 
 @click.group()
