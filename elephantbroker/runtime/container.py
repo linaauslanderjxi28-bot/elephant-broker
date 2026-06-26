@@ -436,7 +436,14 @@ class RuntimeContainer:
             )
 
         if _enabled(tier, "IActorRegistry"):
-            c.actor_registry = ActorRegistry(c.graph, c.trace_ledger, dataset_name=dataset_name, gateway_id=gw_id)
+            pg_dsn = getattr(config, "postgres_dsn", "") or os.environ.get("EB_POSTGRES_DSN", "")
+            if pg_dsn:
+                from elephantbroker.runtime.adapters.postgres.actor_registry import PostgresActorRegistry
+                c.actor_registry = PostgresActorRegistry(dsn=pg_dsn, dataset_name=dataset_name, gateway_id=gw_id)
+                await c.actor_registry.init_db()
+                logger.info("ActorRegistry: using PostgreSQL backend")
+            else:
+                c.actor_registry = ActorRegistry(c.graph, c.trace_ledger, dataset_name=dataset_name, gateway_id=gw_id)
 
         if _enabled(tier, "IGoalManager"):
             c.goal_manager = GoalManager(c.graph, c.trace_ledger, dataset_name=dataset_name, gateway_id=gw_id)
@@ -754,8 +761,15 @@ class RuntimeContainer:
         from elephantbroker.runtime.profiles.authority_store import AuthorityRuleStore
         c.org_override_store = OrgOverrideStore(config.audit.org_overrides_db_path)
         await c.org_override_store.init_db()
-        c.authority_store = AuthorityRuleStore(config.audit.authority_rules_db_path)
-        await c.authority_store.init_db()
+        pg_dsn = getattr(config, "postgres_dsn", "") or os.environ.get("EB_POSTGRES_DSN", "")
+        if pg_dsn:
+            from elephantbroker.runtime.adapters.postgres.authority_store import PostgresAuthorityRuleStore
+            c.authority_store = PostgresAuthorityRuleStore(dsn=pg_dsn)
+            await c.authority_store.init_db()
+            logger.info("AuthorityRuleStore: using PostgreSQL backend")
+        else:
+            c.authority_store = AuthorityRuleStore(config.audit.authority_rules_db_path)
+            await c.authority_store.init_db()
 
         # Bootstrap detection is LAZY — checked on first admin API request
         # via GET /admin/bootstrap-status. This avoids opening a Neo4j

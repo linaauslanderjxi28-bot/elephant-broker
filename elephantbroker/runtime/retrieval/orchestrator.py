@@ -252,6 +252,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
             f"MATCH (f:FactDataPoint) WHERE {where} "
             "OPTIONAL MATCH (f)-[r]->(target) "
             "RETURN properties(f) AS props, collect({type: type(r), target: properties(target)}) AS relations "
+            "ORDER BY f.eb_created_at DESC "
             "LIMIT $limit"
         )
         records = await self._graph.query_cypher(cypher, params)
@@ -374,14 +375,32 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
             return candidates
         for item in hits:
             try:
+                props: dict | None = None
+                eb_id: str | None = None
                 if isinstance(item, dict):
                     eb_id = item.get("eb_id") or item.get("id")
                     if eb_id:
                         props = clean_graph_props(item)
-                        dp = FactDataPoint(**props)
-                        candidates.append(RetrievalCandidate(
-                            fact=dp.to_schema(), source=source, score=0.8,
-                        ))
+                elif hasattr(item, "eb_id"):
+                    # Handle Pydantic model / object-attribute returns from cognee
+                    # (e.g. DocumentChunk, FactDataPoint) that carry eb_id as an attribute
+                    eb_id = getattr(item, "eb_id", None)
+                    if not eb_id and hasattr(item, "id"):
+                        eb_id = str(getattr(item, "id"))
+                    if eb_id:
+                        if hasattr(item, "model_dump"):
+                            props = clean_graph_props(item.model_dump())
+                        elif hasattr(item, "__dict__"):
+                            props = clean_graph_props(item.__dict__)
+                        else:
+                            continue
+                else:
+                    continue
+                if eb_id and props:
+                    dp = FactDataPoint(**props)
+                    candidates.append(RetrievalCandidate(
+                        fact=dp.to_schema(), source=source, score=0.8,
+                    ))
             except Exception:
                 continue
         return candidates

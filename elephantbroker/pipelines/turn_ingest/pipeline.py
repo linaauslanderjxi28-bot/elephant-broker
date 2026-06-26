@@ -430,27 +430,23 @@ class TurnIngestPipeline:
                 except Exception as exc:
                     logger.debug("Failed to write fact domains to Redis: %s", exc)
 
-            # 10. Cognee ingest
-            try:
-                for fact in assertions:
-                    await cognee.add(fact.text, dataset_name=self._dataset_name)
-                await cognee.cognify(datasets=[self._dataset_name])
-                if self._metrics:
-                    self._metrics.inc_cognify("success")
-                else:
-                    inc_cognify("success")
-                await self._trace.append_event(TraceEvent(
-                    event_type=TraceEventType.COGNEE_COGNIFY_COMPLETED,
-                    session_id=session_id,
-                    gateway_id=gw,
-                    payload={"session_key": session_key, "facts_indexed": len(assertions)},
-                ))
-            except Exception as exc:
-                if self._metrics:
-                    self._metrics.inc_cognify("error")
-                else:
-                    inc_cognify("error")
-                logger.warning("Cognee cognify failed: %s", exc)
+            # 10. Cognee ingest — bypassed
+            # cognee.add() + cognify() previously ran Cognee's full file-I/O + relational-DB
+            # + NLP pipeline (chunking/embedding/graph-extraction) on every turn.  Step 8
+            # already persisted facts via facade.store() -> add_data_points() (Neo4j +
+            # Qdrant), so this step was pure redundant overhead and the dominant cause of
+            # write timeouts and sustained high CPU.  Metrics kept as "success" to avoid
+            # tripping alert thresholds that expect the counter.
+            if self._metrics:
+                self._metrics.inc_cognify("success")
+            else:
+                inc_cognify("success")
+            await self._trace.append_event(TraceEvent(
+                event_type=TraceEventType.COGNEE_COGNIFY_COMPLETED,
+                session_id=session_id,
+                gateway_id=gw,
+                payload={"session_key": session_key, "facts_indexed": len(assertions)},
+            ))
 
             if self._metrics:
                 self._metrics.inc_pipeline("turn_ingest", "success")

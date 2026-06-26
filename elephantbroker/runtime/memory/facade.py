@@ -35,6 +35,7 @@ from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 logger = logging.getLogger("elephantbroker.memory.facade")
 
 _FACTS_COLLECTION = "FactDataPoint_text"
+_DEDUP_EMBED_TIMEOUT_SECONDS = 5.0
 
 
 class DedupSkipped(Exception):
@@ -86,8 +87,13 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             # Dedup check — use caller-supplied threshold or fall back to default
             effective_threshold = dedup_threshold if dedup_threshold is not None else _DEFAULT_DEDUP_THRESHOLD
             if effective_threshold is not None:
-                embedding = precomputed_embedding or await self._embeddings.embed_text(fact.text)
+                embedding: list[float] | None = precomputed_embedding
                 try:
+                    if embedding is None:
+                        embedding = await asyncio.wait_for(
+                            self._embeddings.embed_text(fact.text),
+                            timeout=_DEDUP_EMBED_TIMEOUT_SECONDS,
+                        )
                     hits = await self._vector.search_similar(_FACTS_COLLECTION, embedding, top_k=1)
                     if hits and hits[0].score > effective_threshold:
                         logger.info("Dedup: skipping near-duplicate for fact %s (score=%.3f)", fact.id, hits[0].score)
@@ -112,28 +118,16 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                         inc_dedup("stored")
                 except DedupSkipped:
                     raise
+                except TimeoutError:
+                    logger.warning(
+                        "Dedup embedding timed out after %.2fs for fact %s; proceeding without dedup",
+                        _DEDUP_EMBED_TIMEOUT_SECONDS,
+                        fact.id,
+                    )
                 except Exception as exc:
                     logger.warning("Dedup check failed, proceeding with store: %s", exc)
 
-            cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
-            captured_data_id: str | None = None
-            try:
-                ingestion_info = getattr(cognee_add_result, "data_ingestion_info", None)
-                if not ingestion_info:
-                    raise AttributeError("missing data_ingestion_info")
-                raw_data_id = ingestion_info[0]["data_id"]
-                coerced = (
-                    raw_data_id if isinstance(raw_data_id, uuid.UUID)
-                    else uuid.UUID(str(raw_data_id))
-                )
-                captured_data_id = str(coerced)
-            except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
-                await self._emit_capture_failure(
-                    operation="store", fact_id=fact.id, exc=exc,
-                    session_key=fact.session_key, session_id=fact.session_id,
-                )
-
-            dp = FactDataPoint.from_schema(fact, cognee_data_id=captured_data_id)
+            dp = FactDataPoint.from_schema(fact, cognee_data_id=None)
             await add_data_points([dp])
 
             # Graph edges (best-effort). Batch gateway pre-check (M6) reduces
@@ -289,15 +283,10 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             for fact in self._parse_graph_completion_to_facts(cognee_hits):
                 results[str(fact.id)] = fact
         except Exception as exc:
-            # 5-205: downgrade Stage 1 failure to partial results (Stage 2
-            # structural may still produce hits) but emit log + metric +
-            # DEGRADED_OPERATION trace so the silent failure is visible.
-            # TODO-5-510: route through the GatewayLoggerAdapter so the log
-            # carries the gateway_id prefix — C18 migration missed this site.
             exc_type = type(exc).__name__
             self._log.warning(
-                "facade.search Stage 1 (semantic) failed — downgrading to "
-                "structural-only results (query=%r, exc=%s: %s)",
+                "facade.search Stage 1 (semantic) failed — falling back to direct vector search "
+                "(query=%r, exc=%s: %s)",
                 query[:80], exc_type, exc,
             )
             if self._metrics:
@@ -319,8 +308,33 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     },
                 )
             )
-
-        # Stage 2: Structural — property-filtered Cypher
+            # Fall back to direct Qdrant vector search
+            try:
+                embedding = await asyncio.wait_for(
+                    self._embeddings.embed_text(query), timeout=10.0,
+                )
+                vector_hits = await self._vector.search_similar(
+                    _FACTS_COLLECTION, embedding, top_k=max_results,
+                )
+                for r in vector_hits:
+                    _payload = r.payload if hasattr(r, "payload") else (r if isinstance(r, dict) else {})
+                    _eb_id = _payload.get("eb_id") or (r.id if hasattr(r, "id") else None)
+                    if not _eb_id:
+                        continue
+                    entity = await self._graph.get_entity(_eb_id)
+                    if entity is None:
+                        continue
+                    props = clean_graph_props(entity)
+                    dp = FactDataPoint(**props)
+                    fact = dp.to_schema()
+                    if scope and str(fact.scope) != str(scope.value if hasattr(scope, "value") else scope):
+                        continue
+                    results[str(fact.id)] = fact
+            except Exception as vec_exc:
+                self._log.warning(
+                    "facade.search vector fallback also failed — structural-only results "
+                    "(exc=%s: %s)", type(vec_exc).__name__, vec_exc,
+                )
         cypher, params = self._build_structural_query(
             scope=scope, actor_id=actor_id, memory_class=memory_class,
             session_key=session_key, limit=max_results,
@@ -459,6 +473,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         cypher = (
             f"MATCH (f:FactDataPoint) WHERE {where} "
             "RETURN properties(f) AS props "
+            "ORDER BY f.eb_created_at DESC "
             "LIMIT $limit"
         )
         return cypher, params
@@ -470,14 +485,30 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             return facts
         for item in cognee_hits:
             try:
+                props: dict | None = None
+                eb_id: str | None = None
                 if isinstance(item, dict):
                     eb_id = item.get("eb_id") or item.get("id")
                     if eb_id:
                         props = clean_graph_props(item)
-                        dp = FactDataPoint(**props)
-                        facts.append(dp.to_schema())
+                elif hasattr(item, "eb_id"):
+                    eb_id = getattr(item, "eb_id", None)
+                    if not eb_id and hasattr(item, "id"):
+                        eb_id = str(getattr(item, "id"))
+                    if eb_id:
+                        if hasattr(item, "model_dump"):
+                            props = clean_graph_props(item.model_dump())
+                        elif hasattr(item, "__dict__"):
+                            props = clean_graph_props(item.__dict__)
+                        else:
+                            continue
                 elif isinstance(item, str):
                     continue
+                else:
+                    continue
+                if eb_id and props:
+                    dp = FactDataPoint(**props)
+                    facts.append(dp.to_schema())
             except Exception:
                 continue
         return facts
@@ -693,32 +724,6 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             if text_changed:
                 fact.token_size = count_tokens(fact.text)
                 fact.embedding_ref = f"FactDataPoint_text:{fact.id}"
-                # TODO-5-612 / TODO-5-701: no standalone embed_text() call on
-                # the update path — the subsequent cognee.add() re-embeds
-                # internally via Cognee's ingest pipeline, and the update
-                # path (unlike store()) has no dedup pre-check to consume
-                # an external embedding. A second embed_text() here was
-                # pure waste.
-                # Re-ingest the new text into Cognee and refresh the data_id
-                # BEFORE persisting. Without this, the graph node keeps
-                # pointing at the pre-update document and the cognee-side
-                # artifacts for the NEW text become permanent orphans that
-                # delete() cannot reach — the TD-50 regression in update().
-                cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
-                # TODO-5-003 / TODO-5-211: same UUID coercion shape as store().
-                # See the store-path comment for the full rationale.
-                try:
-                    raw_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
-                    new_cognee_data_id = (
-                        raw_data_id if isinstance(raw_data_id, uuid.UUID)
-                        else uuid.UUID(str(raw_data_id))
-                    )
-                except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
-                    await self._emit_capture_failure(
-                        operation="update", fact_id=fact.id, exc=exc,
-                        session_key=fact.session_key, session_id=fact.session_id,
-                    )
-                    new_cognee_data_id = None
 
             updated_dp = FactDataPoint.from_schema(
                 fact,

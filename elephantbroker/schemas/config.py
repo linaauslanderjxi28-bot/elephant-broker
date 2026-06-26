@@ -587,6 +587,7 @@ ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
     # --- Working set scoring ---
     ("EB_SCORING_SNAPSHOT_TTL", "scoring.snapshot_ttl_seconds", "int"),
     ("EB_SESSION_GOALS_TTL", "scoring.session_goals_ttl_seconds", "int"),
+    ("EB_POSTGRES_DSN", "postgres_dsn", "str"),
 
     # --- HITL ---
     # F10 (TODO-3-608): same fix as EB_RERANKER_ENABLED — operators need a
@@ -742,6 +743,7 @@ class ElephantBrokerConfig(_StrictBase):
     consolidation_min_retention_seconds: int = Field(default=172800, ge=3600)
     # Phase 8 config sections
     profile_cache: ProfileCacheConfig = Field(default_factory=ProfileCacheConfig)
+    postgres_dsn: str = ""
     # F4 (TODO-3-009): consolidation was previously a `@property` that read
     # EB_DEV_CONSOLIDATION_AUTO_TRIGGER + EB_CONSOLIDATION_BATCH_SIZE directly
     # from os.environ on first access and cached the result. That created two
