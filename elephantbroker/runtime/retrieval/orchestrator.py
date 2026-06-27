@@ -213,6 +213,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         self, *, scope: str | None = None, actor_id: str | None = None,
         goal_ids: list[str] | None = None,
         memory_class: MemoryClass | None = None, session_key: str | None = None,
+        entity_type: str | None = None,
         limit: int = 20,
         auto_recall: bool = False,
         caller_gateway_id: str = "",
@@ -240,6 +241,9 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         if goal_ids:
             conditions.append("ANY(gid IN f.goal_ids WHERE gid IN $goal_ids)")
             params["goal_ids"] = goal_ids
+        if entity_type:
+            conditions.append("f.entity_type = $entity_type")
+            params["entity_type"] = entity_type
         if memory_class:
             conditions.append("f.memory_class = $memory_class")
             params["memory_class"] = memory_class.value if hasattr(memory_class, "value") else str(memory_class)

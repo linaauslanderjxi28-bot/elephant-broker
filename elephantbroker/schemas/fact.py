@@ -64,6 +64,10 @@ class FactAssertion(BaseModel):
     goal_relevance_tags: dict[str, str] = Field(default_factory=dict)
     gateway_id: str = ""
     decision_domain: str | None = None
+    entity_type: str | None = None
+    entity_name: str | None = None
+    quality_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    decision_status: str | None = None
     archived: bool = False
     autorecall_blacklisted: bool = False
 

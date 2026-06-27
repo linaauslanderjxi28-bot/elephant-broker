@@ -51,6 +51,19 @@ INSTRUCTIONS:
 - source_turns = indices of new messages that contribute to this fact
 - Return at most {max_facts} facts. Return {{"facts": [], "goal_status_hints": []}} if nothing worth extracting.
 
+FILTERING RULES — skip these, they are NOT facts worth storing:
+- Meta-conversation: "user asked about X", "user is questioning Y", "user inquired about Z"
+- Transient task status: "current task is...", "the remaining tasks are...", "user is working on..."
+- Tool debugging: "user checked the status of...", "user verified the script..."
+- System self-reference: anything about the agent itself, the update process, or notification system
+- Redundant summaries: if a previous fact already covers the same ground, supersede it
+
+Only extract facts that represent durable knowledge:
+- Domain knowledge (technical decisions, architecture choices, preferences)
+- Verified outcomes (code changes confirmed, bugs fixed, features built)
+- User preferences and constraints that guide future behavior
+- Decisions with lasting impact (not "decided to check logs")
+
 Return ONLY valid JSON matching the schema. Do not add commentary.\
 """
 

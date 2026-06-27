@@ -249,6 +249,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         self, query: str, max_results: int = 20, min_score: float = 0.0,
         scope: Scope | None = None, actor_id: str | None = None,
         memory_class: MemoryClass | None = None, session_key: str | None = None,
+        entity_type: str | None = None,
         session_id: str | None = None,
         profile_name: str = "default", auto_recall: bool = False,
         caller_gateway_id: str = "",
@@ -442,6 +443,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
     def _build_structural_query(
         self, scope: Scope | None = None, actor_id: str | None = None,
         memory_class: MemoryClass | None = None, session_key: str | None = None,
+        entity_type: str | None = None,
         limit: int = 100, caller_gateway_id: str = "",
     ) -> tuple[str | None, dict]:
         """Build Cypher for property-filtered structural lookup."""
@@ -454,6 +456,9 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         if actor_id:
             conditions.append("f.source_actor_id = $actor_id")
             params["actor_id"] = actor_id
+        if entity_type:
+            conditions.append("f.entity_type = $entity_type")
+            params["entity_type"] = entity_type
         if memory_class:
             conditions.append("f.memory_class = $memory_class")
             params["memory_class"] = memory_class.value if hasattr(memory_class, "value") else str(memory_class)
@@ -1094,6 +1099,9 @@ class MemoryStoreFacade(IMemoryStoreFacade):
     ) -> list[FactAssertion]:
         conditions = ["f.scope = $scope", "f.gateway_id = $gateway_id"]
         params: dict = {"scope": scope.value, "limit": limit, "gateway_id": self._gateway_id}
+        if entity_type:
+            conditions.append("f.entity_type = $entity_type")
+            params["entity_type"] = entity_type
         if memory_class:
             conditions.append("f.memory_class = $memory_class")
             params["memory_class"] = memory_class.value

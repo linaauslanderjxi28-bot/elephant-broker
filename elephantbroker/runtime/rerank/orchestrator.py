@@ -18,6 +18,26 @@ from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 logger = logging.getLogger("elephantbroker.runtime.rerank.orchestrator")
 
 _WORD_RE = re.compile(r"\w+")
+_CJK_RE = re.compile(r"[一-鿿㐀-䶿]+")
+
+try:
+    import jieba
+    _JIEBA_AVAILABLE = True
+except ImportError:
+    _JIEBA_AVAILABLE = False
+
+
+def _tokenize(text: str) -> set[str]:
+    tokens: set[str] = set(t.lower() for t in _WORD_RE.findall(text))
+    for cjk_span in _CJK_RE.finditer(text):
+        cjk = cjk_span.group()
+        if _JIEBA_AVAILABLE and len(cjk) > 1:
+            tokens.update(jieba.cut(cjk))
+        else:
+            for i in range(len(cjk)):
+                tokens.add(cjk[i:i + 2])
+                tokens.add(cjk[i])
+    return tokens
 
 
 class RerankOrchestrator(IRerankOrchestrator):
@@ -95,14 +115,14 @@ class RerankOrchestrator(IRerankOrchestrator):
         if len(candidates) <= max_candidates:
             return list(candidates)
 
-        query_tokens = set(_WORD_RE.findall(query.lower()))
+        query_tokens = _tokenize(query)
         if not query_tokens:
             candidates.sort(key=lambda c: c.score, reverse=True)
             return candidates[:max_candidates]
 
         scored: list[tuple[float, RetrievalCandidate]] = []
         for c in candidates:
-            item_tokens = set(_WORD_RE.findall(c.fact.text.lower()))
+            item_tokens = _tokenize(c.fact.text)
             overlap = len(query_tokens & item_tokens) / max(len(query_tokens), 1)
             blended = overlap * 0.5 + c.score * 0.5
             scored.append((blended, c))

@@ -48,6 +48,10 @@ class FactDataPoint(DataPoint):
     eb_id: str = ""
     gateway_id: str = ""
     decision_domain: str | None = None
+    entity_type: str | None = None
+    entity_name: str | None = None
+    quality_score: float | None = None
+    decision_status: str | None = None
     archived: bool = False
     autorecall_blacklisted: bool = False
     cognee_data_id: str | None = None
@@ -89,6 +93,10 @@ class FactDataPoint(DataPoint):
             eb_id=str(fact.id),
             gateway_id=getattr(fact, "gateway_id", ""),
             decision_domain=getattr(fact, "decision_domain", None),
+            entity_type=getattr(fact, "entity_type", None),
+            entity_name=getattr(fact, "entity_name", None),
+            quality_score=getattr(fact, "quality_score", None),
+            decision_status=getattr(fact, "decision_status", None),
             archived=getattr(fact, "archived", False),
             autorecall_blacklisted=getattr(fact, "autorecall_blacklisted", False),
             cognee_data_id=cognee_data_id,
@@ -116,6 +124,10 @@ class FactDataPoint(DataPoint):
             token_size=self.token_size,
             gateway_id=self.gateway_id,
             decision_domain=self.decision_domain,
+            entity_type=self.entity_type,
+            entity_name=self.entity_name,
+            quality_score=self.quality_score,
+            decision_status=self.decision_status,
             archived=self.archived,
             autorecall_blacklisted=self.autorecall_blacklisted,
         )
