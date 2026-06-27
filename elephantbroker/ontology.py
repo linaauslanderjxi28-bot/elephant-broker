@@ -143,6 +143,95 @@ class ResearchDecision:
 
 
 # ================================================================
+# B2B Entity Types — Foreign Trade Customer Acquisition
+# ================================================================
+
+class Prospect:
+    """A potential overseas buyer."""
+    entity_type = "Prospect"
+
+    def __init__(self, company: str, industry: str = "",
+                 source: str = "", contact_name: str = "",
+                 email: str = "", phone: str = "",
+                 importing: list[str] | None = None,
+                 status: str = "new"):
+        self.company = company
+        self.industry = industry
+        self.source = source
+        self.contact_name = contact_name
+        self.email = email
+        self.phone = phone
+        self.importing = importing or []
+        self.status = status
+
+    def to_fact(self) -> dict:
+        return _make_fact(
+            text=json.dumps({"company":self.company,"industry":self.industry,"source":self.source,
+                "contact":self.contact_name,"email":self.email,"phone":self.phone,
+                "importing":self.importing,"status":self.status}, ensure_ascii=False),
+            category="prospect", entity_type=self.entity_type, entity_name=self.company,
+            confidence=0.8, decision_status=self.status,
+        )
+
+
+class CustomsRecord:
+    """A customs import/export record from UN Comtrade or similar API."""
+    entity_type = "CustomsRecord"
+
+    def __init__(self, buyer: str, hs_code: str = "", product_desc: str = "",
+                 volume_kg: float = 0, value_usd: float = 0,
+                 period: str = "", country: str = "", source_api: str = "UN_Comtrade"):
+        self.buyer = buyer
+        self.hs_code = hs_code
+        self.product_desc = product_desc
+        self.volume_kg = volume_kg
+        self.value_usd = value_usd
+        self.period = period
+        self.country = country
+        self.source_api = source_api
+
+    def to_fact(self) -> dict:
+        return _make_fact(
+            text=json.dumps({"buyer":self.buyer,"hs_code":self.hs_code,
+                "product":self.product_desc,"volume_kg":self.volume_kg,
+                "value_usd":self.value_usd,"period":self.period,
+                "country":self.country,"source":self.source_api}, ensure_ascii=False),
+            category="customs_data", entity_type=self.entity_type, entity_name=self.buyer,
+            confidence=0.95,
+        )
+
+
+class Deal:
+    """A B2B deal in the pipeline."""
+    entity_type = "Deal"
+
+    def __init__(self, buyer_company: str, product: str = "",
+                 amount: float = 0, currency: str = "USD",
+                 probability: float = 0.5, stage: str = "new",
+                 linked_prospects: list[str] | None = None,
+                 notes: str = ""):
+        self.buyer_company = buyer_company
+        self.product = product
+        self.amount = amount
+        self.currency = currency
+        self.probability = probability
+        self.stage = stage  # new/negotiating/won/lost
+        self.linked_prospects = linked_prospects or []
+        self.notes = notes
+
+    def to_fact(self) -> dict:
+        return _make_fact(
+            text=json.dumps({"buyer":self.buyer_company,"product":self.product,
+                "amount":self.amount,"currency":self.currency,
+                "probability":self.probability,"stage":self.stage,"notes":self.notes},
+                ensure_ascii=False),
+            category="deal", entity_type=self.entity_type, entity_name=self.buyer_company,
+            confidence=self.probability, decision_status=self.stage,
+            goal_ids=self.linked_prospects,
+        )
+
+
+# ================================================================
 # Pipeline: Trends → Products → Suppliers → Decisions
 # ================================================================
 
