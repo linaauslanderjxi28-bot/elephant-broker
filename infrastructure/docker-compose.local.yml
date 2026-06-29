@@ -11,6 +11,12 @@ services:
       NEO4J_PLUGINS: '["apoc"]'
     volumes:
       - /home/openclaw/docker/eb_infra/neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   qdrant:
     restart: unless-stopped
@@ -21,6 +27,12 @@ services:
       - "16334:6334"
     volumes:
       - /home/openclaw/docker/eb_infra/qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   redis:
     restart: unless-stopped
@@ -30,6 +42,12 @@ services:
       - "16379:6379"
     volumes:
       - /home/openclaw/docker/eb_infra/redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # Phase 9: Observability stack (optional — for ClickHouse analytics + OTEL log export)
   otel-collector:
@@ -59,6 +77,12 @@ services:
       - /home/openclaw/docker/eb_infra/clickhouse_data:/var/lib/clickhouse
     profiles:
       - observability
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   jaeger:
     restart: unless-stopped
@@ -79,6 +103,12 @@ services:
       - "13000:3000"
     profiles:
       - observability
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   minio:
     restart: unless-stopped
@@ -94,6 +124,12 @@ services:
     volumes:
       - /home/openclaw/docker/eb_infra/minio_data:/data
     command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   minio-setup:
     image: minio/mc:latest
@@ -121,6 +157,12 @@ services:
       POSTGRES_PASSWORD: ${EB_POSTGRES_PASSWORD:?set EB_POSTGRES_PASSWORD}
     volumes:
       - /home/openclaw/docker/eb_infra/structured_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openclaw -d structured_data"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   gitea:
     image: gitea/gitea:latest
@@ -137,6 +179,12 @@ services:
     ports:
       - "18080:3000"
       - "13022:22"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   searxng:
     image: searxng/searxng:latest
@@ -148,4 +196,9 @@ services:
       - /home/openclaw/docker/searxng/settings.yml:/etc/searxng/settings.yml:ro
     environment:
       - SEARXNG_BASE_URL=http://192.168.199.80:8888/
-
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s

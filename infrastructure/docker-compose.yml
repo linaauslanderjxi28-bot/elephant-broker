@@ -11,6 +11,12 @@ services:
       NEO4J_PLUGINS: '["apoc"]'
     volumes:
       - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   qdrant:
     restart: unless-stopped
@@ -20,6 +26,12 @@ services:
       - "16334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   redis:
     restart: unless-stopped
@@ -28,6 +40,12 @@ services:
       - "16379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # Phase 9: Observability stack (optional — for ClickHouse analytics + OTEL log export)
   otel-collector:
@@ -58,6 +76,12 @@ services:
       - clickhouse_data:/var/lib/clickhouse
     profiles:
       - observability
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   jaeger:
     restart: unless-stopped
@@ -78,6 +102,12 @@ services:
       - "13000:3000"
     profiles:
       - observability
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   # ElephantBroker runtime runs natively via Python venv (not containerized).
   # See docs/DEPLOYMENT.md for setup instructions.
