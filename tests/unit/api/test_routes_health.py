@@ -22,7 +22,7 @@ class TestHealthRoutes:
         r = await client.get("/health/ready")
         data = r.json()
         assert "checks" in data
-        for component in ["neo4j", "qdrant", "embedding", "llm"]:
+        for component in ["neo4j", "qdrant", "embedding", "llm", "reranker"]:
             assert component in data["checks"], f"Missing check for {component}"
             assert "status" in data["checks"][component], f"Missing status key for {component}"
 
@@ -182,6 +182,22 @@ class TestHealthRoutes:
         assert data["ready"] is True
         assert data["checks"]["embedding"]["status"] == "not configured"
         assert data["checks"]["llm"]["status"] == "not configured"
+
+    async def test_ready_reranker_failure_logs_warning_and_reports_error(self, client, container, caplog):
+        container.rerank.health_check = AsyncMock(side_effect=ConnectionError("reranker down"))
+        with caplog.at_level(logging.WARNING, logger="elephantbroker.api.routes.health"):
+            r = await client.get("/health/ready")
+        data = r.json()
+        assert r.status_code == 503
+        assert data["checks"]["reranker"]["status"] == "error"
+        assert "reranker down" in data["checks"]["reranker"]["error"]
+        assert "Reranker health check failed: reranker down" in caplog.text
+
+    async def test_ready_reranker_probe_cached_within_ttl(self, client, container):
+        container.rerank.health_check = AsyncMock(return_value={"status": "ok"})
+        await client.get("/health/ready")
+        await client.get("/health/ready")
+        assert container.rerank.health_check.await_count == 1
 
     async def test_llm_probe_cache_caps_at_100_entries(self):
         """L2: _llm_probe_cache clears when exceeding 100 entries."""

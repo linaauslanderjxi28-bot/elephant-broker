@@ -33,6 +33,7 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 _llm_probe_cache: dict[str, tuple[float, dict]] = {}
 _embedding_probe_cache: dict[str, tuple[float, dict]] = {}
+_reranker_probe_cache: dict[str, tuple[float, dict]] = {}
 _PROBE_TTL_SEC = 60.0
 _PROBE_CACHE_MAX = 100
 _LLM_PROBE_TTL_SEC = _PROBE_TTL_SEC
@@ -133,6 +134,35 @@ async def ready(request: Request):
             checks["llm"] = llm_check
     else:
         checks["llm"] = {"status": "not configured"}
+
+    reranker = getattr(container, "rerank", None)
+    if reranker:
+        gw_id_reranker = container.gateway_id
+        now_reranker = time.monotonic()
+        cached_reranker = _reranker_probe_cache.get(gw_id_reranker)
+        if cached_reranker is not None and (now_reranker - cached_reranker[0]) < _PROBE_TTL_SEC:
+            checks["reranker"] = cached_reranker[1]
+        else:
+            t0 = time.monotonic()
+            try:
+                reranker_result = await reranker.health_check()
+                reranker_check = {
+                    **reranker_result,
+                    "latency_ms": round((time.monotonic() - t0) * 1000, 2),
+                }
+            except Exception as exc:
+                logger.warning("%s health check failed: %s", "Reranker", exc)
+                reranker_check = {
+                    "status": "error",
+                    "latency_ms": round((time.monotonic() - t0) * 1000, 2),
+                    "error": str(exc),
+                }
+            if len(_reranker_probe_cache) > _PROBE_CACHE_MAX:
+                _reranker_probe_cache.clear()
+            _reranker_probe_cache[gw_id_reranker] = (now_reranker, reranker_check)
+            checks["reranker"] = reranker_check
+    else:
+        checks["reranker"] = {"status": "not configured"}
 
     all_ok = all(c.get("status") in ("ok", "not configured") for c in checks.values())
     # R2-P4 / #11 RESOLVED: return HTTP 503 when any sub-check fails so

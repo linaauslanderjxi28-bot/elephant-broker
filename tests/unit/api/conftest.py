@@ -149,9 +149,11 @@ def _clear_health_probe_caches():
     from elephantbroker.api.routes import health as _health_module
     _health_module._llm_probe_cache.clear()
     _health_module._embedding_probe_cache.clear()
+    _health_module._reranker_probe_cache.clear()
     yield
     _health_module._llm_probe_cache.clear()
     _health_module._embedding_probe_cache.clear()
+    _health_module._reranker_probe_cache.clear()
 
 
 @pytest.fixture(autouse=True)

@@ -43,3 +43,7 @@ class IRerankOrchestrator(ABC):
     async def dedup_safe(self, candidates: list[RetrievalCandidate]) -> list[RetrievalCandidate]:
         """Remove exact duplicates without merging."""
         ...
+
+    @abstractmethod
+    async def health_check(self) -> dict[str, str]:
+        ...

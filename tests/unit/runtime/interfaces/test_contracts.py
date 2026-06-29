@@ -63,7 +63,7 @@ EXPECTED_METHODS = {
     "IRedLineGuardEngine": ["preflight_check", "reinject_constraints", "get_guard_history", "load_session_rules", "unload_session"],
     "IToolArtifactStore": ["store_artifact", "search_artifacts", "get_by_hash"],
     "IRetrievalOrchestrator": ["retrieve_candidates", "get_exact_hits", "get_semantic_hits"],
-    "IRerankOrchestrator": ["rerank", "cheap_prune", "cross_encoder_rerank", "merge_duplicates", "dedup_safe"],
+        "IRerankOrchestrator": ["rerank", "cheap_prune", "cross_encoder_rerank", "merge_duplicates", "dedup_safe", "health_check"],
     "IStatsAndTelemetryEngine": ["record_injection", "record_use", "get_stats_by_profile"],
     "IConsolidationEngine": ["run_consolidation", "get_consolidation_report", "run_stage"],
     "IProfileRegistry": ["resolve_profile", "get_effective_policy", "get_scoring_weights"],

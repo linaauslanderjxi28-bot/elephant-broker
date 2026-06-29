@@ -285,6 +285,22 @@ class RerankOrchestrator(IRerankOrchestrator):
                 deduped.append(c)
         return deduped
 
+    async def health_check(self) -> dict[str, str]:
+        if not self._reranker_config.enabled:
+            return {"status": "not configured"}
+        client = await self._get_http_client()
+        response = await client.post(
+            f"{self._reranker_config.endpoint}/v1/rerank",
+            json={
+                "model": self._reranker_config.model,
+                "query": "health check",
+                "documents": ["health check"],
+                "top_n": 1,
+            },
+        )
+        response.raise_for_status()
+        return {"status": "ok"}
+
     async def close(self) -> None:
         """Close the httpx client."""
         if self._http_client is not None:
