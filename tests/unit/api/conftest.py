@@ -25,6 +25,7 @@ from elephantbroker.runtime.stats.engine import StatsAndTelemetryEngine
 from elephantbroker.runtime.trace.ledger import TraceLedger
 from elephantbroker.runtime.working_set.manager import WorkingSetManager
 from elephantbroker.runtime.working_set.scoring_tuner import ScoringTuner
+from elephantbroker.schemas.config import ElephantBrokerConfig, GatewayConfig
 from elephantbroker.schemas.tiers import BusinessTier
 
 
@@ -58,6 +59,7 @@ def mock_embeddings():
 @pytest.fixture
 def container(mock_graph, mock_vector, mock_embeddings):
     c = RuntimeContainer()
+    c.config = ElephantBrokerConfig(gateway=GatewayConfig(gateway_id="local"))
     c.tier = BusinessTier.FULL
     c.graph = mock_graph
     c.vector = mock_vector
@@ -75,6 +77,7 @@ def container(mock_graph, mock_vector, mock_embeddings):
     c.artifact_store = ToolArtifactStore(mock_graph, mock_vector, mock_embeddings, c.trace_ledger, dataset_name="test")
     c.retrieval = RetrievalOrchestrator(mock_vector, mock_graph, mock_embeddings, c.trace_ledger, dataset_name="test")
     c.rerank = RerankOrchestrator(c.trace_ledger)
+    c.rerank.health_check = AsyncMock(return_value={"status": "ok"})
     c.working_set_manager = WorkingSetManager(c.retrieval, c.trace_ledger)
     c.context_assembler = ContextAssembler(c.working_set_manager, c.trace_ledger)
     c.compaction_engine = CompactionEngine(c.trace_ledger)

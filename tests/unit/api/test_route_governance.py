@@ -79,6 +79,8 @@ COMPUTE_OR_READLIKE_POST_ROUTES = {
     "memory.py:post:/search",
     "memory.py:post:/sync",
     "memory.py:post:/promote",
+    "memory.py:post:/promote-class",
+    "memory.py:post:/promote-scope",
     "rerank.py:post:/",
     "trace.py:post:/query",
     "working_set.py:post:/build",
