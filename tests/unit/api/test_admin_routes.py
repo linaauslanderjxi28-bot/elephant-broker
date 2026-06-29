@@ -252,6 +252,21 @@ class TestAdminRoutes:
         )
         assert resp.status_code == 403
 
+    async def test_update_global_goal_requires_90(self, admin_client):
+        client, c, _, low = admin_client
+        goal_id = uuid.uuid4()
+        c.graph.get_entity = AsyncMock(return_value={"scope": "global"})
+        c.goal_manager.update_goal_status = AsyncMock()
+
+        resp = await client.put(
+            f"/admin/goals/{goal_id}",
+            json={"status": "completed"},
+            headers={"X-EB-Actor-Id": str(low.id)},
+        )
+
+        assert resp.status_code == 403
+        c.goal_manager.update_goal_status.assert_not_awaited()
+
     async def test_set_profile_override(self, admin_client):
         client, c, admin, _ = admin_client
         org_id = str(admin.org_id)

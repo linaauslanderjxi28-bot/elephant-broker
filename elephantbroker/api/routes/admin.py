@@ -579,6 +579,11 @@ async def update_persistent_goal(goal_id: str, request: Request):
     entity = await container.graph.get_entity(goal_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Goal not found")
+    scope = str(entity.get("scope", "global")) if isinstance(entity, dict) else "global"
+    action = SCOPE_ACTION_MAP.get(scope, "create_global_goal")
+    target_org_id = entity.get("org_id") if isinstance(entity, dict) else None
+    target_team_id = entity.get("team_id") if isinstance(entity, dict) else None
+    await _auth(request, action, target_org_id=target_org_id, target_team_id=target_team_id)
     if "status" in body:
         await container.goal_manager.update_goal_status(uuid.UUID(goal_id), GoalStatus(body["status"]))
     return {"goal_id": goal_id, "updated": True}
