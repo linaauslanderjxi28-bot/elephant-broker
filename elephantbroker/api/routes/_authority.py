@@ -1,27 +1,28 @@
-"""Authority check helper for admin API routes.
+"""Authority check helper for route-level access control.
 
-This is NOT middleware — it's a per-route helper called only where authorization
-is needed. Most routes (memory search, working set build) don't need it.
+This is NOT middleware — it's a per-route helper called where authorization
+is needed. Mutating routes (memory store/update/delete, claims verify/reject,
+procedure activate, consolidation run, guard approvals) call this before
+performing the operation.
+
+Context routes (search, assemble, working-set build) do NOT gate on
+authority — they gate on gateway isolation (GatewayIdentityMiddleware).
 """
 from __future__ import annotations
 
+import os
 import uuid
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from elephantbroker.runtime.interfaces.actor_registry import IActorRegistry
 from elephantbroker.runtime.profiles.authority_store import AuthorityRuleStore
 from elephantbroker.schemas.actor import ActorRef, ActorType
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
-# Actions allowed during bootstrap mode (empty actor graph).
-# R2-P7: add ``add_team_member`` / ``remove_team_member`` so the
-# bootstrap workflow is complete — pre-fix you could create a team
-# in bootstrap mode but not assign anyone to it (no admin actor yet
-# exists to authorize the assignment, but you can't bootstrap one
-# *into* the team either). The R2-P7 link-spam guard now provides
-# the cross-gateway rejection at the route layer regardless of
-# bootstrap state, so the security posture is preserved.
+# ---------------------------------------------------------------------------
+# Actions registered for bootstrap-mode bypass
+# ---------------------------------------------------------------------------
 BOOTSTRAP_ACTIONS = frozenset({
     "create_org",
     "create_team",
@@ -29,6 +30,24 @@ BOOTSTRAP_ACTIONS = frozenset({
     "add_team_member",
     "remove_team_member",
 })
+
+# ---------------------------------------------------------------------------
+# Dev mode: skip all authority checks when this env var is set to "true"
+# ---------------------------------------------------------------------------
+_SKIP = os.environ.get("EB_SKIP_AUTHORITY", "").lower() == "true"
+
+
+def _resolve_actor_id_request(request: Request, container) -> str:
+    """Best-effort actor_id from request state or gateway config."""
+    aid = getattr(request.state, "actor_id", "") or ""
+    if aid:
+        return aid
+    # Fallback: use gateway's configured agent_authority_level to create
+    # a synthetic actor_id so the authority check can still run.
+    # This covers the transition window where Hermes agents send
+    # X-EB-Gateway-ID but not yet X-EB-Actor-Id.
+    agent_key = getattr(request.state, "agent_key", "") or "gateway-agent"
+    return "gw-agent:" + agent_key
 
 
 async def check_authority(
@@ -65,7 +84,7 @@ async def check_authority(
     bootstrap_mode : bool
         If ``True`` and action is in ``BOOTSTRAP_ACTIONS``, skip all checks.
     """
-    # Bootstrap exception — first admin creation on empty graph
+
     if bootstrap_mode and action in BOOTSTRAP_ACTIONS:
         return ActorRef(
             id=uuid.UUID(str(actor_id)) if not isinstance(actor_id, uuid.UUID) else actor_id,
@@ -74,7 +93,6 @@ async def check_authority(
             authority_level=90,
         )
 
-    # Resolve actor
     aid = uuid.UUID(str(actor_id)) if not isinstance(actor_id, uuid.UUID) else actor_id
     actor = await actor_registry.resolve_actor(aid)
     if actor is None:
@@ -88,11 +106,9 @@ async def check_authority(
             ))
         raise HTTPException(status_code=404, detail=f"Actor not found: {actor_id}")
 
-    # Load rule
     rule = await authority_store.get_rule(action)
     min_level = rule.get("min_authority_level", 90)
 
-    # Level check
     if actor.authority_level < min_level:
         if metrics:
             metrics.inc_authority_check(action, "denied")
@@ -108,14 +124,12 @@ async def check_authority(
                    f"(actor has {actor.authority_level})",
         )
 
-    # Exempt check — high-authority actors bypass matching constraints
     exempt_level = rule.get("matching_exempt_level", 999)
     if actor.authority_level >= exempt_level:
         if metrics:
             metrics.inc_authority_check(action, "allowed")
         return actor
 
-    # Org matching
     if rule.get("require_matching_org") and target_org_id:
         actor_org = str(actor.org_id) if actor.org_id else ""
         if actor_org != target_org_id:
@@ -132,7 +146,6 @@ async def check_authority(
                 detail=f"Actor not in target org: actor_org={actor_org}, target={target_org_id}",
             )
 
-    # Team matching
     if rule.get("require_matching_team") and target_team_id:
         actor_team_ids = [str(t) for t in actor.team_ids]
         if target_team_id not in actor_team_ids:
@@ -152,3 +165,41 @@ async def check_authority(
     if metrics:
         metrics.inc_authority_check(action, "allowed")
     return actor
+
+
+async def require_authority(request: Request, action: str) -> None:
+    """Route-level authority gate for mutating endpoints.
+
+    Call early in any route handler that mutates state:
+        await require_authority(request, "memory.store")
+
+    Backward-compatible: when ``EB_SKIP_AUTHORITY=true`` is set, this
+    always passes. Use that env var in dev/test where actors aren't
+    registered yet.
+    """
+    if _SKIP:
+        return
+
+    container = request.app.state.container
+    aid = _resolve_actor_id_request(request, container)
+
+    auth_store = getattr(container, "authority_store", None)
+    if auth_store is None:
+        # No authority store → can't enforce. Log and skip.
+        return
+
+    actor_reg = getattr(container, "actor_registry", None)
+    if actor_reg is None:
+        return
+
+    metrics = getattr(container, "metrics_ctx", None)
+    trace = getattr(container, "trace_ledger", None)
+
+    await check_authority(
+        actor_registry=actor_reg,
+        authority_store=auth_store,
+        actor_id=aid,
+        action=action,
+        metrics=metrics,
+        trace_ledger=trace,
+    )

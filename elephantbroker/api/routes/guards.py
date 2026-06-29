@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from elephantbroker.api.deps import get_container, get_guard_engine
+from elephantbroker.api.routes._authority import require_authority
 from elephantbroker.runtime.guards.engine import GuardRulesNotLoadedError
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
@@ -238,6 +239,7 @@ async def get_session_approvals(session_id: uuid.UUID, request: Request):
 @router.patch("/approvals/{request_id}")
 async def update_approval(request_id: uuid.UUID, request: Request):
     """Update approval status (approve/reject). Called by HITL middleware."""
+    await require_authority(request, "guard.approve")
     engine = get_guard_engine(request)
     if engine is None:
         raise HTTPException(status_code=503, detail="Guard engine not available")

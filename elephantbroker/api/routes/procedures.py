@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from elephantbroker.api.deps import get_container, get_procedure_engine
+from elephantbroker.api.routes._authority import require_authority
 from elephantbroker.schemas.procedure import ProcedureDefinition
 
 router = APIRouter()
@@ -58,6 +59,7 @@ class ActivateRequestV2(BaseModel):
 
 @router.post("/{procedure_id}/activate")
 async def activate_procedure(procedure_id: uuid.UUID, body: ActivateRequestV2, request: Request):
+    await require_authority(request, "procedure.activate")
     metrics = _get_metrics(request)
     if metrics:
         metrics.inc_procedure_tool("activate")
@@ -97,6 +99,7 @@ async def complete_step(
     execution_id: uuid.UUID, step_id: uuid.UUID,
     body: StepCompleteRequest, request: Request,
 ):
+    await require_authority(request, "procedure.complete_step")
     metrics = _get_metrics(request)
     if metrics:
         metrics.inc_procedure_tool("complete_step")

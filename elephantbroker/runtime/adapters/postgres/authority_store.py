@@ -26,6 +26,18 @@ AUTHORITY_DEFAULTS: dict[str, dict[str, Any]] = {
         "min_authority_level": 70, "require_matching_org": True, "matching_exempt_level": 90,
     },
     "merge_actors": {"min_authority_level": 70},
+    # -- Mutating route actions --
+    "memory.store": {"min_authority_level": 0},
+    "memory.update": {"min_authority_level": 30},
+    "memory.delete": {"min_authority_level": 50},
+    "claim.create": {"min_authority_level": 0},
+    "claim.verify": {"min_authority_level": 50},
+    "claim.reject": {"min_authority_level": 50},
+    "procedure.activate": {"min_authority_level": 50},
+    "procedure.complete_step": {"min_authority_level": 30},
+    "consolidation.run": {"min_authority_level": 70},
+    "consolidation.update_suggestion": {"min_authority_level": 70},
+    "guard.approve": {"min_authority_level": 70},
 }
 
 

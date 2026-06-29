@@ -6,6 +6,7 @@ import uuid
 from fastapi import APIRouter, Request
 
 from elephantbroker.api.deps import get_evidence_engine
+from elephantbroker.api.routes._authority import require_authority
 from elephantbroker.schemas.evidence import ClaimRecord, EvidenceRef
 
 router = APIRouter()
@@ -39,6 +40,7 @@ async def attach_evidence(claim_id: uuid.UUID, evidence: EvidenceRef, request: R
 
 @router.post("/{claim_id}/verify")
 async def verify_claim(claim_id: uuid.UUID, request: Request):
+    await require_authority(request, "claim.verify")
     engine = get_evidence_engine(request)
     result = await engine.verify(claim_id)
     return result.model_dump(mode="json")
@@ -47,6 +49,7 @@ async def verify_claim(claim_id: uuid.UUID, request: Request):
 @router.post("/{claim_id}/reject")
 async def reject_claim(claim_id: uuid.UUID, request: Request):
     """Reject a claim with a reason."""
+    await require_authority(request, "claim.reject")
     engine = get_evidence_engine(request)
     body = await request.json()
     reason = body.get("reason", "")

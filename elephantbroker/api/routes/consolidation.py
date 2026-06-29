@@ -7,6 +7,8 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from elephantbroker.api.routes._authority import require_authority
+
 logger = logging.getLogger("elephantbroker.api.routes.consolidation")
 
 router = APIRouter()
@@ -19,6 +21,7 @@ class RunConsolidationRequest(BaseModel):
 @router.post("/run")
 async def run_consolidation(body: RunConsolidationRequest, request: Request):
     """Trigger a consolidation run for this gateway."""
+    await require_authority(request, "consolidation.run")
     from elephantbroker.runtime.consolidation.engine import ConsolidationAlreadyRunningError
 
     container = request.app.state.container
@@ -99,6 +102,7 @@ class UpdateSuggestionRequest(BaseModel):
 @router.patch("/suggestions/{suggestion_id}")
 async def update_suggestion(suggestion_id: str, body: UpdateSuggestionRequest, request: Request):
     """Approve or reject a procedure suggestion."""
+    await require_authority(request, "consolidation.update_suggestion")
     container = request.app.state.container
     store = getattr(container, "consolidation_report_store", None)
     if store is None:

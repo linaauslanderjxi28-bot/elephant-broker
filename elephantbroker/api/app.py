@@ -58,7 +58,7 @@ def create_app(container: RuntimeContainer) -> FastAPI:
     app.state.container = container
 
     # Middleware (applied in reverse order — gateway runs first)
-    app.add_middleware(AuthMiddleware)
+    app.add_middleware(AuthMiddleware, auth_token=container.config.gateway.auth_token)
     # Middleware fallback must equal the container's gateway_id exactly. Bucket A
     # (commit d850186) changed GatewayConfig.gateway_id default from "local" to ""
     # and added the EB_ALLOW_DEFAULT_GATEWAY_ID opt-out. The prior shim here
