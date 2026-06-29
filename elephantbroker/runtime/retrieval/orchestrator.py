@@ -50,6 +50,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         scope: str | None = None,
         actor_id: str | None = None,
         memory_class: MemoryClass | None = None,
+        entity_type: str | None = None,
         session_key: str | None = None,
         session_id: str | None = None,
         auto_recall: bool = False,
@@ -67,7 +68,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
             tasks["structural"] = asyncio.ensure_future(
                 self.get_structural_hits(
                     scope=scope, actor_id=actor_id, memory_class=memory_class,
-                    session_key=session_key, limit=policy.structural_fetch_k,
+                    entity_type=entity_type, session_key=session_key, limit=policy.structural_fetch_k,
                     auto_recall=auto_recall,
                     caller_gateway_id=caller_gateway_id,
                 )
@@ -186,6 +187,13 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
             filtered = [c for c in filtered
                         if (c.fact.source_actor_id and str(c.fact.source_actor_id) == actor_id)
                         or any(str(t) == actor_id for t in c.fact.target_actor_ids)]
+        if entity_type:
+            filtered = [c for c in filtered if c.fact.entity_type == entity_type]
+        if memory_class:
+            mc = memory_class.value if hasattr(memory_class, "value") else str(memory_class)
+            filtered = [c for c in filtered if str(c.fact.memory_class) == mc]
+        if scope:
+            filtered = [c for c in filtered if str(c.fact.scope) == scope]
 
         # Sort by score descending, cap at root_top_k
         filtered.sort(key=lambda c: c.score, reverse=True)

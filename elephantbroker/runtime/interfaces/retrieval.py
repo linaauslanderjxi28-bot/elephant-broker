@@ -46,6 +46,7 @@ class IRetrievalOrchestrator(ABC):
         scope: str | None = None,
         actor_id: str | None = None,
         memory_class: MemoryClass | None = None,
+        entity_type: str | None = None,
         session_key: str | None = None,
         session_id: str | None = None,
         auto_recall: bool = False,

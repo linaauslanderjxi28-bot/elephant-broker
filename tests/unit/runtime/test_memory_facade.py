@@ -532,6 +532,40 @@ class TestMemoryStoreFacadePhase4:
         cypher = graph.query_cypher.call_args[0][0]
         assert "f.session_key = $session_key" in cypher
 
+    async def test_search_filters_semantic_results(self, monkeypatch, mock_add_data_points, mock_cognee):
+        facade, graph, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        product = make_fact_assertion(text="matching product")
+        doc = make_fact_assertion(text="wrong session")
+        mock_cognee.search = AsyncMock(return_value=[
+            self._fact_props(
+                product,
+                scope="global",
+                memory_class="semantic",
+                session_key="latam-market",
+                entity_type="Product",
+            ),
+            self._fact_props(
+                doc,
+                scope="global",
+                memory_class="semantic",
+                session_key="doc-ingestor:4-archives",
+                entity_type="Document",
+            ),
+        ])
+        graph.query_cypher = AsyncMock(return_value=[])
+
+        results = await facade.search(
+            "fone bluetooth",
+            scope=Scope.GLOBAL,
+            memory_class=MemoryClass.SEMANTIC,
+            session_key="latam-market",
+            entity_type="Product",
+        )
+
+        assert [fact.id for fact in results] == [product.id]
+
     async def test_search_computes_freshness_score(self, monkeypatch, mock_add_data_points, mock_cognee):
         facade, graph, *_ = self._make()
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)

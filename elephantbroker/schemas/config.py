@@ -334,6 +334,7 @@ class GatewayConfig(_StrictBase):
     org_id: str | None = None
     team_id: str | None = None
     agent_authority_level: int = Field(default=0, ge=0)
+    auth_token: str | None = None
 
     @property
     def effective_short_name_or_id(self) -> str:
@@ -502,6 +503,7 @@ ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
     ("EB_ORG_ID", "gateway.org_id", "str_or_none"),
     ("EB_TEAM_ID", "gateway.team_id", "str_or_none"),
     ("EB_AGENT_AUTHORITY_LEVEL", "gateway.agent_authority_level", "int"),
+    ("EB_AUTH_TOKEN", "gateway.auth_token", "str_or_none"),
     ("EB_DEFAULT_PROFILE", "default_profile", "str"),
     # C2.1: tier ("memory_only"|"context_only"|"full"). Pydantic coerces the
     # string into BusinessTier at model_validate() time; an unknown value

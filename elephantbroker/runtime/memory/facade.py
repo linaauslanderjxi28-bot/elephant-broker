@@ -31,6 +31,7 @@ from elephantbroker.runtime.metrics import (
     inc_recent_facts_scrubbed, inc_search_stage_failure, inc_store,
 )
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
+from elephantbroker.ontology.registry import validate_entity_type
 
 logger = logging.getLogger("elephantbroker.memory.facade")
 
@@ -83,6 +84,11 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             fact.gateway_id = fact.gateway_id or self._gateway_id
             fact.token_size = count_tokens(fact.text)
             fact.embedding_ref = f"FactDataPoint_text:{fact.id}"
+
+            if fact.entity_type:
+                warnings = validate_entity_type(fact.text, fact.entity_type)
+                if warnings:
+                    self._log.debug("Ontology validation warnings for fact %s: %s", fact.id, warnings)
 
             # Dedup check — use caller-supplied threshold or fall back to default
             effective_threshold = dedup_threshold if dedup_threshold is not None else _DEFAULT_DEDUP_THRESHOLD
@@ -282,6 +288,17 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 datasets=[self._dataset_name],
             )
             for fact in self._parse_graph_completion_to_facts(cognee_hits):
+                if not self._matches_search_filters(
+                    fact,
+                    scope=scope,
+                    actor_id=actor_id,
+                    memory_class=memory_class,
+                    session_key=session_key,
+                    entity_type=entity_type,
+                    session_id=session_id,
+                    caller_gateway_id=caller_gateway_id,
+                ):
+                    continue
                 results[str(fact.id)] = fact
         except Exception as exc:
             exc_type = type(exc).__name__
@@ -328,7 +345,16 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     props = clean_graph_props(entity)
                     dp = FactDataPoint(**props)
                     fact = dp.to_schema()
-                    if scope and str(fact.scope) != str(scope.value if hasattr(scope, "value") else scope):
+                    if not self._matches_search_filters(
+                        fact,
+                        scope=scope,
+                        actor_id=actor_id,
+                        memory_class=memory_class,
+                        session_key=session_key,
+                        entity_type=entity_type,
+                        session_id=session_id,
+                        caller_gateway_id=caller_gateway_id,
+                    ):
                         continue
                     results[str(fact.id)] = fact
             except Exception as vec_exc:
@@ -338,7 +364,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 )
         cypher, params = self._build_structural_query(
             scope=scope, actor_id=actor_id, memory_class=memory_class,
-            session_key=session_key, limit=max_results,
+            session_key=session_key, entity_type=entity_type, limit=max_results,
             caller_gateway_id=caller_gateway_id,
         )
         if cypher:
@@ -378,6 +404,35 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         if self._metrics:
             self._metrics.inc_retrieval(auto_recall=str(auto_recall).lower(), profile_name=profile_name)
         return fact_list
+
+    def _matches_search_filters(
+        self,
+        fact: FactAssertion,
+        *,
+        scope: Scope | None = None,
+        actor_id: str | None = None,
+        memory_class: MemoryClass | None = None,
+        session_key: str | None = None,
+        entity_type: str | None = None,
+        session_id: str | None = None,
+        caller_gateway_id: str = "",
+    ) -> bool:
+        effective_gw = caller_gateway_id or self._gateway_id
+        if fact.gateway_id and fact.gateway_id != effective_gw:
+            return False
+        if scope and str(fact.scope) != str(scope.value if hasattr(scope, "value") else scope):
+            return False
+        if actor_id and str(fact.source_actor_id or "") != actor_id:
+            return False
+        if memory_class and str(fact.memory_class) != str(memory_class.value if hasattr(memory_class, "value") else memory_class):
+            return False
+        if session_key and fact.session_key != session_key:
+            return False
+        if entity_type and fact.entity_type != entity_type:
+            return False
+        if session_id and str(fact.session_id or "") != session_id:
+            return False
+        return True
 
     async def _fetch_cognee_data_ids(
         self, fact_ids: list[uuid.UUID | str],

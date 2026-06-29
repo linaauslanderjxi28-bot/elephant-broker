@@ -58,6 +58,7 @@ gateway:
   org_id: null                       # env: EB_ORG_ID — UUID from `ebrun bootstrap` (required for org-scoped features)
   team_id: null                      # env: EB_TEAM_ID — UUID from `ebrun bootstrap` (required for team-scoped features)
   agent_authority_level: 0           # env: EB_AGENT_AUTHORITY_LEVEL — 0=worker, higher=more authority for admin operations (see profiles)
+  auth_token: null                   # env: EB_AUTH_TOKEN — shared secret for API auth. null/empty = pass-through (dev mode). Set for production.
 
 
 # -----------------------------------------------------------------------------

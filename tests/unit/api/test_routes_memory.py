@@ -183,6 +183,23 @@ class TestMemoryRoutes:
         assert r.status_code == 403
         assert r.json() == {"detail": "wrong gateway"}
 
+    async def test_search_forwards_entity_type_to_facade(self, client, container):
+        captured: dict = {}
+
+        async def capture_search(*args, **kwargs):
+            captured.update(kwargs)
+            return []
+
+        container.memory_store.search = AsyncMock(side_effect=capture_search)
+
+        r = await client.post(
+            "/memory/search",
+            json={"query": "fone bluetooth", "entity_type": "Product"},
+        )
+
+        assert r.status_code == 200
+        assert captured["entity_type"] == "Product"
+
     async def test_get_by_id_returns_fact(self, client, container):
         fact = FactAssertion(text="hello world")
         container.memory_store.get_by_id = AsyncMock(return_value=fact)

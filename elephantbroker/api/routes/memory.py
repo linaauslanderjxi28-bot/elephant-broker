@@ -18,6 +18,7 @@ from elephantbroker.api.deps import (
     get_procedure_ingest_pipeline,
     get_turn_ingest_pipeline,
 )
+from elephantbroker.api.routes._authority import require_authority
 from elephantbroker.runtime.memory.facade import DedupSkipped
 from elephantbroker.schemas.base import Scope
 from elephantbroker.schemas.fact import FactAssertion, MemoryClass
@@ -109,6 +110,7 @@ class UpdateFactRequest(BaseModel):
 
 @router.post("/store")
 async def store_fact(body: StoreRequest, request: Request):
+    await require_authority(request, "memory.store")
     ms = get_memory_store(request)
     fact = body.fact
     if body.session_key is not None:
@@ -202,6 +204,7 @@ async def search_memory(body: SearchRequest, request: Request):
                     scope=body.scope,
                     actor_id=body.actor_id,
                     memory_class=mc,
+                    entity_type=body.entity_type,
                     session_key=body.session_key,
                     session_id=body.session_id,
                     auto_recall=body.auto_recall,
@@ -240,6 +243,7 @@ async def search_memory(body: SearchRequest, request: Request):
                 scope=scope,
                 actor_id=body.actor_id,
                 memory_class=mc,
+                entity_type=body.entity_type,
                 session_key=body.session_key,
                 session_id=body.session_id,
                 profile_name=body.profile_name or "default",
@@ -406,6 +410,7 @@ async def get_fact(fact_id: uuid.UUID, request: Request):
     },
 )
 async def delete_fact(fact_id: uuid.UUID, request: Request):
+    await require_authority(request, "memory.delete")
     ms = get_memory_store(request)
     caller_gw = getattr(request.state, "gateway_id", "")
     try:
@@ -428,6 +433,7 @@ async def delete_fact(fact_id: uuid.UUID, request: Request):
 )
 async def update_fact(fact_id: uuid.UUID, body: UpdateFactRequest, request: Request):
     """Update allowed fact fields. See `UpdateFactRequest` for the whitelist."""
+    await require_authority(request, "memory.update")
     ms = get_memory_store(request)
     caller_gw = getattr(request.state, "gateway_id", "")
     updates = body.model_dump(exclude_unset=True, mode="python")
