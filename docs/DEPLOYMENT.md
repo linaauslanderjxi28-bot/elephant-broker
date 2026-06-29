@@ -117,6 +117,29 @@ docker compose up -d neo4j qdrant redis
 docker compose --profile observability up -d
 ```
 
+Validate compose syntax from the repo root before changing a host deployment:
+
+```bash
+docker compose -f infrastructure/docker-compose.yml config --quiet
+docker compose -f infrastructure/docker-compose.test.yml config --quiet
+```
+
+For the OpenClaw lab host layout captured from `/home/openclaw/docker/eb_infra`, use `infrastructure/docker-compose.local.yml` with variables supplied from a private `.env` file or exported shell environment:
+
+```bash
+docker compose -f infrastructure/docker-compose.local.yml config --quiet
+```
+
+The local file intentionally keeps secrets out of git. Copy `infrastructure/.env.local.example` to the deployment-owned env location and replace every `change-me` value before starting containers.
+
+Because ElephantBroker itself is native on the host, not inside the compose network, host-published endpoints must be used from `/etc/elephantbroker/env`. For example, a reranker container exposed on host port `8004` must be configured as:
+
+```bash
+EB_RERANKER_ENDPOINT=http://localhost:8004
+```
+
+Do not use compose-only DNS names such as `http://vllm-embedding:8004` from the native systemd runtime; they are only resolvable inside the Docker network.
+
 ### 2. Run the install script
 
 The repo ships an idempotent installer at `deploy/install.sh` that installs
@@ -224,6 +247,7 @@ Most operators only need to edit a handful of fields in
 - `cognee.neo4j_uri`, `cognee.qdrant_url`, `infra.redis_url` — only if your
   databases are not on the same host
 - `reranker.enabled` — set to `false` if you do not have a Qwen3-Reranker server
+- `EB_RERANKER_ENDPOINT` (in `/etc/elephantbroker/env`) — set to the host-reachable reranker URL. For a local container published on port `8004`, use `http://localhost:8004`, not the container DNS name.
 - `compaction_llm.model` and `goal_refinement.model` — override if your
   LiteLLM proxy does not serve `gemini-2.5-flash`
 - `EB_LLM_ENDPOINT` and `EB_EMBEDDING_ENDPOINT` (in `/etc/elephantbroker/env`) — **set these explicitly to your LiteLLM proxy URL** if the proxy is not on the DB VM. The default (`http://localhost:8811/v1`) will silently cause `httpx.ConnectError` at first LLM/embedding call if LiteLLM is remote. These are env-file settings, not `default.yaml` settings, but they are the most commonly missed override.

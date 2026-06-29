@@ -158,7 +158,7 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 
 | Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
 |----------|----------|---------|------|---------|----------------|---------|--------------|
-| `EB_RERANKER_ENDPOINT` | No | `"http://localhost:1235"` | string | Python runtime | `http://reranker:1235` | No | Yes |
+| `EB_RERANKER_ENDPOINT` | No | `"http://localhost:1235"` | string | Python runtime | `http://localhost:8004` when the native runtime calls a host-published local container; `http://reranker:1235` only when the runtime is also inside that Docker network | No | Yes |
 | `EB_RERANKER_API_KEY` | No | `""` | string | Python runtime | API key | **Yes** | Yes |
 | `EB_RERANKER_MODEL` | No | `"Qwen/Qwen3-Reranker-4B"` | string | Python runtime | `Qwen/Qwen3-Reranker-4B` | No | Yes |
 
