@@ -66,6 +66,7 @@ class TestFactDataPointNeo4jRoundTrip:
             "use_count": 2,
             "successful_use_count": 1,
             "provenance_refs": [],
+            "typed_provenance_refs": [{"source_type": "api", "source_name": "sensor"}],
             "gateway_id": "gw-prod",
         }
 
@@ -85,6 +86,7 @@ class TestFactDataPointNeo4jRoundTrip:
         assert schema.session_key == "agent:main:main"
         assert schema.use_count == 2
         assert schema.successful_use_count == 1
+        assert schema.typed_provenance_refs[0].source_name == "sensor"
 
 
 class TestGoalDataPointJsonDictPipeline:

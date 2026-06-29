@@ -20,6 +20,7 @@ from elephantbroker.schemas.evidence import ClaimRecord, ClaimStatus, EvidenceRe
 from elephantbroker.schemas.fact import FactAssertion, FactCategory
 from elephantbroker.schemas.goal import GoalState, GoalStatus
 from elephantbroker.schemas.procedure import ProcedureDefinition
+from elephantbroker.ontology.provenance import ProvenanceRef
 
 # ---------------------------------------------------------------------------
 # FactDataPoint
@@ -67,6 +68,20 @@ class TestFactDataPoint:
         assert restored.use_count == 5
         assert restored.successful_use_count == 3
         assert restored.provenance_refs == ["ref1"]
+
+    def test_typed_provenance_round_trip(self):
+        fact = FactAssertion(
+            text="Typed provenance",
+            typed_provenance_refs=[
+                ProvenanceRef(source_type="tool_output", source_name="1688-cli", collector="supplier-sourcing"),
+            ],
+        )
+
+        dp = FactDataPoint.from_schema(fact)
+        restored = dp.to_schema()
+
+        assert restored.typed_provenance_refs == fact.typed_provenance_refs
+        assert restored.provenance_refs == []
 
     def test_archived_and_blacklisted_round_trip(self):
         """Phase 9: archived and autorecall_blacklisted fields survive DataPoint round-trip."""

@@ -13,6 +13,7 @@ from elephantbroker.schemas.evidence import ClaimRecord, ClaimStatus, EvidenceRe
 from elephantbroker.schemas.fact import FactAssertion, FactCategory, MemoryClass
 from elephantbroker.schemas.goal import GoalState, GoalStatus
 from elephantbroker.schemas.procedure import ProcedureDefinition
+from elephantbroker.ontology.provenance import ProvenanceRef
 
 
 def _dt_to_epoch_ms(dt: datetime) -> int:
@@ -43,6 +44,7 @@ class FactDataPoint(DataPoint):
     use_count: int = 0
     successful_use_count: int = 0
     provenance_refs: list[str] = []
+    typed_provenance_refs: list[dict[str, Any]] = []
     embedding_ref: str | None = None
     token_size: int | None = None
     eb_id: str = ""
@@ -88,6 +90,7 @@ class FactDataPoint(DataPoint):
             use_count=fact.use_count,
             successful_use_count=fact.successful_use_count,
             provenance_refs=list(fact.provenance_refs),
+            typed_provenance_refs=[ref.model_dump_keyed() for ref in fact.typed_provenance_refs],
             embedding_ref=fact.embedding_ref,
             token_size=fact.token_size,
             eb_id=str(fact.id),
@@ -120,6 +123,7 @@ class FactDataPoint(DataPoint):
             use_count=self.use_count,
             successful_use_count=self.successful_use_count,
             provenance_refs=list(self.provenance_refs),
+            typed_provenance_refs=[ProvenanceRef.model_validate(ref) for ref in self.typed_provenance_refs],
             embedding_ref=self.embedding_ref,
             token_size=self.token_size,
             gateway_id=self.gateway_id,
