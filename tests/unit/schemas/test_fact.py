@@ -57,6 +57,13 @@ class TestFactAssertion:
         assert fact.provenance_refs == []
         assert fact.embedding_ref is None
         assert fact.token_size is None
+        assert fact.typed_provenance_refs == []
+
+    def test_legacy_provenance_refs_populate_typed_refs(self):
+        fact = FactAssertion(text="x", provenance_refs=["market-intel:web", "https://example.com/source"])
+        assert len(fact.typed_provenance_refs) == 2
+        assert fact.typed_provenance_refs[0].collector == "market-intel"
+        assert fact.typed_provenance_refs[1].source_uri == "https://example.com/source"
 
     def test_target_actor_ids_list(self):
         ids = [uuid.uuid4(), uuid.uuid4()]

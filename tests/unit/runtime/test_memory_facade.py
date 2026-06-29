@@ -32,6 +32,20 @@ class TestMemoryStoreFacade:
         assert result.id == fact.id
         assert len(mock_add_data_points.calls) == 1
 
+    async def test_store_prepares_ingress_fields_before_persistence(self, monkeypatch, mock_add_data_points, mock_cognee):
+        facade, graph, vector, emb, _ = self._make()
+        facade._gateway_id = "gw-test"
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        fact = make_fact_assertion(text="ingress provenance", provenance_refs=["customs-data:record"])
+        result = await facade.store(fact)
+
+        assert result.gateway_id == "gw-test"
+        assert result.token_size is not None
+        assert result.embedding_ref == f"FactDataPoint_text:{result.id}"
+        assert result.typed_provenance_refs[0].collector == "customs-data"
+
     async def test_search_returns_results_via_structural(self, monkeypatch, mock_add_data_points, mock_cognee):
         facade, graph, vector, emb, _ = self._make()
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)

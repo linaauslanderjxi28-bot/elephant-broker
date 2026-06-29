@@ -25,6 +25,7 @@ from elephantbroker.runtime.observability import GatewayLoggerAdapter, traced
 from elephantbroker.runtime.utils.tokens import count_tokens
 from elephantbroker.schemas.base import Scope
 from elephantbroker.schemas.fact import FactAssertion, MemoryClass
+from elephantbroker.ontology.provenance import typed_provenance_from_legacy
 from elephantbroker.runtime.metrics import (
     MetricsContext, inc_cognee_capture_failure, inc_dedup, inc_edge,
     inc_fact_delete_cascade_failure, inc_gdpr_delete,
@@ -72,6 +73,16 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         self._log = GatewayLoggerAdapter(logger, {"gateway_id": gateway_id})
         self._min_score_warned: bool = False
 
+    def _prepare_ingress_fact(self, fact: FactAssertion) -> FactAssertion:
+        fact.gateway_id = fact.gateway_id or self._gateway_id
+        fact.token_size = count_tokens(fact.text)
+        fact.embedding_ref = f"FactDataPoint_text:{fact.id}"
+        if fact.provenance_refs and not fact.typed_provenance_refs:
+            fact = fact.model_copy(update={
+                "typed_provenance_refs": typed_provenance_from_legacy(fact.provenance_refs),
+            })
+        return fact
+
     @traced
     async def store(
         self, fact: FactAssertion, *,
@@ -81,9 +92,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
     ) -> FactAssertion:
         try:
             # Token size + gateway stamp
-            fact.gateway_id = fact.gateway_id or self._gateway_id
-            fact.token_size = count_tokens(fact.text)
-            fact.embedding_ref = f"FactDataPoint_text:{fact.id}"
+            fact = self._prepare_ingress_fact(fact)
 
             if fact.entity_type:
                 warnings = validate_entity_type(fact.text, fact.entity_type)

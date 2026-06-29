@@ -5,9 +5,10 @@ import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from elephantbroker.schemas.base import Scope
+from elephantbroker.ontology.provenance import ProvenanceRef, typed_provenance_from_legacy
 
 
 class FactCategory(StrEnum):
@@ -59,6 +60,7 @@ class FactAssertion(BaseModel):
     successful_use_count: int = Field(default=0, ge=0)
     freshness_score: float | None = None
     provenance_refs: list[str] = Field(default_factory=list)
+    typed_provenance_refs: list[ProvenanceRef] = Field(default_factory=list)
     embedding_ref: str | None = None
     token_size: int | None = None
     goal_relevance_tags: dict[str, str] = Field(default_factory=dict)
@@ -70,6 +72,12 @@ class FactAssertion(BaseModel):
     decision_status: str | None = None
     archived: bool = False
     autorecall_blacklisted: bool = False
+
+    @model_validator(mode="after")
+    def populate_typed_provenance_refs(self) -> FactAssertion:
+        if self.provenance_refs and not self.typed_provenance_refs:
+            self.typed_provenance_refs = typed_provenance_from_legacy(self.provenance_refs)
+        return self
 
 
 class FactConflict(BaseModel):
