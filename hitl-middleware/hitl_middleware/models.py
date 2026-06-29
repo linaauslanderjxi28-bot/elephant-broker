@@ -42,6 +42,8 @@ class ApprovalIntent(BaseModel):
     explanation: str = ""
     approve_callback_url: str = ""
     reject_callback_url: str = ""
+    callback_created_at: datetime | None = None
+    callback_signature: str = ""
     timeout_seconds: int = 300
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

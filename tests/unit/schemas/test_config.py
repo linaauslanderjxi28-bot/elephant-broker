@@ -635,6 +635,7 @@ compaction_llm:
         os.environ["EB_RERANKER_ENDPOINT"] = "http://env-reranker:1235"
         os.environ["EB_RERANKER_API_KEY"] = "env-reranker-key"
         os.environ["EB_HITL_CALLBACK_SECRET"] = "env-hitl-secret"
+        os.environ["EB_HITL_RUNTIME_AUTH_TOKEN"] = "env-hitl-runtime-token"
 
         cfg = ElephantBrokerConfig.from_yaml(yaml_path)
         assert cfg.gateway.gateway_id == "env-gw"
@@ -651,6 +652,7 @@ compaction_llm:
         assert cfg.reranker.endpoint == "http://env-reranker:1235"
         assert cfg.reranker.api_key == "env-reranker-key"
         assert cfg.hitl.callback_hmac_secret == "env-hitl-secret"
+        assert cfg.hitl.runtime_auth_token == "env-hitl-runtime-token"
 
     # ----- Bulk: every binding actually applies -----
 

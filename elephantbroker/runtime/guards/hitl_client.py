@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -47,6 +49,8 @@ class ApprovalIntent(BaseModel):
     explanation: str = ""
     approve_callback_url: str = ""
     reject_callback_url: str = ""
+    callback_created_at: datetime | None = None
+    callback_signature: str = ""
     timeout_seconds: int = 300
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -84,8 +88,15 @@ class HitlClient:
 
     async def request_approval(self, intent: ApprovalIntent) -> bool:
         """Send approval request for APPROVE_FIRST."""
+        payload = intent.model_dump(mode="json")
+        if self._config.callback_hmac_secret:
+            created_at = intent.callback_created_at or datetime.now(UTC)
+            payload["callback_created_at"] = created_at.isoformat()
+            payload["callback_signature"] = self._compute_callback_signature(
+                str(intent.request_id), created_at,
+            )
         return await self._post_with_retry(
-            "/intents/approval", intent.model_dump(mode="json"), "approval",
+            "/intents/approval", payload, "approval",
         )
 
     async def _post_with_retry(self, path: str, payload: dict, label: str) -> bool:
@@ -133,6 +144,15 @@ class HitlClient:
         except ImportError:
             pass
         return headers
+
+    def _compute_callback_signature(self, request_id: str, created_at: datetime) -> str:
+        unix_ts = str(int(created_at.timestamp()))
+        message = f"{request_id}:{unix_ts}"
+        return hmac.new(
+            self._config.callback_hmac_secret.encode(),
+            message.encode(),
+            hashlib.sha256,
+        ).hexdigest()
 
     async def close(self) -> None:
         if self._client:

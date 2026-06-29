@@ -754,6 +754,7 @@ Path prefix: `hitl.*`
 | `hitl.timeout_seconds` | `float` | `10.0` | -- | `ge=1.0` | HTTP timeout for HITL middleware requests | Too low = frequent timeouts; too high = blocks guard pipeline | `10.0` / `10.0` / `15.0` |
 | `hitl.approval_default_timeout_seconds` | `int` | `300` | -- | `ge=30` | Default timeout for pending approval requests before auto-resolution | Too low = approvals auto-expire before human reviews; too high = requests hang | `300` / `300` / `600` |
 | `hitl.callback_hmac_secret` | `str` | `""` | `EB_HITL_CALLBACK_SECRET` | -- | HMAC secret for validating HITL callback signatures | Empty = HMAC validation disabled (insecure); wrong = callback validation fails | `""` / `test-secret` / `<vault-secret>` |
+| `hitl.runtime_auth_token` | `str` | `""` | `EB_HITL_RUNTIME_AUTH_TOKEN` | -- | Dedicated HITL-to-runtime token for PATCH `/guards/approvals/{request_id}` callbacks | Empty = HITL must satisfy normal route authority; wrong = callbacks fail closed | `""` / `test-token` / `<vault-secret>` |
 | `hitl.gateway_overrides` | `dict[str, str]` | `{}` | -- | -- | Per-gateway HITL URL overrides (`{gateway_id: url}`) | Wrong URL per gateway = that gateway's approvals fail | `{}` / `{}` / `{"gw-special": "http://hitl-special:8421"}` |
 
 ---
@@ -964,6 +965,7 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 | `EB_GATEWAY_ID` | `gateway.gateway_id` | `str` | `local` |
 | `EB_GATEWAY_SHORT_NAME` | `gateway.gateway_short_name` | `str` | `""` |
 | `EB_HITL_CALLBACK_SECRET` | `hitl.callback_hmac_secret` | `str` | `""` |
+| `EB_HITL_RUNTIME_AUTH_TOKEN` | `hitl.runtime_auth_token` | `str` | `""` |
 | `EB_INGEST_BATCH_SIZE` | `llm.ingest_batch_size` | `int` | `6` |
 | `EB_INGEST_BATCH_TIMEOUT` | `llm.ingest_batch_timeout_seconds` | `float` | `60.0` |
 | `EB_INGEST_BUFFER_TTL` | `llm.ingest_buffer_ttl_seconds` | `int` | `300` |

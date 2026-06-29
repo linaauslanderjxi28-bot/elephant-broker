@@ -435,7 +435,7 @@ else
     log "  $CONFIG_DIR/hitl.env      (640 root:$SERVICE_GROUP, FROM TEMPLATE — edit before starting)"
 fi
 
-# F11 (TODO-3-614): auto-generate EB_HITL_CALLBACK_SECRET on first install.
+# F11 (TODO-3-614): auto-generate HITL shared secrets on first install.
 #
 # The runtime AND the hitl-middleware must agree on the same HMAC secret or
 # every HITL approval callback fails verification. Historically the operator
@@ -453,6 +453,7 @@ fi
 if [[ "$ENV_FRESHLY_COPIED" -eq 1 && "$HITL_ENV_FRESHLY_COPIED" -eq 1 ]]; then
     if command -v openssl >/dev/null 2>&1; then
         HITL_SECRET=$(openssl rand -hex 32)
+        HITL_RUNTIME_TOKEN=$(openssl rand -hex 32)
         # Use a temp file + mv pattern instead of `sed -i` to keep ownership/mode
         # intact (sed -i on Linux re-creates the file with the invoking user's
         # umask, which would clobber the 640 root:elephantbroker we just set).
@@ -460,6 +461,8 @@ if [[ "$ENV_FRESHLY_COPIED" -eq 1 && "$HITL_ENV_FRESHLY_COPIED" -eq 1 ]]; then
             tmp_file=$(mktemp)
             sed "s|^EB_HITL_CALLBACK_SECRET=$|EB_HITL_CALLBACK_SECRET=$HITL_SECRET|" \
                 "$env_file" > "$tmp_file"
+            sed -i "s|^EB_HITL_RUNTIME_AUTH_TOKEN=$|EB_HITL_RUNTIME_AUTH_TOKEN=$HITL_RUNTIME_TOKEN|" \
+                "$tmp_file"
             cat "$tmp_file" > "$env_file"
             rm -f "$tmp_file"
         done
@@ -498,10 +501,17 @@ if [[ "$ENV_FRESHLY_COPIED" -eq 1 && "$HITL_ENV_FRESHLY_COPIED" -eq 1 ]]; then
                 warn "      sudo $REPO_DIR/deploy/install.sh"
                 die "EB_HITL_CALLBACK_SECRET auto-gen failed — refusing to ship a broken HMAC pair"
             fi
+            if ! grep -q "^EB_HITL_RUNTIME_AUTH_TOKEN=${HITL_RUNTIME_TOKEN}$" "$env_file"; then
+                warn "  F11 sed anchor drift: $env_file still contains the"
+                warn "  unpatched EB_HITL_RUNTIME_AUTH_TOKEN= placeholder."
+                rm -f "$CONFIG_DIR/env" "$CONFIG_DIR/hitl.env"
+                die "EB_HITL_RUNTIME_AUTH_TOKEN auto-gen failed — refusing to ship broken HITL runtime auth"
+            fi
         done
         log "  EB_HITL_CALLBACK_SECRET   (auto-generated, written to env + hitl.env)"
+        log "  EB_HITL_RUNTIME_AUTH_TOKEN (auto-generated, written to env + hitl.env)"
     else
-        warn "  openssl not found — cannot auto-generate EB_HITL_CALLBACK_SECRET."
+        warn "  openssl not found — cannot auto-generate HITL shared secrets."
         warn "  You MUST set the same value manually in env + hitl.env before starting HITL."
     fi
 elif [[ "$ENV_FRESHLY_COPIED" -eq 1 || "$HITL_ENV_FRESHLY_COPIED" -eq 1 ]]; then

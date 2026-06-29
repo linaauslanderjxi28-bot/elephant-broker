@@ -15,6 +15,7 @@ class TestHitlMiddlewareConfig:
         assert cfg.port == 8421
         assert cfg.log_level == "INFO"
         assert cfg.callback_secret == ""
+        assert cfg.runtime_auth_token == ""
         assert cfg.runtime_url == "http://localhost:8420"
 
     def test_from_env_with_vars(self, monkeypatch):
@@ -23,6 +24,7 @@ class TestHitlMiddlewareConfig:
         monkeypatch.setenv("HITL_PORT", "9000")
         monkeypatch.setenv("HITL_LOG_LEVEL", "DEBUG")
         monkeypatch.setenv("EB_HITL_CALLBACK_SECRET", "s3cret")
+        monkeypatch.setenv("EB_HITL_RUNTIME_AUTH_TOKEN", "runtime-token")
         monkeypatch.setenv("EB_RUNTIME_URL", "http://runtime:8420")
 
         cfg = HitlMiddlewareConfig.from_env()
@@ -30,6 +32,7 @@ class TestHitlMiddlewareConfig:
         assert cfg.port == 9000
         assert cfg.log_level == "DEBUG"
         assert cfg.callback_secret == "s3cret"
+        assert cfg.runtime_auth_token == "runtime-token"
         assert cfg.runtime_url == "http://runtime:8420"
 
     def test_from_env_partial_vars(self, monkeypatch):
@@ -38,12 +41,14 @@ class TestHitlMiddlewareConfig:
         monkeypatch.delenv("HITL_HOST", raising=False)
         monkeypatch.delenv("HITL_LOG_LEVEL", raising=False)
         monkeypatch.delenv("EB_HITL_CALLBACK_SECRET", raising=False)
+        monkeypatch.delenv("EB_HITL_RUNTIME_AUTH_TOKEN", raising=False)
         monkeypatch.delenv("EB_RUNTIME_URL", raising=False)
 
         cfg = HitlMiddlewareConfig.from_env()
         assert cfg.port == 5555
         assert cfg.host == "0.0.0.0"
         assert cfg.callback_secret == ""
+        assert cfg.runtime_auth_token == ""
 
     def test_missing_callback_secret_empty(self):
         """callback_secret defaults to empty string."""

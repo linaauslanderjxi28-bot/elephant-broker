@@ -31,6 +31,7 @@ class HitlMiddlewareConfig(BaseModel):
     port: int = Field(default=8421, ge=1, le=65535)
     log_level: str = "INFO"
     callback_secret: str = ""
+    runtime_auth_token: str = ""
     runtime_url: str = "http://localhost:8420"
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
 
@@ -42,5 +43,6 @@ class HitlMiddlewareConfig(BaseModel):
             port=int(os.environ.get("HITL_PORT", "8421")),
             log_level=os.environ.get("HITL_LOG_LEVEL", "INFO"),
             callback_secret=os.environ.get("EB_HITL_CALLBACK_SECRET", ""),
+            runtime_auth_token=os.environ.get("EB_HITL_RUNTIME_AUTH_TOKEN", ""),
             runtime_url=os.environ.get("EB_RUNTIME_URL", "http://localhost:8420"),
         )

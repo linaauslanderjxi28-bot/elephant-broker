@@ -46,7 +46,11 @@ def _valid_callback(
 
 @pytest.fixture
 def config():
-    return HitlMiddlewareConfig(callback_secret=SECRET, runtime_url="http://runtime:8420")
+    return HitlMiddlewareConfig(
+        callback_secret=SECRET,
+        runtime_auth_token="runtime-token",
+        runtime_url="http://runtime:8420",
+    )
 
 
 @pytest.fixture
@@ -158,6 +162,9 @@ class TestApproveCallback:
             mock.patch.assert_awaited_once()
             call_url = mock.patch.call_args[0][0]
             assert f"/guards/approvals/{rid}" in call_url
+            assert mock.patch.call_args.kwargs["headers"] == {
+                "X-EB-HITL-Runtime-Token": "runtime-token",
+            }
 
     async def test_approve_with_optional_message(self, client):
         """Approve sends the optional message to runtime."""

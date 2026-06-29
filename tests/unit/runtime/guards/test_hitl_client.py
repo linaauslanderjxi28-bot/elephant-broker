@@ -123,6 +123,32 @@ class TestHitlClient:
         mock_client.post.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_approval_request_includes_callback_signature(self):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        client = HitlClient(HitlConfig(
+            enabled=True,
+            default_url="http://hitl:8421",
+            callback_hmac_secret="secret",
+        ))
+        client._client = mock_client
+        request_id = uuid.uuid4()
+        created_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+        await client.request_approval(ApprovalIntent(
+            request_id=request_id,
+            guard_event_id=uuid.uuid4(),
+            session_id=uuid.uuid4(),
+            callback_created_at=created_at,
+        ))
+
+        payload = mock_client.post.call_args.kwargs["json"]
+        assert payload["callback_created_at"] == created_at.isoformat()
+        assert payload["callback_signature"] == client._compute_callback_signature(str(request_id), created_at)
+
+    @pytest.mark.asyncio
     async def test_enabled_approval_request_failure(self):
         """Enabled HITL client handles approval request errors."""
         mock_client = AsyncMock()

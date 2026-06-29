@@ -24,6 +24,13 @@ tracer = trace.get_tracer("hitl_middleware.router")
 router = APIRouter()
 
 
+def _runtime_auth_headers(config) -> dict[str, str]:
+    token = getattr(config, "runtime_auth_token", "") or ""
+    if not token:
+        return {}
+    return {"X-EB-HITL-Runtime-Token": token}
+
+
 def _extract_trace_context(request: Request) -> otel_context.Context:
     """Extract W3C trace context from incoming request headers."""
     carrier = dict(request.headers)
@@ -111,6 +118,7 @@ async def approve_callback(
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.patch(
                     f"{runtime_url}/guards/approvals/{callback.request_id}",
+                    headers=_runtime_auth_headers(config),
                     json={
                         "status": "approved",
                         "message": callback.message,
@@ -176,6 +184,7 @@ async def reject_callback(
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.patch(
                     f"{runtime_url}/guards/approvals/{callback.request_id}",
+                    headers=_runtime_auth_headers(config),
                     json={
                         "status": "rejected",
                         "reason": callback.reason,

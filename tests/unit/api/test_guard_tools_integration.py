@@ -59,6 +59,7 @@ def mock_container():
     c.config = MagicMock()
     c.config.gateway = MagicMock()
     c.config.gateway.gateway_id = "test"
+    c.config.hitl.runtime_auth_token = "runtime-token"
 
     return c
 
@@ -298,6 +299,7 @@ class TestGuardToolsIntegration:
 
         r = await client.patch(
             f"/guards/approvals/{request_id}",
+            headers={"X-EB-HITL-Runtime-Token": "runtime-token"},
             json={"status": "approved", "agent_id": "agent-1", "message": "Looks good"},
         )
         assert r.status_code == 200

@@ -451,6 +451,7 @@ class HitlConfig(_StrictBase):
     timeout_seconds: float = Field(default=10.0, ge=1.0)
     approval_default_timeout_seconds: int = Field(default=300, ge=30)
     callback_hmac_secret: str = ""
+    runtime_auth_token: str = ""
     gateway_overrides: dict[str, str] = Field(default_factory=dict)
     retry_count: int = Field(default=2, ge=0, description="Max retries on transient failures")
     retry_delay_seconds: float = Field(default=0.5, ge=0.0, description="Base delay for exponential backoff")
@@ -597,6 +598,7 @@ ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
     # human-in-the-loop without redeploying with a different YAML.
     ("EB_HITL_ENABLED", "hitl.enabled", "bool"),
     ("EB_HITL_CALLBACK_SECRET", "hitl.callback_hmac_secret", "str"),
+    ("EB_HITL_RUNTIME_AUTH_TOKEN", "hitl.runtime_auth_token", "str"),
 
     # --- Successful-use feedback (Phase 9, off by default) ---
     ("EB_SUCCESSFUL_USE_ENABLED", "successful_use.enabled", "bool"),

@@ -1,6 +1,7 @@
 """Guard API routes (Phase 7 — §7.11, Amendment 7.1 observability)."""
 from __future__ import annotations
 
+import hmac
 import logging
 import uuid
 
@@ -239,7 +240,8 @@ async def get_session_approvals(session_id: uuid.UUID, request: Request):
 @router.patch("/approvals/{request_id}")
 async def update_approval(request_id: uuid.UUID, request: Request):
     """Update approval status (approve/reject). Called by HITL middleware."""
-    await require_authority(request, "guard.approve")
+    if not _is_authorized_hitl_runtime_callback(request):
+        await require_authority(request, "guard.approve")
     engine = get_guard_engine(request)
     if engine is None:
         raise HTTPException(status_code=503, detail="Guard engine not available")
@@ -288,6 +290,15 @@ async def update_approval(request_id: uuid.UUID, request: Request):
         raise HTTPException(status_code=404, detail="Approval request not found")
 
     return {"request": result.model_dump(mode="json")}
+
+
+def _is_authorized_hitl_runtime_callback(request: Request) -> bool:
+    configured = getattr(getattr(get_container(request), "config", None), "hitl", None)
+    expected = getattr(configured, "runtime_auth_token", "") if configured else ""
+    supplied = request.headers.get("X-EB-HITL-Runtime-Token", "")
+    if not isinstance(expected, str) or not isinstance(supplied, str):
+        return False
+    return bool(expected and supplied and hmac.compare_digest(expected, supplied))
 
 
 class SweepTimeoutsRequest(BaseModel):
