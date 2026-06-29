@@ -186,11 +186,11 @@ async def require_authority(request: Request, action: str) -> None:
     auth_store = getattr(container, "authority_store", None)
     if auth_store is None:
         # No authority store → can't enforce. Log and skip.
-        return
+        raise HTTPException(status_code=503, detail="authority_store unavailable")
 
     actor_reg = getattr(container, "actor_registry", None)
     if actor_reg is None:
-        return
+        raise HTTPException(status_code=503, detail="actor_registry unavailable")
 
     metrics = getattr(container, "metrics_ctx", None)
     trace = getattr(container, "trace_ledger", None)

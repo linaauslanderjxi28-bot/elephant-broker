@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
 
-from elephantbroker.api.routes._authority import BOOTSTRAP_ACTIONS, check_authority
+from elephantbroker.api.routes._authority import BOOTSTRAP_ACTIONS, check_authority, require_authority
 from elephantbroker.schemas.actor import ActorRef, ActorType
 
 
@@ -177,3 +178,35 @@ class TestNormalAuthority:
             target_team_id=str(team_id),
         )
         assert result.id == actor.id
+
+
+class TestRequireAuthorityDependencies:
+    @pytest.mark.asyncio
+    async def test_missing_authority_store_fails_closed(self):
+        request = SimpleNamespace(
+            state=SimpleNamespace(actor_id=str(uuid.uuid4()), agent_key="agent"),
+            app=SimpleNamespace(state=SimpleNamespace(container=SimpleNamespace(
+                authority_store=None,
+                actor_registry=_mock_registry(_make_actor()),
+            ))),
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await require_authority(request, "memory.store")
+        assert exc_info.value.status_code == 503
+        assert "authority_store" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_missing_actor_registry_fails_closed(self):
+        request = SimpleNamespace(
+            state=SimpleNamespace(actor_id=str(uuid.uuid4()), agent_key="agent"),
+            app=SimpleNamespace(state=SimpleNamespace(container=SimpleNamespace(
+                authority_store=_mock_authority_store(),
+                actor_registry=None,
+            ))),
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await require_authority(request, "memory.store")
+        assert exc_info.value.status_code == 503
+        assert "actor_registry" in exc_info.value.detail
