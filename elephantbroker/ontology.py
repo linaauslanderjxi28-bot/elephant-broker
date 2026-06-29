@@ -120,26 +120,76 @@ class MarketSignal:
 
 
 class ResearchDecision:
-    """An investment/selection decision for a product."""
+    """A research decision connecting signals → products → prospects → deals.
+
+    Status lifecycle: proposed → investigating → pursued → dropped → completed
+    Entity links enable graph traversal: MarketSignal → [triggered] → ResearchDecision
+    """
     entity_type = "ResearchDecision"
+    VALID_STATUSES = ("proposed", "investigating", "pursued", "dropped", "completed")
     
     def __init__(self, verdict: str, confidence: float = 0.7,
-                 reasoning: str = "", linked_products: list[str] | None = None,
-                 linked_signals: list[str] | None = None):
+                 reasoning: str = "", status: str = "proposed",
+                 linked_products: list[str] | None = None,
+                 linked_signals: list[str] | None = None,
+                 linked_prospects: list[str] | None = None,
+                 linked_deals: list[str] | None = None,
+                 entity_links: list[dict] | None = None,
+                 evidence_count: int = 0,
+                 maturity: str = "experimental"):
         self.verdict = verdict
         self.confidence = confidence
         self.reasoning = reasoning
+        self.status = status if status in self.VALID_STATUSES else "proposed"
         self.linked_products = linked_products or []
         self.linked_signals = linked_signals or []
+        self.linked_prospects = linked_prospects or []
+        self.linked_deals = linked_deals or []
+        self.entity_links = entity_links or []
+        self.evidence_count = evidence_count
+        self.maturity = maturity
 
-    def to_fact(self) -> dict:
-        return _make_fact(
-            text=json.dumps({"verdict":self.verdict,"reasoning":self.reasoning,
-                "linked_products":self.linked_products,"linked_signals":self.linked_signals}, ensure_ascii=False),
-            category="decision", entity_type=self.entity_type, entity_name=self.verdict,
-            confidence=self.confidence, decision_status="proposed",
-            goal_ids=self.linked_products,
+    def to_fact(self) -> FactAssertion:
+        text = json.dumps({
+            "verdict": self.verdict, "reasoning": self.reasoning,
+            "status": self.status, "maturity": self.maturity,
+            "linked_products": self.linked_products,
+            "linked_signals": self.linked_signals,
+            "linked_prospects": self.linked_prospects,
+            "linked_deals": self.linked_deals,
+            "evidence_count": self.evidence_count,
+        }, ensure_ascii=False)
+        goal_ids = []
+        for pid in self.linked_products:
+            try: goal_ids.append(uuid.UUID(pid))
+            except ValueError: pass
+        return FactAssertion(
+            text=text, category="decision", scope=Scope.GLOBAL,
+            memory_class=MemoryClass.SEMANTIC, confidence=self.confidence,
+            entity_type=self.entity_type, entity_name=self.verdict,
+            decision_domain="ecommerce",
+            decision_status=self.status,
+            goal_ids=goal_ids,
+            quality_score=self.confidence,
         )
+
+
+def make_entity_link(from_type: str, from_id: str, to_type: str, to_id: str,
+                     relation: str = "references") -> dict:
+    """Create an entity link dict for graph traversal.
+
+    Args:
+        from_type: source entity_type (e.g. "ResearchDecision")
+        from_id: source entity ID
+        to_type: target entity_type (e.g. "MarketSignal")
+        to_id: target entity ID
+        relation: link type (triggered_by, found, leads_to, references)
+    """
+    return {
+        "from_type": from_type, "from_id": from_id,
+        "to_type": to_type, "to_id": to_id,
+        "relation": relation,
+    }
 
 
 # ================================================================
