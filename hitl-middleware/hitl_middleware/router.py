@@ -84,8 +84,9 @@ async def approve_callback(
     """
     with tracer.start_as_current_span(
         "hitl.callback.approve",
-        attributes={"request_id": str(callback.request_id)},
+        attributes={"request_id": str(callback.request_id), "outcome": "approved"},
     ):
+        span = trace.get_current_span()
         config = request.app.state.config
 
         if not config.callback_secret:
@@ -118,15 +119,19 @@ async def approve_callback(
                     },
                 )
                 if resp.status_code == 404:
+                    span.set_attribute("runtime_status_code", resp.status_code)
                     raise HTTPException(status_code=404, detail="Approval request not found")
                 if not resp.is_success:
+                    span.set_attribute("runtime_status_code", resp.status_code)
                     raise HTTPException(status_code=502, detail=f"Runtime returned {resp.status_code}")
         except httpx.HTTPError as exc:
             logger.error("Runtime PATCH failed for approve (request_id=%s): %s", callback.request_id, exc)
             raise HTTPException(status_code=502, detail="Runtime unreachable") from exc
 
+        span.set_attribute("runtime_status_code", resp.status_code)
+        span.set_attribute("resolved_by", callback.approved_by or "external")
         logger.info("Approval callback processed (request_id=%s, approved_by=%s)", callback.request_id, callback.approved_by or "external")
-        return {"status": "approved", "request_id": str(callback.request_id)}
+        return {"status": "approved", "request_id": str(callback.request_id), "runtime_status_code": resp.status_code}
 
 
 @router.post("/callbacks/reject")
@@ -141,8 +146,9 @@ async def reject_callback(
     """
     with tracer.start_as_current_span(
         "hitl.callback.reject",
-        attributes={"request_id": str(callback.request_id)},
+        attributes={"request_id": str(callback.request_id), "outcome": "rejected"},
     ):
+        span = trace.get_current_span()
         config = request.app.state.config
 
         if not config.callback_secret:
@@ -178,15 +184,19 @@ async def reject_callback(
                     },
                 )
                 if resp.status_code == 404:
+                    span.set_attribute("runtime_status_code", resp.status_code)
                     raise HTTPException(status_code=404, detail="Approval request not found")
                 if not resp.is_success:
+                    span.set_attribute("runtime_status_code", resp.status_code)
                     raise HTTPException(status_code=502, detail=f"Runtime returned {resp.status_code}")
         except httpx.HTTPError as exc:
             logger.error("Runtime PATCH failed for reject (request_id=%s): %s", callback.request_id, exc)
             raise HTTPException(status_code=502, detail="Runtime unreachable") from exc
 
+        span.set_attribute("runtime_status_code", resp.status_code)
+        span.set_attribute("resolved_by", callback.rejected_by or "external")
         logger.info("Rejection callback processed (request_id=%s, reason=%s)", callback.request_id, callback.reason[:80])
-        return {"status": "rejected", "request_id": str(callback.request_id)}
+        return {"status": "rejected", "request_id": str(callback.request_id), "runtime_status_code": resp.status_code}
 
 
 # --- Health endpoint ---

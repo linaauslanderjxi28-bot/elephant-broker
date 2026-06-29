@@ -209,6 +209,7 @@ class TestApproveCallback:
             body = resp.json()
             assert body["status"] == "approved"
             assert body["request_id"] == rid
+            assert body["runtime_status_code"] == 200
 
 
 class TestRejectCallback:
@@ -308,3 +309,4 @@ class TestRejectCallback:
             body = resp.json()
             assert body["status"] == "rejected"
             assert body["request_id"] == rid
+            assert body["runtime_status_code"] == 200
