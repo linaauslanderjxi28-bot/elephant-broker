@@ -1163,9 +1163,6 @@ class MemoryStoreFacade(IMemoryStoreFacade):
     ) -> list[FactAssertion]:
         conditions = ["f.scope = $scope", "f.gateway_id = $gateway_id"]
         params: dict = {"scope": scope.value, "limit": limit, "gateway_id": self._gateway_id}
-        if entity_type:
-            conditions.append("f.entity_type = $entity_type")
-            params["entity_type"] = entity_type
         if memory_class:
             conditions.append("f.memory_class = $memory_class")
             params["memory_class"] = memory_class.value
