@@ -11,6 +11,8 @@ import cognee
 from cognee.modules.search.types import SearchType
 from cognee.tasks.storage import add_data_points
 
+from elephantbroker.ontology.provenance import typed_provenance_from_legacy
+from elephantbroker.ontology.registry import validate_entity_type
 from elephantbroker.runtime.adapters.cognee.datapoints import FactDataPoint
 from elephantbroker.runtime.adapters.cognee.embeddings import EmbeddingService
 from elephantbroker.runtime.adapters.cognee.graph import GraphAdapter
@@ -21,18 +23,21 @@ from elephantbroker.runtime.interfaces.memory_store import IMemoryStoreFacade
 from elephantbroker.runtime.interfaces.scrub_buffer import IScrubBuffer
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
 from elephantbroker.runtime.memory.cascade_helper import CascadeStatus, cascade_cognee_data
+from elephantbroker.runtime.metrics import (
+    inc_cognee_capture_failure,
+    inc_dedup,
+    inc_edge,
+    inc_fact_delete_cascade_failure,
+    inc_gdpr_delete,
+    inc_recent_facts_scrubbed,
+    inc_search_stage_failure,
+    inc_store,
+)
 from elephantbroker.runtime.observability import GatewayLoggerAdapter, traced
 from elephantbroker.runtime.utils.tokens import count_tokens
 from elephantbroker.schemas.base import Scope
 from elephantbroker.schemas.fact import FactAssertion, MemoryClass
-from elephantbroker.ontology.provenance import typed_provenance_from_legacy
-from elephantbroker.runtime.metrics import (
-    MetricsContext, inc_cognee_capture_failure, inc_dedup, inc_edge,
-    inc_fact_delete_cascade_failure, inc_gdpr_delete,
-    inc_recent_facts_scrubbed, inc_search_stage_failure, inc_store,
-)
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
-from elephantbroker.ontology.registry import validate_entity_type
 
 logger = logging.getLogger("elephantbroker.memory.facade")
 
@@ -40,7 +45,7 @@ _FACTS_COLLECTION = "FactDataPoint_text"
 _DEDUP_EMBED_TIMEOUT_SECONDS = 5.0
 
 
-class DedupSkipped(Exception):
+class DedupSkipped(Exception):  # noqa: N818 - public skip exception kept for compatibility.
     """Raised when a store is skipped due to near-duplicate detection."""
     def __init__(self, existing_fact_id: str, similarity: float):
         self.existing_fact_id = existing_fact_id
@@ -82,6 +87,30 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 "typed_provenance_refs": typed_provenance_from_legacy(fact.provenance_refs),
             })
         return fact
+
+    @staticmethod
+    def _extract_cognee_data_id(add_result) -> uuid.UUID:
+        raw_data_id = add_result.data_ingestion_info[0]["data_id"]
+        return uuid.UUID(str(raw_data_id))
+
+    async def _capture_cognee_data_id(
+        self,
+        fact: FactAssertion,
+        *,
+        operation: str,
+    ) -> uuid.UUID | None:
+        try:
+            add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
+            return self._extract_cognee_data_id(add_result)
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+            await self._emit_capture_failure(
+                operation=operation,
+                fact_id=fact.id,
+                exc=exc,
+                session_key=fact.session_key,
+                session_id=fact.session_id,
+            )
+            return None
 
     @traced
     async def store(
@@ -142,7 +171,11 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 except Exception as exc:
                     logger.warning("Dedup check failed, proceeding with store: %s", exc)
 
-            dp = FactDataPoint.from_schema(fact, cognee_data_id=None)
+            cognee_data_id = await self._capture_cognee_data_id(fact, operation="store")
+            dp = FactDataPoint.from_schema(
+                fact,
+                cognee_data_id=str(cognee_data_id) if cognee_data_id else None,
+            )
             await add_data_points([dp])
 
             # Graph edges (best-effort). Batch gateway pre-check (M6) reduces
@@ -433,7 +466,9 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             return False
         if actor_id and str(fact.source_actor_id or "") != actor_id:
             return False
-        if memory_class and str(fact.memory_class) != str(memory_class.value if hasattr(memory_class, "value") else memory_class):
+        if memory_class and str(fact.memory_class) != str(
+            memory_class.value if hasattr(memory_class, "value") else memory_class,
+        ):
             return False
         if session_key and fact.session_key != session_key:
             return False
@@ -793,6 +828,11 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             if text_changed:
                 fact.token_size = count_tokens(fact.text)
                 fact.embedding_ref = f"FactDataPoint_text:{fact.id}"
+                captured_cognee_data_id = await self._capture_cognee_data_id(
+                    fact,
+                    operation="update",
+                )
+                new_cognee_data_id = captured_cognee_data_id
 
             updated_dp = FactDataPoint.from_schema(
                 fact,

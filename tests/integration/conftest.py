@@ -18,7 +18,7 @@ from elephantbroker.schemas.config import ElephantBrokerConfig, LLMConfig
 # ---------------------------------------------------------------------------
 os.environ.setdefault("EB_NEO4J_URI", "bolt://localhost:17687")
 os.environ.setdefault("EB_NEO4J_USER", "neo4j")
-os.environ.setdefault("EB_NEO4J_PASSWORD", "testpassword")
+os.environ.setdefault("EB_NEO4J_PASSWORD", "elephant_dev")
 os.environ.setdefault("EB_QDRANT_URL", "http://localhost:16333")
 os.environ.setdefault("EB_REDIS_URL", "redis://localhost:16379")
 # Pin embedding model + dims to known-working OpenAI values regardless of

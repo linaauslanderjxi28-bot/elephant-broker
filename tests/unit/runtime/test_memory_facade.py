@@ -2315,7 +2315,7 @@ class TestCascadeCogneeDataGuards:
         assert mock_cognee.datasets.delete_data.await_count == 2
 
     # --- TD-Cognee-Qdrant-404 (Cluster Cfx) ---
-    # Cognee 0.5.6's delete_from_graph_and_vector calls
+    # Cognee delete_from_graph_and_vector calls
     # vector_engine.delete_data_points without a has_collection guard.
     # When a Data row is added but never cognify()'d, the derived Qdrant
     # collection doesn't exist → 404 → UnexpectedResponse → outer

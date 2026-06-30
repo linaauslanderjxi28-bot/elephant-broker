@@ -1,19 +1,20 @@
 """Cognee DataPoint subclasses mapping EB schemas to the graph engine."""
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from cognee.infrastructure.engine import DataPoint
 
+from elephantbroker.ontology.provenance import ProvenanceRef
 from elephantbroker.schemas.actor import ActorRef, ActorType
 from elephantbroker.schemas.artifact import ToolArtifact
 from elephantbroker.schemas.evidence import ClaimRecord, ClaimStatus, EvidenceRef
-from elephantbroker.schemas.fact import FactAssertion, FactCategory, MemoryClass
+from elephantbroker.schemas.fact import FactAssertion
 from elephantbroker.schemas.goal import GoalState, GoalStatus
-from elephantbroker.schemas.procedure import ProcedureDefinition
-from elephantbroker.ontology.provenance import ProvenanceRef
+from elephantbroker.schemas.procedure import ProcedureActivation, ProcedureDefinition, ProcedureStep
 
 
 def _dt_to_epoch_ms(dt: datetime) -> int:
@@ -90,7 +91,7 @@ class FactDataPoint(DataPoint):
             use_count=fact.use_count,
             successful_use_count=fact.successful_use_count,
             provenance_refs=list(fact.provenance_refs),
-            typed_provenance_refs=[ref.model_dump_keyed() for ref in fact.typed_provenance_refs],
+            typed_provenance_refs=[ref.model_dump() for ref in fact.typed_provenance_refs],
             embedding_ref=fact.embedding_ref,
             token_size=fact.token_size,
             eb_id=str(fact.id),
@@ -349,14 +350,16 @@ class ProcedureDataPoint(DataPoint):
             # survives graph round-trip.
             is_manual_only=getattr(proc, "is_manual_only", False),
             steps_json=json.dumps([s.model_dump(mode="json") for s in proc.steps]) if proc.steps else "[]",
-            activation_modes_json=json.dumps([m.model_dump(mode="json") for m in proc.activation_modes]) if proc.activation_modes else "[]",
+            activation_modes_json=(
+                json.dumps([m.model_dump(mode="json") for m in proc.activation_modes])
+                if proc.activation_modes
+                else "[]"
+            ),
             red_line_bindings_json=json.dumps(proc.red_line_bindings) if proc.red_line_bindings else "[]",
             approval_requirements_json=json.dumps(proc.approval_requirements) if proc.approval_requirements else "[]",
         )
 
     def to_schema(self) -> ProcedureDefinition:
-        import json
-        from elephantbroker.schemas.procedure import ProcedureActivation, ProcedureStep
         steps = []
         try:
             raw = json.loads(self.steps_json) if self.steps_json else []
@@ -370,7 +373,11 @@ class ProcedureDataPoint(DataPoint):
             pass
         approval_requirements = []
         try:
-            approval_requirements = json.loads(self.approval_requirements_json) if self.approval_requirements_json else []
+            approval_requirements = (
+                json.loads(self.approval_requirements_json)
+                if self.approval_requirements_json
+                else []
+            )
         except Exception:
             pass
         activation_modes = []
@@ -404,8 +411,6 @@ class ProcedureDataPoint(DataPoint):
     @classmethod
     def to_schema_from_dict(cls, d: dict) -> ProcedureDefinition:
         """Reconstruct ProcedureDefinition from a graph entity dict."""
-        import json
-        from elephantbroker.schemas.procedure import ProcedureActivation, ProcedureStep
         steps = []
         steps_raw = d.get("steps_json") or d.get("steps", "[]")
         if isinstance(steps_raw, str):

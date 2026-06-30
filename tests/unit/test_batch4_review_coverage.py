@@ -463,48 +463,72 @@ class TestQdrantSemanticFallback:
 # ---------------------------------------------------------------------------
 
 
-class TestQdrantPatchIdempotency:
-    """Verify monkey-patch is applied once and double-call is safe."""
+class TestQdrantAdapterRegistration:
+    def test_qdrant_adapter_registered_by_eb_shim(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "elephantbroker.runtime.adapters.cognee.qdrant_adapter.use_vector_adapter",
+            lambda name, adapter: calls.append((name, adapter)),
+        )
+        from elephantbroker.runtime.adapters.cognee.qdrant_adapter import (
+            QdrantAdapter,
+            register_qdrant_adapter,
+        )
 
-    def test_double_patch_is_idempotent(self):
-        """Verify _eb_patched sentinel prevents double-patching."""
-        # Simulate the monkey-patch logic directly without importing Cognee
-        class FakeAdapter:
-            def get_qdrant_client(self):
-                return "original"
+        register_qdrant_adapter()
 
-        # First patch
-        orig = FakeAdapter.get_qdrant_client
-        if not getattr(FakeAdapter, "_eb_patched", False):
-            def patched(self):
-                return "patched"
-            FakeAdapter.get_qdrant_client = patched
-            FakeAdapter._eb_patched = True
+        assert calls == [("qdrant", QdrantAdapter)]
 
-        assert FakeAdapter().get_qdrant_client() == "patched"
+    async def test_qdrant_search_preserves_cosine_similarity_score(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
 
-        # Second patch attempt — sentinel should prevent overwrite
-        if not getattr(FakeAdapter, "_eb_patched", False):
-            def patched2(self):
-                return "double-patched"
-            FakeAdapter.get_qdrant_client = patched2
+        from elephantbroker.runtime.adapters.cognee.qdrant_adapter import QdrantAdapter
 
-        # Still returns "patched", not "double-patched"
-        assert FakeAdapter().get_qdrant_client() == "patched"
+        adapter = QdrantAdapter(url="", api_key="", embedding_engine=MagicMock(), database_name="gw-test")
+        point = MagicMock()
+        point.id = uuid4()
+        point.payload = {"database_name": "gw-test"}
+        point.score = 0.95
+        response = MagicMock(points=[point])
+        client = AsyncMock()
+        client.query_points = AsyncMock(return_value=response)
+        client.close = AsyncMock()
 
-    def test_sentinel_set_after_patch(self):
-        """After patching, _eb_patched should be True on the class."""
-        try:
-            from cognee_community_vector_adapter_qdrant.qdrant_adapter import QDrantAdapter
-            # If we can import, check the sentinel
-            assert getattr(QDrantAdapter, "_eb_patched", False) or True  # may not be patched in test env
-        except ImportError:
-            pytest.skip("Qdrant adapter not installed")
+        monkeypatch.setattr(adapter, "has_collection", AsyncMock(return_value=True))
+        monkeypatch.setattr(adapter, "get_qdrant_client", lambda: client)
 
+        results = await adapter.search("facts", query_vector=[1.0, 0.0, 0.0, 0.0], limit=1)
 
-# ---------------------------------------------------------------------------
-# TODO-12-508: Prometheus counter wiring
-# ---------------------------------------------------------------------------
+        assert len(results) == 1
+        assert results[0].score == 0.95
+
+    async def test_qdrant_delete_data_points_filters_by_database_name(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+
+        from qdrant_client.models import FieldCondition, FilterSelector, HasIdCondition
+
+        from elephantbroker.runtime.adapters.cognee.qdrant_adapter import QdrantAdapter
+
+        adapter = QdrantAdapter(url="", api_key="", embedding_engine=MagicMock(), database_name="gw-test")
+        client = AsyncMock()
+        client.close = AsyncMock()
+        monkeypatch.setattr(adapter, "get_qdrant_client", lambda: client)
+
+        point_id = uuid4()
+        await adapter.delete_data_points("facts", [point_id])
+
+        selector = client.delete.call_args.kwargs["points_selector"]
+        assert isinstance(selector, FilterSelector)
+        conditions = selector.filter.must
+        assert any(isinstance(condition, HasIdCondition) and condition.has_id == [str(point_id)] for condition in conditions)
+        assert any(
+            isinstance(condition, FieldCondition)
+            and condition.key == "database_name"
+            and condition.match.value == "gw-test"
+            for condition in conditions
+        )
 
 
 class TestPrometheusCounterWiring:
