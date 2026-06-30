@@ -43,6 +43,13 @@ def _mock_configure_cognee():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_dataset_lock(tmp_path, monkeypatch):
+    data_dir = tmp_path / "var-lib"
+    monkeypatch.setattr("elephantbroker.runtime.container._DATA_DIR_PATH", data_dir)
+    monkeypatch.setattr("elephantbroker.runtime.container._DATASET_LOCK_FILE", data_dir / ".dataset_lock")
+
+
 def _safe_config(**kwargs) -> ElephantBrokerConfig:
     """Build a config with the minimum safety fields populated.
 
