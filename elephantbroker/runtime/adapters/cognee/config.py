@@ -4,12 +4,40 @@ from __future__ import annotations
 import logging
 import os
 from importlib import metadata as _importlib_metadata
+from urllib.parse import unquote, urlparse
 
 from elephantbroker.schemas.config import CogneeConfig, LLMConfig
 
 _SUPPORTED_COGNEE_VERSION = "1.2.2"
 
 _log = logging.getLogger("elephantbroker.adapters.cognee.config")
+
+
+def _cognee_relational_env_from_dsn(dsn: str) -> dict[str, str]:
+    parsed = urlparse(dsn)
+    if parsed.scheme not in {"postgres", "postgresql", "postgresql+asyncpg"}:
+        return {}
+    db_name = parsed.path.lstrip("/")
+    if not parsed.hostname or not db_name:
+        return {}
+    port = str(parsed.port or 5432)
+    username = unquote(parsed.username or "")
+    password = unquote(parsed.password or "")
+    values = {
+        "DB_PROVIDER": "postgres",
+        "DB_HOST": parsed.hostname,
+        "DB_PORT": port,
+        "DB_USERNAME": username,
+        "DB_PASSWORD": password,
+        "DB_NAME": db_name,
+    }
+    return values | {f"MIGRATION_{key}": value for key, value in values.items()}
+
+
+def _configure_cognee_relational_db_from_env() -> None:
+    env_values = _cognee_relational_env_from_dsn(os.environ.get("EB_POSTGRES_DSN", ""))
+    for key, value in env_values.items():
+        os.environ.setdefault(key, value)
 
 
 def _verify_cognee_pin() -> None:
@@ -48,6 +76,7 @@ async def configure_cognee(
     os.environ.setdefault("COGNEE_SKIP_CONNECTION_TEST", "true")
     os.environ.setdefault("COGNEE_DISABLE_TELEMETRY", "true")
     os.environ.setdefault("TELEMETRY_DISABLED", "true")
+    _configure_cognee_relational_db_from_env()
 
     cognee.config.set_graph_database_provider("neo4j")
     cognee.config.set_graph_db_config({

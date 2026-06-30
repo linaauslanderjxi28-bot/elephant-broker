@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from elephantbroker.runtime.adapters.cognee.config import (
     _SUPPORTED_COGNEE_VERSION,
+    _cognee_relational_env_from_dsn,
     _verify_cognee_pin,
 )
 
@@ -51,3 +52,24 @@ class TestCogneePinVerify:
             ):
                 _verify_cognee_pin()
         assert "metadata not found" in caplog.text
+
+
+def test_cognee_relational_env_from_postgres_dsn():
+    env = _cognee_relational_env_from_dsn(
+        "postgresql://eb_user:secret@localhost:15432/elephantbroker",
+    )
+
+    assert env == {
+        "DB_PROVIDER": "postgres",
+        "DB_HOST": "localhost",
+        "DB_PORT": "15432",
+        "DB_USERNAME": "eb_user",
+        "DB_PASSWORD": "secret",
+        "DB_NAME": "elephantbroker",
+        "MIGRATION_DB_PROVIDER": "postgres",
+        "MIGRATION_DB_HOST": "localhost",
+        "MIGRATION_DB_PORT": "15432",
+        "MIGRATION_DB_USERNAME": "eb_user",
+        "MIGRATION_DB_PASSWORD": "secret",
+        "MIGRATION_DB_NAME": "elephantbroker",
+    }
