@@ -379,3 +379,61 @@ class TestPhase5Wiring:
         container.compaction_llm_client = container.llm_client
         await container.close()
         assert container.llm_client.close.await_count == 1
+
+    async def test_postgres_dsn_selects_structured_store_backends(self, monkeypatch, tmp_path, allow_default_gateway):
+        monkeypatch.setenv("EB_POSTGRES_DSN", "postgresql://example/test")
+        monkeypatch.setattr("elephantbroker.runtime.container._DATA_DIR_PATH", tmp_path / "data")
+        monkeypatch.setattr(
+            "elephantbroker.runtime.container._DATASET_LOCK_FILE",
+            tmp_path / "data" / ".dataset_lock",
+        )
+
+        with patch(
+            "elephantbroker.runtime.adapters.postgres.actor_registry.PostgresActorRegistry.init_db",
+            new_callable=AsyncMock,
+        ), patch(
+            "elephantbroker.runtime.adapters.postgres.authority_store.PostgresAuthorityRuleStore.init_db",
+            new_callable=AsyncMock,
+        ), patch(
+            "elephantbroker.runtime.adapters.postgres.structured_stores.PostgresTuningDeltaStore.init_db",
+            new_callable=AsyncMock,
+        ), patch(
+            "elephantbroker.runtime.adapters.postgres.structured_stores.PostgresScoringLedgerStore.init_db",
+            new_callable=AsyncMock,
+        ), patch(
+            "elephantbroker.runtime.adapters.postgres.structured_stores.PostgresConsolidationReportStore.init_db",
+            new_callable=AsyncMock,
+        ), patch(
+            "elephantbroker.runtime.adapters.postgres.structured_stores.PostgresProcedureAuditStore.init_db",
+            new_callable=AsyncMock,
+        ), patch(
+            "elephantbroker.runtime.adapters.postgres.structured_stores.PostgresSessionGoalAuditStore.init_db",
+            new_callable=AsyncMock,
+        ), patch(
+            "elephantbroker.runtime.adapters.postgres.structured_stores.PostgresOrgOverrideStore.init_db",
+            new_callable=AsyncMock,
+        ):
+            container = await RuntimeContainer.from_config(ElephantBrokerConfig(), BusinessTier.FULL)
+
+        from elephantbroker.runtime.adapters.postgres.structured_stores import (
+            PostgresConsolidationReportStore,
+            PostgresOrgOverrideStore,
+            PostgresProcedureAuditStore,
+            PostgresScoringLedgerStore,
+            PostgresSessionGoalAuditStore,
+            PostgresTuningDeltaStore,
+        )
+        from elephantbroker.runtime.adapters.postgres.authority_store import PostgresAuthorityRuleStore
+
+        assert isinstance(container.tuning_delta_store, PostgresTuningDeltaStore)
+        assert isinstance(container.scoring_ledger_store, PostgresScoringLedgerStore)
+        assert isinstance(container.consolidation_report_store, PostgresConsolidationReportStore)
+        assert isinstance(container.procedure_audit, PostgresProcedureAuditStore)
+        assert isinstance(container.session_goal_audit, PostgresSessionGoalAuditStore)
+        assert isinstance(container.org_override_store, PostgresOrgOverrideStore)
+        assert isinstance(container.authority_store, PostgresAuthorityRuleStore)
+        assert container.profile_registry is not None
+        assert container.profile_registry._org_store is container.org_override_store
+        assert container.consolidation is not None
+        assert container.consolidation._proc_audit is container.procedure_audit
+        assert container.consolidation._goal_audit is container.session_goal_audit
