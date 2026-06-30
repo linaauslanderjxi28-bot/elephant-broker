@@ -56,6 +56,7 @@ def mock_container():
     c.config = MagicMock()
     c.config.gateway = MagicMock()
     c.config.gateway.gateway_id = "test"
+    c.config.gateway.auth_token = "test"
 
     return c
 
@@ -104,7 +105,11 @@ def _approval(*, request_id=None, guard_event_id=None, session_id=None, status=A
 async def client(mock_container):
     app = create_app(mock_container)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": "Bearer test"},
+    ) as ac:
         yield ac
 
 

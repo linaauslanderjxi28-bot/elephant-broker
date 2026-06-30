@@ -27,19 +27,21 @@ async def reset_cognee_cache():
     """Clear Cognee's cached graph engine to avoid stale event loop errors."""
     try:
         from cognee.infrastructure.databases.graph.get_graph_engine import _create_graph_engine
-        _create_graph_engine.cache_clear()
+        cache_clear = getattr(_create_graph_engine, "cache_clear")
+        cache_clear()
     except Exception:
         pass
     yield
     try:
         from cognee.infrastructure.databases.graph.get_graph_engine import _create_graph_engine
-        _create_graph_engine.cache_clear()
+        cache_clear = getattr(_create_graph_engine, "cache_clear")
+        cache_clear()
     except Exception:
         pass
 
 
 @pytest_asyncio.fixture
-async def app(monkeypatch):
+async def app(monkeypatch, tmp_path):
     """Create a fully wired FastAPI app with real infrastructure (per test).
 
     R2 integration RED fix (cascade fallout from TODO-3-343 / Bucket A-R2-Test):
@@ -57,6 +59,22 @@ async def app(monkeypatch):
     from elephantbroker.schemas.tiers import BusinessTier
 
     monkeypatch.setenv("EB_GATEWAY_ID", "test-phase6-gateway")
+    monkeypatch.setenv("EB_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("EB_DEV_MODE", "true")
+    monkeypatch.setenv("EB_ALLOW_DATASET_CHANGE", "true")
+    monkeypatch.setenv("GRAPH_DATABASE_USERNAME", "neo4j")
+    monkeypatch.setenv("GRAPH_DATABASE_PASSWORD", "test-password")
+    data_dir = tmp_path / "data"
+    for env_name, file_name in {
+        "EB_PROCEDURE_AUDIT_DB_PATH": "procedure_audit.db",
+        "EB_SESSION_GOAL_AUDIT_DB_PATH": "session_goals_audit.db",
+        "EB_ORG_OVERRIDES_DB_PATH": "org_overrides.db",
+        "EB_AUTHORITY_RULES_DB_PATH": "authority_rules.db",
+        "EB_CONSOLIDATION_REPORTS_DB_PATH": "consolidation_reports.db",
+        "EB_TUNING_DELTAS_DB_PATH": "tuning_deltas.db",
+        "EB_SCORING_LEDGER_DB_PATH": "scoring_ledger.db",
+    }.items():
+        monkeypatch.setenv(env_name, str(data_dir / file_name))
     config = ElephantBrokerConfig.load()
     container = await RuntimeContainer.from_config(config, tier=BusinessTier.FULL)
     application = create_app(container)
@@ -76,7 +94,12 @@ async def simulator(app):
 
     transport = httpx.ASGITransport(app=app)
     sim = OpenClawGatewaySimulator.__new__(OpenClawGatewaySimulator)
-    sim.client = httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0)
+    sim.client = httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+        timeout=30.0,
+        headers={"Authorization": "Bearer test-token"},
+    )
     sim.session_key = "agent:main:main"
     sim.session_id = str(uuid.uuid4())
     yield sim

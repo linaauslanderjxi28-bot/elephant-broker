@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import pytest
 import pytest_asyncio
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 from elephantbroker.schemas.config import ElephantBrokerConfig
 
@@ -26,19 +28,21 @@ async def reset_cognee_cache():
     """Clear Cognee's cached graph engine to avoid stale event loop errors."""
     try:
         from cognee.infrastructure.databases.graph.get_graph_engine import _create_graph_engine
-        _create_graph_engine.cache_clear()
+        cache_clear = getattr(_create_graph_engine, "cache_clear")
+        cache_clear()
     except Exception:
         pass
     yield
     try:
         from cognee.infrastructure.databases.graph.get_graph_engine import _create_graph_engine
-        _create_graph_engine.cache_clear()
+        cache_clear = getattr(_create_graph_engine, "cache_clear")
+        cache_clear()
     except Exception:
         pass
 
 
 @pytest_asyncio.fixture
-async def app(monkeypatch):
+async def app(monkeypatch, tmp_path):
     """Create a fully wired FastAPI app with real infrastructure (per test).
 
     R2 integration RED fix (cascade fallout from TODO-3-343 / Bucket A-R2-Test):
@@ -56,8 +60,46 @@ async def app(monkeypatch):
     from elephantbroker.schemas.tiers import BusinessTier
 
     monkeypatch.setenv("EB_GATEWAY_ID", "test-phase5-gateway")
+    monkeypatch.setenv("EB_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("EB_DEV_MODE", "true")
+    monkeypatch.setenv("EB_ALLOW_DATASET_CHANGE", "true")
+    monkeypatch.setenv("GRAPH_DATABASE_USERNAME", "neo4j")
+    monkeypatch.setenv("GRAPH_DATABASE_PASSWORD", "test-password")
+    procedure_entities: dict[str, dict[str, Any]] = {}
+
+    async def fake_add_data_points(data_points, context=None, custom_edges=None, embed_triplets=False):
+        for data_point in data_points:
+            eb_id = getattr(data_point, "eb_id", "")
+            if eb_id:
+                procedure_entities[eb_id] = data_point.model_dump(mode="json")
+        return list(data_points)
+
+    mock_cognee = MagicMock()
+    mock_cognee.add = AsyncMock(return_value=None)
+    monkeypatch.setattr("elephantbroker.runtime.procedures.engine.add_data_points", fake_add_data_points)
+    monkeypatch.setattr("elephantbroker.runtime.procedures.engine.cognee", mock_cognee)
+    data_dir = tmp_path / "data"
+    for env_name, file_name in {
+        "EB_PROCEDURE_AUDIT_DB_PATH": "procedure_audit.db",
+        "EB_SESSION_GOAL_AUDIT_DB_PATH": "session_goals_audit.db",
+        "EB_ORG_OVERRIDES_DB_PATH": "org_overrides.db",
+        "EB_AUTHORITY_RULES_DB_PATH": "authority_rules.db",
+        "EB_CONSOLIDATION_REPORTS_DB_PATH": "consolidation_reports.db",
+        "EB_TUNING_DELTAS_DB_PATH": "tuning_deltas.db",
+        "EB_SCORING_LEDGER_DB_PATH": "scoring_ledger.db",
+    }.items():
+        monkeypatch.setenv(env_name, str(data_dir / file_name))
     config = ElephantBrokerConfig.load()
     container = await RuntimeContainer.from_config(config, tier=BusinessTier.FULL)
+    assert container.graph is not None
+    original_get_entity = container.graph.get_entity
+
+    async def get_entity(entity_id: str, *, gateway_id: str | None = None) -> dict[str, Any] | None:
+        if str(entity_id) in procedure_entities:
+            return procedure_entities[str(entity_id)]
+        return await original_get_entity(entity_id, gateway_id=gateway_id)
+
+    monkeypatch.setattr(container.graph, "get_entity", get_entity)
     application = create_app(container)
     yield application
     try:
@@ -74,7 +116,12 @@ async def simulator(app):
 
     transport = httpx.ASGITransport(app=app)
     sim = OpenClawGatewaySimulator.__new__(OpenClawGatewaySimulator)
-    sim.client = httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0)
+    sim.client = httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+        timeout=30.0,
+        headers={"Authorization": "Bearer test-token"},
+    )
     sim.session_key = "agent:main:main"
     import uuid
     sim.session_id = str(uuid.uuid4())
