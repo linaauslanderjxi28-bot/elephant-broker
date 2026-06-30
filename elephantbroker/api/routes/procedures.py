@@ -177,6 +177,7 @@ async def complete_step(
             actor_id=str(execution.actor_id) if execution and execution.actor_id else None,
             approval_request_id=str(body.approval_request_id) if body.approval_request_id else None,
             lineage_refs=body.lineage_refs,
+            gateway_id=gw_id,
         )
         if body.proof_value:
             await audit.record_event(
@@ -190,6 +191,7 @@ async def complete_step(
                 actor_id=str(execution.actor_id) if execution and execution.actor_id else None,
                 approval_request_id=str(body.approval_request_id) if body.approval_request_id else None,
                 lineage_refs=body.lineage_refs,
+                gateway_id=gw_id,
             )
 
     if body.proof_value:
@@ -219,3 +221,25 @@ async def get_session_procedure_status(
         return {"procedures": []}
     events = await audit.get_session_events(session_key, session_id)
     return {"procedures": events}
+
+
+@router.get("/audit/action/{action_id}")
+async def get_procedure_audit_events_by_action(action_id: str, request: Request):
+    container = get_container(request)
+    audit = getattr(container, "procedure_audit", None)
+    if not audit:
+        return {"events": []}
+    gw_id = getattr(request.state, "gateway_id", None)
+    events = await audit.get_events_by_action_id(action_id, gateway_id=gw_id)
+    return {"events": events}
+
+
+@router.get("/audit/lineage")
+async def get_procedure_audit_events_by_lineage(lineage_ref: str, request: Request):
+    container = get_container(request)
+    audit = getattr(container, "procedure_audit", None)
+    if not audit:
+        return {"events": []}
+    gw_id = getattr(request.state, "gateway_id", None)
+    events = await audit.get_events_by_lineage_ref(lineage_ref, gateway_id=gw_id)
+    return {"events": events}

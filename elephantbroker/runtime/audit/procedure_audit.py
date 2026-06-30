@@ -51,6 +51,14 @@ class ProcedureAuditStore:
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_procedure_events_action "
+            "ON procedure_events (action_id, timestamp)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_procedure_events_gateway_action "
+            "ON procedure_events (gateway_id, action_id, timestamp)"
+        )
         self._conn.commit()
 
     async def record_event(
@@ -110,6 +118,48 @@ class ProcedureAuditStore:
         )
         cols = [d[0] for d in cursor.description]
         return [self._row_to_event(cols, row) for row in cursor.fetchall()]
+
+    async def get_events_by_action_id(
+        self,
+        action_id: str,
+        gateway_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        if not self._enabled or not self._conn:
+            return []
+        if gateway_id is None:
+            cursor = self._conn.execute(
+                "SELECT * FROM procedure_events WHERE action_id=? ORDER BY timestamp",
+                (action_id,),
+            )
+        else:
+            cursor = self._conn.execute(
+                "SELECT * FROM procedure_events WHERE action_id=? AND gateway_id=? ORDER BY timestamp",
+                (action_id, gateway_id),
+            )
+        cols = [d[0] for d in cursor.description]
+        return [self._row_to_event(cols, row) for row in cursor.fetchall()]
+
+    async def get_events_by_lineage_ref(
+        self,
+        lineage_ref: str,
+        gateway_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        if not self._enabled or not self._conn:
+            return []
+        if gateway_id is None:
+            cursor = self._conn.execute("SELECT * FROM procedure_events ORDER BY timestamp")
+        else:
+            cursor = self._conn.execute(
+                "SELECT * FROM procedure_events WHERE gateway_id=? ORDER BY timestamp",
+                (gateway_id,),
+            )
+        cols = [d[0] for d in cursor.description]
+        events = [self._row_to_event(cols, row) for row in cursor.fetchall()]
+        return [event for event in events if self._event_has_lineage_ref(event, lineage_ref)]
+
+    def _event_has_lineage_ref(self, event: dict[str, object], lineage_ref: str) -> bool:
+        lineage_refs = event.get("lineage_refs")
+        return isinstance(lineage_refs, list) and lineage_ref in lineage_refs
 
     def _row_to_event(self, cols: list[str], row: tuple[object, ...]) -> dict[str, object]:
         event: dict[str, object] = dict(zip(cols, row))

@@ -87,6 +87,14 @@ class PostgresProcedureAuditStore(_PoolBackedStore):
                 "CREATE INDEX IF NOT EXISTS idx_procedure_events_procedure "
                 "ON procedure_events (procedure_id, timestamp)"
             )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_procedure_events_action "
+                "ON procedure_events (action_id, timestamp)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_procedure_events_gateway_action "
+                "ON procedure_events (gateway_id, action_id, timestamp)"
+            )
 
     async def record_event(
         self,
@@ -142,6 +150,45 @@ class PostgresProcedureAuditStore(_PoolBackedStore):
                 procedure_id,
             )
         return [self._row_to_event(row) for row in rows]
+
+    async def get_events_by_action_id(
+        self,
+        action_id: str,
+        gateway_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self._enabled or not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            if gateway_id is None:
+                rows = await conn.fetch(
+                    "SELECT * FROM procedure_events WHERE action_id=$1 ORDER BY timestamp",
+                    action_id,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT * FROM procedure_events WHERE action_id=$1 AND gateway_id=$2 ORDER BY timestamp",
+                    action_id,
+                    gateway_id,
+                )
+        return [self._row_to_event(row) for row in rows]
+
+    async def get_events_by_lineage_ref(
+        self,
+        lineage_ref: str,
+        gateway_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self._enabled or not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            if gateway_id is None:
+                rows = await conn.fetch("SELECT * FROM procedure_events ORDER BY timestamp")
+            else:
+                rows = await conn.fetch(
+                    "SELECT * FROM procedure_events WHERE gateway_id=$1 ORDER BY timestamp",
+                    gateway_id,
+                )
+        events = [self._row_to_event(row) for row in rows]
+        return [event for event in events if lineage_ref in event.get("lineage_refs", [])]
 
     def _row_to_event(self, row: asyncpg.Record) -> dict[str, Any]:
         event = dict(row)

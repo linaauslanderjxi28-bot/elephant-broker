@@ -157,6 +157,75 @@ class TestProcedureAuditStore:
             await store.close()
 
     @pytest.mark.asyncio
+    async def test_get_events_by_action_id_filters_by_gateway(self, store: ProcedureAuditStore) -> None:
+        await store.init_db()
+        try:
+            await store.record_event(
+                "sk1", "sid1", "proc-1", "Deploy Checklist",
+                "step_completed",
+                action_id="action-1",
+                lineage_refs=["commit:abc123"],
+                gateway_id="gateway-a",
+            )
+            await store.record_event(
+                "sk1", "sid1", "proc-1", "Deploy Checklist",
+                "proof_submitted",
+                action_id="action-1",
+                lineage_refs=["artifact:test-report"],
+                gateway_id="gateway-a",
+            )
+            await store.record_event(
+                "sk2", "sid2", "proc-2", "Other Procedure",
+                "step_completed",
+                action_id="action-1",
+                lineage_refs=["commit:abc123"],
+                gateway_id="gateway-b",
+            )
+
+            events = await store.get_events_by_action_id("action-1", gateway_id="gateway-a")
+
+            assert [event["event_type"] for event in events] == ["step_completed", "proof_submitted"]
+            assert {event["gateway_id"] for event in events} == {"gateway-a"}
+            assert events[0]["lineage_refs"] == ["commit:abc123"]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_get_events_by_lineage_ref_filters_by_gateway(self, store: ProcedureAuditStore) -> None:
+        await store.init_db()
+        try:
+            await store.record_event(
+                "sk1", "sid1", "proc-1", "Deploy Checklist",
+                "step_completed",
+                action_id="action-1",
+                lineage_refs=["commit:abc123", "artifact:test-report"],
+                gateway_id="gateway-a",
+            )
+            await store.record_event(
+                "sk1", "sid1", "proc-1", "Deploy Checklist",
+                "proof_submitted",
+                action_id="action-2",
+                lineage_refs=["commit:def456"],
+                gateway_id="gateway-a",
+            )
+            await store.record_event(
+                "sk2", "sid2", "proc-2", "Other Procedure",
+                "step_completed",
+                action_id="action-3",
+                lineage_refs=["commit:abc123"],
+                gateway_id="gateway-b",
+            )
+
+            events = await store.get_events_by_lineage_ref("commit:abc123", gateway_id="gateway-a")
+
+            assert len(events) == 1
+            assert events[0]["action_id"] == "action-1"
+            assert events[0]["lineage_refs"] == ["commit:abc123", "artifact:test-report"]
+            assert events[0]["gateway_id"] == "gateway-a"
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
     async def test_get_session_events_filters_correctly(self, store: ProcedureAuditStore) -> None:
         await store.init_db()
         try:

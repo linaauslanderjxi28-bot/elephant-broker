@@ -89,3 +89,58 @@ class TestProcedureActionLineage:
         assert body["approval_requirements"] == ["human release manager approval"]
         engine.check_step.assert_not_awaited()
         approval_queue.create.assert_awaited_once()
+
+    async def test_action_lineage_events_are_queryable_by_action_id(self, client, container) -> None:
+        audit = MagicMock()
+        audit.get_events_by_action_id = AsyncMock(return_value=[
+            {
+                "event_type": "step_completed",
+                "action_id": "action-1",
+                "lineage_refs": ["commit:abc123"],
+                "gateway_id": "tenant-1",
+            },
+        ])
+        container.procedure_audit = audit
+
+        response = await client.get(
+            "/procedures/audit/action/action-1",
+            headers={"X-EB-Gateway-ID": "tenant-1", "X-EB-Agent-Key": "tenant-1:agent-a"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "events": [
+                {
+                    "event_type": "step_completed",
+                    "action_id": "action-1",
+                    "lineage_refs": ["commit:abc123"],
+                    "gateway_id": "tenant-1",
+                },
+            ],
+        }
+        audit.get_events_by_action_id.assert_awaited_once_with("action-1", gateway_id="tenant-1")
+
+    async def test_action_lineage_events_are_queryable_by_lineage_ref(self, client, container) -> None:
+        audit = MagicMock()
+        audit.get_events_by_lineage_ref = AsyncMock(return_value=[
+            {
+                "event_type": "proof_submitted",
+                "action_id": "action-2",
+                "lineage_refs": ["artifact:test-report"],
+                "gateway_id": "tenant-2",
+            },
+        ])
+        container.procedure_audit = audit
+
+        response = await client.get(
+            "/procedures/audit/lineage",
+            params={"lineage_ref": "artifact:test-report"},
+            headers={"X-EB-Gateway-ID": "tenant-2", "X-EB-Agent-Key": "tenant-2:agent-a"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["events"][0]["action_id"] == "action-2"
+        audit.get_events_by_lineage_ref.assert_awaited_once_with(
+            "artifact:test-report",
+            gateway_id="tenant-2",
+        )
