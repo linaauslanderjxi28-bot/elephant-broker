@@ -76,7 +76,7 @@ class PostgresAuthorityRuleStore:
     async def set_rule(self, action: str, rule: dict[str, Any]) -> None:
         if not self._pool:
             raise RuntimeError("PostgresAuthorityRuleStore not initialised — call init_db() first")
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(UTC)
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """INSERT INTO authority_rules (action, rule_json, updated_at)
