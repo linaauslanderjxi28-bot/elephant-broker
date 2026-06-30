@@ -1,5 +1,6 @@
 """Tests for config schemas."""
 import os
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -758,6 +759,8 @@ compaction_llm:
             else:  # str or str_or_none
                 raw = f"probe-{env_var.lower()}"
                 exp = raw
+                if dotted_path.startswith("audit.") and dotted_path.endswith("_db_path"):
+                    exp = f"/var/lib/elephantbroker/{raw}"
             os.environ[env_var] = raw
             expected.append((dotted_path, exp))
 
@@ -784,6 +787,55 @@ compaction_llm:
         valid = {"str", "int", "float", "bool", "str_or_none"}
         for env_var, _, coercer in ENV_OVERRIDE_BINDINGS:
             assert coercer in valid, f"{env_var}: unknown coercer {coercer!r}"
+
+
+class TestSqliteDbPathNormalization:
+    SQLITE_ENV_VARS: tuple[str, ...] = (
+        "EB_PROCEDURE_AUDIT_DB_PATH",
+        "EB_SESSION_GOAL_AUDIT_DB_PATH",
+        "EB_ORG_OVERRIDES_DB_PATH",
+        "EB_AUTHORITY_RULES_DB_PATH",
+        "EB_CONSOLIDATION_REPORTS_DB_PATH",
+        "EB_TUNING_DELTAS_DB_PATH",
+        "EB_SCORING_LEDGER_DB_PATH",
+    )
+    SQLITE_CONFIG_FIELDS: tuple[str, ...] = (
+        "procedure_audit_db_path",
+        "session_goal_audit_db_path",
+        "org_overrides_db_path",
+        "authority_rules_db_path",
+        "consolidation_reports_db_path",
+        "tuning_deltas_db_path",
+        "scoring_ledger_db_path",
+    )
+
+    def test_packaged_defaults_resolve_under_state_dir(self, monkeypatch):
+        for key in self.SQLITE_ENV_VARS:
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.chdir(Path("/tmp"))
+
+        cfg = ElephantBrokerConfig.load()
+
+        for field in self.SQLITE_CONFIG_FIELDS:
+            path = Path(getattr(cfg.audit, field))
+            assert path.is_absolute()
+            assert path.parts[:4] == ("/", "var", "lib", "elephantbroker")
+            assert path.parts[4] == "data"
+
+    def test_absolute_env_override_is_preserved(self, monkeypatch, tmp_path):
+        custom_path = tmp_path / "custom-session-goals.db"
+        monkeypatch.setenv("EB_SESSION_GOAL_AUDIT_DB_PATH", str(custom_path))
+
+        cfg = ElephantBrokerConfig.load()
+
+        assert cfg.audit.session_goal_audit_db_path == str(custom_path)
+
+    def test_relative_env_override_resolves_under_state_dir(self, monkeypatch):
+        monkeypatch.setenv("EB_SESSION_GOAL_AUDIT_DB_PATH", "tenant/session-goals.db")
+
+        cfg = ElephantBrokerConfig.load()
+
+        assert cfg.audit.session_goal_audit_db_path == "/var/lib/elephantbroker/tenant/session-goals.db"
 
 
 # =============================================================================
@@ -821,6 +873,8 @@ NON_CONFIG_ENV_VARS: set[str] = {
     "EB_ALLOW_DEFAULT_GATEWAY_ID",
     "EB_DEV_MODE",
     "EB_ALLOW_DATASET_CHANGE",
+    "EB_SKIP_AUTHORITY",
+    "EB_STRICT_ONTOLOGY",
     # R2-P1.1: per-request escape hatch for the GatewayIdentityMiddleware
     # mismatch reject. Read at middleware __init__ (per-process), not stored
     # in YAML config. Used only by L2 cross-gateway probes that drive a

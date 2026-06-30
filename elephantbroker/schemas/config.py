@@ -2,8 +2,13 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from elephantbroker.schemas.consolidation import ConsolidationConfig
+from elephantbroker.schemas.tiers import BusinessTier
 
 # F9 (TODO-3-613): well-known embedding model → expected vector dimensions.
 # When the operator picks a model from this map, the schema validator refuses
@@ -37,17 +42,26 @@ KNOWN_EMBEDDING_DIMS: dict[str, int] = {
     "BAAI/bge-small-en-v1.5": 384,
 }
 
+_STATE_DIR: Final = Path("/var/lib/elephantbroker")
+_SQLITE_DB_PATH_FIELDS: Final = (
+    "procedure_audit_db_path",
+    "session_goal_audit_db_path",
+    "org_overrides_db_path",
+    "authority_rules_db_path",
+    "consolidation_reports_db_path",
+    "tuning_deltas_db_path",
+    "scoring_ledger_db_path",
+)
+
 # Imported at module top for the new `consolidation` regular field (F4 fix).
 # The previous code used a `@property` with a lazy import, claiming a circular
 # dependency — that claim was wrong: schemas/consolidation.py imports nothing
 # from schemas/config.py, so the top-level import here is safe and lets
 # Pydantic discover the field for env-binding application.
-from elephantbroker.schemas.consolidation import ConsolidationConfig
 
 # C2.1: tier selection moved into the config object so EB_TIER flows through
 # the standard ENV_OVERRIDE_BINDINGS path. tiers.py imports nothing from this
 # file (only StrEnum + Pydantic primitives), so the top-level import is safe.
-from elephantbroker.schemas.tiers import BusinessTier
 
 
 class _StrictBase(BaseModel):
@@ -76,14 +90,14 @@ class CogneeConfig(_StrictBase):
     neo4j_password: str = ""
     qdrant_url: str = "http://localhost:6333"
     default_dataset: str = "elephantbroker"  # DANGER: changing this orphans all existing Cognee data
-    embedding_provider: str = "openai_compatible"  # Cognee 0.5.6 OpenAI-compatible /v1/embeddings path; avoids tiktoken model lookup for non-OpenAI models
+    embedding_provider: str = "openai_compatible"
     embedding_model: str = "gemini/text-embedding-004"
     embedding_endpoint: str = "http://localhost:8811/v1"
     embedding_api_key: str = ""
     embedding_dimensions: int = Field(default=768, ge=1)  # must match embedding_model output dim
 
     @model_validator(mode="after")
-    def _check_embedding_dimensions_match_known_model(self) -> "CogneeConfig":
+    def _check_embedding_dimensions_match_known_model(self) -> CogneeConfig:
         """F9: refuse to start if embedding_dimensions disagrees with a known model.
 
         Mismatched dims silently orphan Qdrant collections — every retrieval
@@ -391,7 +405,9 @@ class ArtifactAssemblyConfig(_StrictBase):
     """Configuration for artifact placeholder rendering in context assembly."""
     placeholder_enabled: bool = True
     placeholder_min_tokens: int = Field(default=100, ge=0)
-    placeholder_template: str = '[Tool output: {tool_name} — {summary}\n → Call artifact_search("{artifact_id}") for full output]'
+    placeholder_template: str = (
+        '[Tool output: {tool_name} — {summary}\n → Call artifact_search("{artifact_id}") for full output]'
+    )
 
 
 class AsyncAnalysisConfig(_StrictBase):
@@ -583,6 +599,14 @@ ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
     # added here for symmetry with the rest of the `infra.clickhouse.*` block.
     ("EB_CLICKHOUSE_LOGS_TABLE", "infra.clickhouse.logs_table", "str"),
 
+    ("EB_PROCEDURE_AUDIT_DB_PATH", "audit.procedure_audit_db_path", "str"),
+    ("EB_SESSION_GOAL_AUDIT_DB_PATH", "audit.session_goal_audit_db_path", "str"),
+    ("EB_ORG_OVERRIDES_DB_PATH", "audit.org_overrides_db_path", "str"),
+    ("EB_AUTHORITY_RULES_DB_PATH", "audit.authority_rules_db_path", "str"),
+    ("EB_CONSOLIDATION_REPORTS_DB_PATH", "audit.consolidation_reports_db_path", "str"),
+    ("EB_TUNING_DELTAS_DB_PATH", "audit.tuning_deltas_db_path", "str"),
+    ("EB_SCORING_LEDGER_DB_PATH", "audit.scoring_ledger_db_path", "str"),
+
     # --- Embedding cache ---
     ("EB_EMBEDDING_CACHE_ENABLED", "embedding_cache.enabled", "bool"),
     ("EB_EMBEDDING_CACHE_TTL", "embedding_cache.ttl_seconds", "int"),
@@ -639,18 +663,29 @@ def _coerce_env_value(raw: str, coercer: str) -> object:
     raise ValueError(f"Unknown coercer: {coercer!r}")
 
 
-def _set_nested(target: dict, dotted_path: str, value: object) -> None:
+def _set_nested(target: dict[str, object], dotted_path: str, value: object) -> None:
     """Set a value at a dotted path in a nested dict, creating intermediate dicts as needed."""
     parts = dotted_path.split(".")
     cur = target
     for part in parts[:-1]:
-        if part not in cur or not isinstance(cur[part], dict):
-            cur[part] = {}
-        cur = cur[part]
+        next_value = cur.get(part)
+        if not isinstance(next_value, dict):
+            next_value = {}
+            cur[part] = next_value
+        cur = next_value
     cur[parts[-1]] = value
 
 
-def _apply_env_overrides(yaml_data: dict) -> None:
+def _get_or_create_section(yaml_data: dict[str, object], section: str) -> dict[str, object]:
+    section_value = yaml_data.get(section)
+    if isinstance(section_value, dict):
+        return section_value
+    new_section: dict[str, object] = {}
+    yaml_data[section] = new_section
+    return new_section
+
+
+def _apply_env_overrides(yaml_data: dict[str, object]) -> None:
     """Mutate ``yaml_data`` to apply every env var present in ``ENV_OVERRIDE_BINDINGS``.
 
     For each binding, if the env var is set in ``os.environ`` (any value, including
@@ -666,7 +701,7 @@ def _apply_env_overrides(yaml_data: dict) -> None:
         _set_nested(yaml_data, dotted_path, value)
 
 
-def _apply_inheritance_fallbacks(yaml_data: dict) -> None:
+def _apply_inheritance_fallbacks(yaml_data: dict[str, object]) -> None:
     """Apply secret + endpoint inheritance chains so operators don't have to duplicate values.
 
     Renamed from ``_apply_api_key_fallbacks`` (F7, TODO-3-609) when endpoint
@@ -684,8 +719,8 @@ def _apply_inheritance_fallbacks(yaml_data: dict) -> None:
     The fallbacks fire only when the target field is empty after env override
     application — explicit YAML or env values are always respected.
     """
-    cognee = yaml_data.setdefault("cognee", {})
-    llm = yaml_data.setdefault("llm", {})
+    cognee = _get_or_create_section(yaml_data, "cognee")
+    llm = _get_or_create_section(yaml_data, "llm")
 
     # Tier 1: llm.api_key ← cognee.embedding_api_key
     if not llm.get("api_key") and cognee.get("embedding_api_key"):
@@ -695,7 +730,7 @@ def _apply_inheritance_fallbacks(yaml_data: dict) -> None:
     llm_key = llm.get("api_key", "")
     if llm_key:
         for section in ("compaction_llm", "successful_use"):
-            sec = yaml_data.setdefault(section, {})
+            sec = _get_or_create_section(yaml_data, section)
             if not sec.get("api_key"):
                 sec["api_key"] = llm_key
 
@@ -705,9 +740,21 @@ def _apply_inheritance_fallbacks(yaml_data: dict) -> None:
     # endpoint inheritance.
     llm_endpoint = llm.get("endpoint", "")
     if llm_endpoint:
-        compaction = yaml_data.setdefault("compaction_llm", {})
+        compaction = _get_or_create_section(yaml_data, "compaction_llm")
         if not compaction.get("endpoint"):
             compaction["endpoint"] = llm_endpoint
+
+
+def _normalize_sqlite_db_paths(yaml_data: dict[str, object]) -> None:
+    audit = _get_or_create_section(yaml_data, "audit")
+    for field in _SQLITE_DB_PATH_FIELDS:
+        raw_path = audit.get(field)
+        if not raw_path:
+            continue
+        path = Path(str(raw_path)).expanduser()
+        if not path.is_absolute():
+            path = _STATE_DIR / path
+        audit[field] = str(path)
 
 
 class ElephantBrokerConfig(_StrictBase):
@@ -795,6 +842,7 @@ class ElephantBrokerConfig(_StrictBase):
         yaml_data = yaml_config.model_dump()
         _apply_env_overrides(yaml_data)
         _apply_inheritance_fallbacks(yaml_data)
+        _normalize_sqlite_db_paths(yaml_data)
         # Second pass re-validates after env overrides + inheritance fallbacks,
         # so any constraint violation introduced by an env override
         # (e.g. ``EB_EMBEDDING_DIMENSIONS=0`` would violate ``ge=1``) raises
