@@ -4,10 +4,12 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from elephantbroker.api.deps import get_container, get_procedure_engine
 from elephantbroker.api.routes._authority import require_authority
+from elephantbroker.schemas.guards import ApprovalRequest, AutonomyLevel
 from elephantbroker.schemas.procedure import ProcedureDefinition
 
 router = APIRouter()
@@ -23,6 +25,8 @@ class ActivateRequest(BaseModel):
 
 class StepCompleteRequest(BaseModel):
     proof_value: str | None = None
+    approval_request_id: uuid.UUID | None = None
+    lineage_refs: list[str] = Field(default_factory=list)
 
 
 @router.post("/")
@@ -31,6 +35,8 @@ async def create_procedure(procedure: ProcedureDefinition, request: Request):
     if metrics:
         metrics.inc_procedure_tool("create")
     engine = get_procedure_engine(request)
+    if engine is None:
+        raise HTTPException(status_code=501, detail="Procedure engine not available")
     # Middleware wins unconditionally over caller-supplied procedure.gateway_id —
     # tenant-isolation boundary. See TD-41 and actors.py create_actor().
     _state_gw = getattr(request.state, "gateway_id", None)
@@ -106,8 +112,52 @@ async def complete_step(
     engine = get_procedure_engine(request)
     if engine is None:
         raise HTTPException(status_code=501, detail="Procedure engine not available")
+
+    container = get_container(request)
+    gw_id = getattr(request.state, "gateway_id", "")
+    action_id = uuid.uuid4()
+    action_type = "procedure.complete_step"
+    proc_id = None
+    proc = None
+    sk = ""
+    sid = ""
+    execution = engine._executions.get(execution_id)
+    if execution:
+        proc_id = execution.procedure_id
+        proc = engine._definitions.get(execution.procedure_id)
+        sk = execution.session_key or ""
+        sid = str(execution.session_id or "")
+
+    if proc and proc.approval_requirements and body.approval_request_id is None:
+        approval = ApprovalRequest(
+            session_id=execution.session_id if execution and execution.session_id else uuid.uuid4(),
+            action_summary=f"Complete procedure step {step_id} for {proc.name}",
+            explanation="; ".join(proc.approval_requirements),
+            decision_domain=proc.decision_domain or "procedure",
+            autonomy_level=AutonomyLevel.APPROVE_FIRST,
+            matched_rules=proc.approval_requirements,
+        )
+        approval_queue = getattr(container, "approval_queue", None)
+        if approval_queue:
+            await approval_queue.create(
+                approval,
+                getattr(request.state, "agent_id", "procedure-agent") or "procedure-agent",
+                session_goal_store=getattr(container, "session_goal_store", None),
+                session_key=sk,
+                session_id=execution.session_id if execution else None,
+            )
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "approval_required",
+                "approval_request_id": str(approval.id),
+                "approval_requirements": proc.approval_requirements,
+                "action_id": str(action_id),
+                "action_type": action_type,
+            },
+        )
+
     result = await engine.check_step(execution_id, step_id)
-    # Phase 7: check_step returns StepCheckResult, not bool
     if hasattr(result, 'complete'):
         if not result.complete:
             return {"execution_id": str(execution_id), "step_id": str(step_id),
@@ -115,19 +165,6 @@ async def complete_step(
     elif not result:
         raise HTTPException(status_code=404, detail="Execution not found")
 
-    # Look up execution context for audit and auto-evidence
-    container = get_container(request)
-    gw_id = getattr(request.state, "gateway_id", "")
-    proc_id = None
-    sk = ""
-    sid = ""
-    execution = engine._executions.get(execution_id)
-    if execution:
-        proc_id = execution.procedure_id
-        sk = execution.session_key or ""
-        sid = str(execution.session_id or "")
-
-    # Record audit event
     audit = getattr(container, "procedure_audit", None)
     if audit:
         await audit.record_event(
@@ -136,6 +173,10 @@ async def complete_step(
             event_type="step_completed",
             execution_id=str(execution_id),
             step_id=str(step_id),
+            action_id=str(action_id),
+            actor_id=str(execution.actor_id) if execution and execution.actor_id else None,
+            approval_request_id=str(body.approval_request_id) if body.approval_request_id else None,
+            lineage_refs=body.lineage_refs,
         )
         if body.proof_value:
             await audit.record_event(
@@ -145,18 +186,28 @@ async def complete_step(
                 execution_id=str(execution_id),
                 step_id=str(step_id),
                 proof_value=body.proof_value,
+                action_id=str(action_id),
+                actor_id=str(execution.actor_id) if execution and execution.actor_id else None,
+                approval_request_id=str(body.approval_request_id) if body.approval_request_id else None,
+                lineage_refs=body.lineage_refs,
             )
 
-    # Auto-create ClaimRecord + EvidenceRef so completion check can find them
     if body.proof_value:
         await engine.record_step_evidence(execution_id, step_id, body.proof_value, gateway_id=gw_id)
 
-    return {"execution_id": str(execution_id), "step_id": str(step_id), "completed": True}
-
+    return {
+        "execution_id": str(execution_id),
+        "step_id": str(step_id),
+        "completed": True,
+        "action_id": str(action_id),
+        "action_type": action_type,
+        "approval_request_id": str(body.approval_request_id) if body.approval_request_id else None,
+        "lineage_refs": body.lineage_refs,
+    }
 
 @router.get("/session/status")
 async def get_session_procedure_status(
-    session_key: str = "", session_id: str = "", request: Request = None,
+    request: Request, session_key: str = "", session_id: str = "",
 ):
     """View all procedures tracked in this session."""
     metrics = _get_metrics(request)

@@ -1,5 +1,6 @@
 """Tests for ProcedureAuditStore."""
 import asyncio
+import sqlite3
 import tempfile
 import uuid
 
@@ -80,6 +81,78 @@ class TestProcedureAuditStore:
             assert ev["step_instruction"] == "Run integration tests"
             assert ev["proof_type"] == "tool_output"
             assert ev["proof_value"] == "All 42 tests passed"
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_record_step_completed_with_action_lineage(self, store: ProcedureAuditStore) -> None:
+        await store.init_db()
+        try:
+            action_id = str(uuid.uuid4())
+            actor_id = str(uuid.uuid4())
+            approval_request_id = str(uuid.uuid4())
+            await store.record_event(
+                "sk1", "sid1", "proc-1", "Deploy Checklist",
+                "step_completed",
+                execution_id="exec-1",
+                step_id="step-3",
+                action_id=action_id,
+                actor_id=actor_id,
+                approval_request_id=approval_request_id,
+                lineage_refs=["commit:abc123", "artifact:test-report"],
+            )
+            events = await store.get_session_events("sk1", "sid1")
+            assert len(events) == 1
+            ev = events[0]
+            assert ev["action_id"] == action_id
+            assert ev["actor_id"] == actor_id
+            assert ev["approval_request_id"] == approval_request_id
+            assert ev["lineage_refs"] == ["commit:abc123", "artifact:test-report"]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_init_migrates_legacy_event_table_for_action_lineage(self, db_path: str) -> None:
+        conn = sqlite3.connect(db_path)
+        try:
+            _ = conn.execute('''
+                CREATE TABLE procedure_events (
+                    event_id TEXT PRIMARY KEY,
+                    session_key TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    procedure_id TEXT NOT NULL,
+                    procedure_name TEXT NOT NULL,
+                    execution_id TEXT,
+                    event_type TEXT NOT NULL,
+                    step_id TEXT,
+                    step_instruction TEXT,
+                    proof_type TEXT,
+                    proof_value TEXT,
+                    timestamp TEXT NOT NULL
+                )
+            ''')
+            conn.commit()
+        finally:
+            conn.close()
+
+        store = ProcedureAuditStore(db_path=db_path)
+        await store.init_db()
+        try:
+            await store.record_event(
+                "sk1", "sid1", "proc-1", "Deploy Checklist",
+                "step_completed",
+                action_id="action-1",
+                actor_id="actor-1",
+                approval_request_id="approval-1",
+                lineage_refs=["commit:abc123"],
+                gateway_id="gateway-1",
+            )
+            events = await store.get_session_events("sk1", "sid1")
+            assert events[0]["action_id"] == "action-1"
+            assert events[0]["actor_id"] == "actor-1"
+            assert events[0]["approval_request_id"] == "approval-1"
+            assert events[0]["lineage_refs"] == ["commit:abc123"]
+            assert events[0]["gateway_id"] == "gateway-1"
         finally:
             await store.close()
 
