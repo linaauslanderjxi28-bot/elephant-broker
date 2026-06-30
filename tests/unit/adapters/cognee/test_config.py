@@ -9,8 +9,9 @@ from elephantbroker.runtime.adapters.cognee.config import configure_cognee
 from elephantbroker.schemas.config import CogneeConfig, LLMConfig
 
 
-def _cognee_mocks(mock_config_module, mock_embedding_cfg):
+def _cognee_mocks(mock_config_module, mock_embedding_cfg, mock_qdrant_register=None):
     """Build sys.modules dict that mocks cognee + its embedding config subpackage."""
+    qdrant_module = MagicMock(register_qdrant_adapter=mock_qdrant_register or MagicMock())
     embedding_config_mod = MagicMock()
     embedding_config_mod.get_embedding_config = MagicMock(return_value=mock_embedding_cfg)
     return {
@@ -21,7 +22,7 @@ def _cognee_mocks(mock_config_module, mock_embedding_cfg):
         "cognee.infrastructure.databases.vector.embeddings": MagicMock(),
         "cognee.infrastructure.databases.vector.embeddings.config": embedding_config_mod,
         # Community Qdrant adapter — register import is a no-op in tests
-        "cognee_community_vector_adapter_qdrant": MagicMock(),
+        "elephantbroker.runtime.adapters.cognee.qdrant_adapter": qdrant_module,
     }
 
 
@@ -32,11 +33,35 @@ class TestConfigureCognee:
             await configure_cognee(CogneeConfig())
             mock_config_module.set_graph_database_provider.assert_called_once_with("neo4j")
 
+    async def test_sets_graph_dataset_handler_to_neo4j_for_cognee_1_2(self):
+        mock_config_module = MagicMock()
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
+            await configure_cognee(CogneeConfig())
+            call_args = mock_config_module.set_graph_db_config.call_args[0][0]
+            assert call_args["graph_dataset_database_handler"] == "neo4j"
+
     async def test_sets_vector_provider_to_qdrant(self):
         mock_config_module = MagicMock()
         with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
             await configure_cognee(CogneeConfig())
             mock_config_module.set_vector_db_provider.assert_called_once_with("qdrant")
+
+    async def test_registers_qdrant_community_adapter_explicitly(self):
+        mock_config_module = MagicMock()
+        mock_register = MagicMock()
+        with patch.dict(
+            "sys.modules",
+            _cognee_mocks(mock_config_module, MagicMock(), mock_register),
+        ):
+            await configure_cognee(CogneeConfig())
+            mock_register.assert_called_once_with()
+
+    async def test_sets_vector_dataset_handler_to_qdrant_for_cognee_1_2(self):
+        mock_config_module = MagicMock()
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
+            await configure_cognee(CogneeConfig())
+            call_args = mock_config_module.set_vector_db_config.call_args[0][0]
+            assert call_args["vector_dataset_database_handler"] == "qdrant"
 
     async def test_passes_qdrant_url(self):
         mock_config_module = MagicMock()

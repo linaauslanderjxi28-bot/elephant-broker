@@ -10,9 +10,7 @@ Paired with ``test_vector_gateway_filter.py`` (read side) +
 """
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
-
-import pytest
+from unittest.mock import MagicMock
 
 from elephantbroker.runtime.adapters.cognee.config import configure_cognee
 from elephantbroker.schemas.config import CogneeConfig
@@ -38,7 +36,8 @@ async def _run_configure(monkeypatch, gateway_id: str) -> dict:
     monkeypatch.setitem(sys.modules, "cognee", mock_cognee)
     # Stub out community qdrant adapter registration (imported for side-effect)
     mock_register = MagicMock()
-    monkeypatch.setitem(sys.modules, "cognee_community_vector_adapter_qdrant", mock_register)
+    mock_qdrant_module = MagicMock(register_qdrant_adapter=mock_register)
+    monkeypatch.setitem(sys.modules, "elephantbroker.runtime.adapters.cognee.qdrant_adapter", mock_qdrant_module)
     # Stub get_embedding_config — configure_cognee reads attributes then assigns.
     mock_embedding_cfg = MagicMock()
     monkeypatch.setattr(
@@ -46,10 +45,6 @@ async def _run_configure(monkeypatch, gateway_id: str) -> dict:
         lambda: mock_embedding_cfg,
         raising=False,
     )
-    # Stub QDrantAdapter import path so the monkey-patch block skips cleanly.
-    monkeypatch.setitem(sys.modules, "cognee_community_vector_adapter_qdrant.qdrant_adapter", MagicMock())
-    monkeypatch.setitem(sys.modules, "qdrant_client", MagicMock())
-
     config = CogneeConfig(neo4j_password="x")
     await configure_cognee(config, llm_config=None, gateway_id=gateway_id)
     return captured

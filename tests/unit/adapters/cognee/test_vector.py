@@ -65,6 +65,29 @@ class TestVectorAdapter:
         assert isinstance(call_kwargs["points_selector"], PointIdsList)
         assert call_kwargs["points_selector"].points == ["del_id"]
 
+    async def test_delete_embedding_filters_by_gateway_id(self):
+        adapter = VectorAdapter(
+            CogneeConfig(embedding_model="test/fake-4d", embedding_dimensions=4),
+            gateway_id="gw-test",
+        )
+        mock_client = AsyncMock()
+        adapter._client = mock_client
+
+        await adapter.delete_embedding("col", "del_id")
+
+        from qdrant_client.models import FieldCondition, FilterSelector, HasIdCondition
+
+        selector = mock_client.delete.call_args.kwargs["points_selector"]
+        assert isinstance(selector, FilterSelector)
+        conditions = selector.filter.must
+        assert any(isinstance(condition, HasIdCondition) and condition.has_id == ["del_id"] for condition in conditions)
+        assert any(
+            isinstance(condition, FieldCondition)
+            and condition.key == "database_name"
+            and condition.match.value == "gw-test"
+            for condition in conditions
+        )
+
     async def test_close_cleans_up_client(self):
         adapter = _make_adapter()
         mock_client = AsyncMock()

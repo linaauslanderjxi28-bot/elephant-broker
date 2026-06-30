@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue, PointIdsList
+from qdrant_client.models import FieldCondition, Filter, FilterSelector, HasIdCondition, MatchValue, PointIdsList
 
 from elephantbroker.schemas.config import CogneeConfig
 
@@ -73,9 +73,8 @@ class VectorAdapter:
         ``None`` when the adapter is gateway-agnostic (``gateway_id=""``).
 
         #1187 / TD-64 (R2-P1, path c): the community Qdrant adapter
-        indexes ``database_name`` as a tenant field with
-        ``is_tenant:true`` (per its ``payload_schema`` at
-        ``cognee_community_vector_adapter_qdrant.qdrant_adapter``), so
+        EB's Cognee 1.2 Qdrant shim indexes ``database_name`` as a tenant
+        field with ``is_tenant:true``, so
         equality match on this key uses Qdrant's native multi-tenancy
         fast-path.
         """
@@ -154,9 +153,13 @@ class VectorAdapter:
     async def delete_embedding(self, collection: str, id: str) -> None:
         """Delete a single vector by ID."""
         client = await self._get_client()
+        gateway_cond = self._gateway_filter()
+        points_selector = PointIdsList(points=[id])
+        if gateway_cond is not None:
+            points_selector = FilterSelector(filter=Filter(must=[HasIdCondition(has_id=[id]), gateway_cond]))
         await client.delete(
             collection_name=collection,
-            points_selector=PointIdsList(points=[id]),
+            points_selector=points_selector,
         )
 
     async def close(self) -> None:

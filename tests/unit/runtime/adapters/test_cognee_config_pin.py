@@ -12,10 +12,13 @@ from elephantbroker.runtime.adapters.cognee.config import (
 
 
 class TestCogneePinVerify:
-    """The load-bearing ``cognee==0.5.6`` pin (TODO-5-006) protects the TD-50
+    """The load-bearing ``cognee==1.2.2`` pin (TODO-5-006) protects the TD-50
     cascade's internal-API call sites. ``_verify_cognee_pin`` emits a WARNING
     when the installed version drifts so operators testing a bump see the
     signal on boot."""
+
+    def test_supported_pin_tracks_phase_a_cognee_upgrade(self):
+        assert _SUPPORTED_COGNEE_VERSION == "1.2.2"
 
     def test_matching_version_emits_no_warning(self, caplog):
         with patch.object(

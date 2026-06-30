@@ -2133,8 +2133,7 @@ See `deploy/UPDATING-DEPS.md` for the upgrade workflow.
 
 ```
 pydantic==2.12.5
-cognee[neo4j]==0.5.6
-cognee-community-vector-adapter-qdrant==0.2.4
+cognee[neo4j]==1.2.2
 httpx==0.28.1
 qdrant-client==1.17.1
 redis==7.4.0
@@ -3316,10 +3315,11 @@ self._client = AsyncQdrantClient(url=self._url)
 cognee.config.set_vector_db_provider("qdrant")
 cognee.config.set_vector_db_config({
     "vector_db_url": config.qdrant_url,
+    "vector_dataset_database_handler": "qdrant",
 })
 ```
 
-Requires the community adapter: `cognee-community-vector-adapter-qdrant==0.2.4` (registered via `from cognee_community_vector_adapter_qdrant import register`).
+Qdrant is registered by EB's built-in Cognee 1.2 shim at `elephantbroker.runtime.adapters.cognee.qdrant_adapter.register_qdrant_adapter()`.
 
 #### Named Vectors
 
@@ -3337,7 +3337,7 @@ qdrant:
     - qdrant_data:/qdrant/storage
 ```
 
-Pinned to Qdrant v1.17.0 for compatibility with `qdrant-client` and Cognee's community adapter.
+Pinned to Qdrant v1.17.0 for compatibility with `qdrant-client` and EB's Cognee Qdrant adapter shim.
 
 ---
 
@@ -5904,7 +5904,7 @@ No explicit compatibility matrix exists. Versions are scattered across files:
 | qdrant-client | `pyproject.toml` | `>=1.7` (unbounded upper) | Not documented |
 | Redis server | `docker-compose.yml` | `redis:7-alpine` (any 7.x) | Not documented |
 | redis (Python) | `pyproject.toml` | `>=5.0` (unbounded upper) | Not documented |
-| Cognee | `pyproject.toml` | `==0.5.6` (exact pin) | 0.5.6 |
+| Cognee | `pyproject.toml` | `==1.2.2` (exact pin) | 1.2.2 |
 | FastAPI | `pyproject.toml` | `>=0.110` | Not documented |
 | Pydantic | `pyproject.toml` | `>=2.0,<3.0` | Not documented |
 | OTEL Collector | `docker-compose.yml` | `latest` (unpinned) | Not documented |
@@ -5975,8 +5975,8 @@ the lockfile against pyproject.toml). Still missing:
 
 ###### 7.5 Cognee Upgrade
 
-- Cognee is pinned to `==0.5.6` -- what breaks if upgraded?
-- No documented breaking changes between Cognee 0.5.x versions
+- Cognee is pinned to `==1.2.2` -- what breaks on the next upgrade?
+- No documented breaking changes between Cognee 1.2.x versions
 - No migration path for Cognee's internal state databases
 - The mistralai workaround is no longer needed when using uv (uv resolves cleanly), but if Cognee changes its transitive dep tree, the install.sh belt-and-suspenders cleanup may need updating
 
@@ -7245,7 +7245,7 @@ The chain runs identically in both YAML+env and env-only modes (via `load(None)`
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `ImportError: No module named 'cognee_community_vector_adapter_qdrant'` at startup | The community Qdrant adapter package is not installed. `configure_cognee()` imports it at line 20. | `pip install cognee-community-vector-adapter-qdrant==0.2.4` |
+| `Unsupported vector database provider: qdrant` at startup | EB's Qdrant shim was not registered before Cognee created the vector engine. | Ensure `configure_cognee()` runs before any Cognee vector operation and calls `register_qdrant_adapter()`. |
 | `cognee.cognify()` hangs indefinitely | (1) Model name without `openai/` prefix causes Cognee routing failure. (2) LLM endpoint unreachable -- Cognee's internal HTTP client may not have a timeout. (3) Cognee telemetry is trying to phone home and DNS resolution hangs. | (1) Add `openai/` prefix. (2) Fix endpoint. (3) Ensure `COGNEE_DISABLE_TELEMETRY=true` (set in `elephantbroker/__init__.py`). |
 | `cognee.search()` returns empty list for all query types | (1) No data has been stored yet. (2) Wrong dataset name (deployment fix section 32). (3) `cognee.cognify()` was never run (keyword and semantic search require it). | (1) Store data first. (2) Check that `RetrievalOrchestrator` uses `self._dataset_name` not `session_key`. (3) Run ingest pipeline which calls `cognee.add()` + `cognee.cognify()`. |
 

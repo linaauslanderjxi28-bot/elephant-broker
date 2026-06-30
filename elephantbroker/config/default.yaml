@@ -74,7 +74,7 @@ cognee:
   neo4j_password: ""                            # env: EB_NEO4J_PASSWORD — (secret) REQUIRED. Runtime refuses to boot with empty password unless EB_DEV_MODE=true
   qdrant_url: "http://localhost:6333"           # env: EB_QDRANT_URL
   default_dataset: "elephantbroker"             # env: EB_DEFAULT_DATASET — DANGER: changing this orphans all existing Cognee data
-  embedding_provider: "openai_compatible"      # env: EB_EMBEDDING_PROVIDER — Cognee 0.5.6 OpenAI-compatible /v1/embeddings path for non-OpenAI models
+  embedding_provider: "openai_compatible"      # env: EB_EMBEDDING_PROVIDER — Cognee OpenAI-compatible /v1/embeddings path for non-OpenAI models
   embedding_model: "gemini/text-embedding-004"  # env: EB_EMBEDDING_MODEL — must match what your LiteLLM proxy actually serves
   embedding_endpoint: "http://localhost:8811/v1" # env: EB_EMBEDDING_ENDPOINT
   embedding_api_key: ""                         # env: EB_EMBEDDING_API_KEY (secret)
