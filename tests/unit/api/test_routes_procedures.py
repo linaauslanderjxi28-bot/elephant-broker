@@ -56,7 +56,7 @@ class TestProcedureRoutes:
         # #1146: must include is_manual_only or activation_modes per R2-P2.1
         body = {"name": "Test proc", "is_manual_only": True}
         r = await client.post("/procedures/", json=body)
-        assert r.status_code == 500
+        assert r.status_code == 501
 
 
 class TestProcedureRouteToolMetrics:

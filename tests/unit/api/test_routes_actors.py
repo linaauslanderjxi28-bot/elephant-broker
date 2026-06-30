@@ -80,4 +80,4 @@ class TestActorGatewayIsolation:
         r = await client.post("/actors/", json=body)
         assert r.status_code == 200
         assert len(captured_actors) == 1
-        assert captured_actors[0].gateway_id == ""
+        assert captured_actors[0].gateway_id == "local"

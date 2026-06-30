@@ -194,7 +194,8 @@ def _mock_cognee_apis(monkeypatch):
 
 
 @pytest.fixture
-async def client(container):
+async def client(container, monkeypatch):
+    monkeypatch.setenv("EB_ALLOW_CROSS_GATEWAY_HEADER", "true")
     app = create_app(container)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:

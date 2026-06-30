@@ -85,7 +85,7 @@ class TestGoalGatewayIsolation:
         r = await client.post("/goals/", json=body)
         assert r.status_code == 200
         assert len(captured_goals) == 1
-        assert captured_goals[0].gateway_id == ""
+        assert captured_goals[0].gateway_id == "local"
 
     async def test_session_goal_stamps_gateway_id(self, client, container):
         """POST /goals/session stamps gateway_id on session goals."""

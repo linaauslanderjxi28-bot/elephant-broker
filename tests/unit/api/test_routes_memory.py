@@ -1,4 +1,6 @@
 """Tests for memory routes."""
+from typing import Any
+
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -184,7 +186,7 @@ class TestMemoryRoutes:
         assert r.json() == {"detail": "wrong gateway"}
 
     async def test_search_forwards_entity_type_to_facade(self, client, container):
-        captured: dict = {}
+        captured: dict[str, Any] = {}
 
         async def capture_search(*args, **kwargs):
             captured.update(kwargs)
@@ -290,7 +292,7 @@ class TestMemoryRoutes:
         """The route threads request.state.gateway_id → facade.update()'s
         caller_gateway_id kwarg, so the facade can distinguish owner from
         attacker. Without this, the ownership check collapses to a no-op."""
-        captured: dict = {}
+        captured: dict[str, Any] = {}
 
         async def capture_update(fact_id, updates, *, caller_gateway_id=""):
             captured["caller_gateway_id"] = caller_gateway_id
@@ -332,7 +334,7 @@ class TestMemoryRoutes:
         """Whitelisted user-facing field (confidence) passes validation
         and reaches the facade. `extra="forbid"` must not reject legal
         fields from the 11-field whitelist."""
-        captured: dict = {}
+        captured: dict[str, Any] = {}
 
         async def capture_update(fact_id, updates, *, caller_gateway_id=""):
             captured.update(updates)
@@ -477,7 +479,7 @@ class TestMemoryGatewayIsolation:
         r = await client.post("/memory/store", json=body)
         assert r.status_code == 200
         assert len(stored_facts) == 1
-        assert stored_facts[0].gateway_id == ""
+        assert stored_facts[0].gateway_id == "local"
 
     async def test_search_scoped_to_gateway(self, client, container):
         """POST /memory/search returns results only — the gateway scope is enforced

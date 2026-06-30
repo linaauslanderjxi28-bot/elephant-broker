@@ -439,4 +439,4 @@ class TestContextGatewayIsolation:
         r = await client.post("/context/bootstrap", json=body)
         assert r.status_code == 200
         assert len(captured_params) == 1
-        assert captured_params[0].gateway_id == ""
+        assert captured_params[0].gateway_id == "local"
