@@ -13,6 +13,7 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime
+from typing import TypeAlias
 
 import asyncpg
 
@@ -27,20 +28,72 @@ from elephantbroker.schemas.actor import (
 
 logger = logging.getLogger(__name__)
 
+ActorRowValue: TypeAlias = uuid.UUID | str | int | float | list[str] | None
 
-def _row_to_actor(row: dict) -> ActorRef:
+
+def _required_uuid(row: dict[str, ActorRowValue], key: str) -> uuid.UUID:
+    value = row[key]
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, str):
+        return uuid.UUID(value)
+    raise TypeError(f"{key} must be a UUID")
+
+
+def _required_str(row: dict[str, ActorRowValue], key: str) -> str:
+    value = row[key]
+    if isinstance(value, str):
+        return value
+    raise TypeError(f"{key} must be a string")
+
+
+def _optional_uuid(row: dict[str, ActorRowValue], key: str) -> uuid.UUID | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, str):
+        return uuid.UUID(value)
+    raise TypeError(f"{key} must be a UUID or None")
+
+
+def _str_list(row: dict[str, ActorRowValue], key: str) -> list[str]:
+    value = row.get(key)
+    if value is None:
+        return []
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    raise TypeError(f"{key} must be a list of strings")
+
+
+def _int_value(row: dict[str, ActorRowValue], key: str, default: int) -> int:
+    value = row.get(key, default)
+    if isinstance(value, int):
+        return value
+    raise TypeError(f"{key} must be an integer")
+
+
+def _float_value(row: dict[str, ActorRowValue], key: str, default: float) -> float:
+    value = row.get(key, default)
+    if isinstance(value, int | float):
+        return float(value)
+    raise TypeError(f"{key} must be a number")
+
+
+def _row_to_actor(row: dict[str, ActorRowValue]) -> ActorRef:
     """Convert a PG row dict to an ActorRef."""
     return ActorRef(
-        id=row["id"],
-        display_name=row["display_name"],
-        actor_type=ActorType(row.get("actor_type", "worker_agent")),
-        authority_level=row.get("authority_level", 0),
-        handles=list(row.get("handles") or []),
-        org_id=row.get("org_id"),
-        team_ids=[uuid.UUID(t) for t in (row.get("team_ids") or [])],
-        trust_level=row.get("trust_level", 0.5),
-        tags=list(row.get("tags") or []),
-        gateway_id=row.get("gateway_id", ""),
+        id=_required_uuid(row, "id"),
+        display_name=_required_str(row, "display_name"),
+        type=ActorType(row.get("actor_type") or "worker_agent"),
+        authority_level=_int_value(row, "authority_level", 0),
+        handles=_str_list(row, "handles"),
+        org_id=_optional_uuid(row, "org_id"),
+        team_ids=[uuid.UUID(team_id) for team_id in _str_list(row, "team_ids")],
+        trust_level=_float_value(row, "trust_level", 0.5),
+        tags=_str_list(row, "tags"),
+        gateway_id=_required_str(row, "gateway_id"),
     )
 
 
