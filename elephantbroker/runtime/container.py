@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from elephantbroker.pipelines.artifact_ingest.pipeline import ArtifactIngestPipeline
 from elephantbroker.pipelines.procedure_ingest.pipeline import ProcedureIngestPipeline
@@ -145,7 +146,7 @@ def _validate_startup_safety(config: ElephantBrokerConfig) -> None:
     # never have /var/lib/elephantbroker). Dataset changes are catastrophic in
     # production because the FactDataPoint vectors live under the dataset name
     # and Cognee has no rename API — orphaning the entire memory store.
-    if _DATA_DIR_PATH.is_dir():
+    if os.environ.get("EB_ALLOW_DATASET_CHANGE", "").lower() != "true" and _DATA_DIR_PATH.is_dir():
         current_dataset = config.cognee.default_dataset
         if _DATASET_LOCK_FILE.exists():
             try:
@@ -211,7 +212,7 @@ class RuntimeContainer:
         self.profile_registry: ProfileRegistry | None = None
         self.stats: StatsAndTelemetryEngine | None = None
         self.scoring_tuner: ScoringTuner | None = None
-        self.actor_registry: ActorRegistry | None = None
+        self.actor_registry: Any = None
         self.goal_manager: GoalManager | None = None
         self.memory_store: MemoryStoreFacade | None = None
         self.procedure_engine: ProcedureEngine | None = None
@@ -236,8 +237,12 @@ class RuntimeContainer:
         self.session_goal_store: SessionGoalStore | None = None
         self.goal_refinement_task: GoalRefinementTask | None = None
         self.hint_processor: GoalHintProcessor | None = None
-        self.procedure_audit: ProcedureAuditStore | None = None
-        self.session_goal_audit: SessionGoalAuditStore | None = None
+        self.procedure_audit: Any = None
+        self.session_goal_audit: Any = None
+        self.tuning_delta_store: Any = None
+        self.scoring_ledger_store: Any = None
+        self.consolidation_report_store: Any = None
+        self.trace_query_client: Any = None
 
         # Phase 6: Context lifecycle
         self.context_lifecycle: ContextLifecycle | None = None
@@ -257,8 +262,8 @@ class RuntimeContainer:
         self.hitl_client = None
 
         # Phase 8: Org/team identity + authority
-        self.org_override_store = None
-        self.authority_store = None
+        self.org_override_store: Any = None
+        self.authority_store: Any = None
         self._bootstrap_mode: bool | None = None  # None = not yet checked
         self._bootstrap_checked: bool = False
 
@@ -394,10 +399,19 @@ class RuntimeContainer:
             otel_logger=otel_logger,
             config=getattr(config.infra, "trace", None),
         )
+        pg_dsn = getattr(config, "postgres_dsn", "") or os.environ.get("EB_POSTGRES_DSN", "")
+
+        from elephantbroker.runtime.profiles.org_override_store import OrgOverrideStore
+        c.org_override_store = OrgOverrideStore(config.audit.org_overrides_db_path)
+        if pg_dsn:
+            from elephantbroker.runtime.adapters.postgres.structured_stores import PostgresOrgOverrideStore
+            c.org_override_store = PostgresOrgOverrideStore(dsn=pg_dsn)
+        await c.org_override_store.init_db()
 
         if _enabled(tier, "IProfileRegistry"):
             c.profile_registry = ProfileRegistry(
                 c.trace_ledger,
+                org_store=c.org_override_store,
                 cache_ttl_seconds=config.profile_cache.ttl_seconds,
                 metrics=c.metrics_ctx,
             )
@@ -410,14 +424,22 @@ class RuntimeContainer:
         c.tuning_delta_store = None
         c.scoring_ledger_store = None
         try:
-            from elephantbroker.runtime.working_set.tuning_delta_store import TuningDeltaStore
-            c.tuning_delta_store = TuningDeltaStore(db_path=config.audit.tuning_deltas_db_path)
+            if pg_dsn:
+                from elephantbroker.runtime.adapters.postgres.structured_stores import PostgresTuningDeltaStore
+                c.tuning_delta_store = PostgresTuningDeltaStore(dsn=pg_dsn)
+            else:
+                from elephantbroker.runtime.working_set.tuning_delta_store import TuningDeltaStore
+                c.tuning_delta_store = TuningDeltaStore(db_path=config.audit.tuning_deltas_db_path)
             await c.tuning_delta_store.init_db()
         except Exception:
             pass
         try:
-            from elephantbroker.runtime.consolidation.scoring_ledger_store import ScoringLedgerStore
-            c.scoring_ledger_store = ScoringLedgerStore(db_path=config.audit.scoring_ledger_db_path)
+            if pg_dsn:
+                from elephantbroker.runtime.adapters.postgres.structured_stores import PostgresScoringLedgerStore
+                c.scoring_ledger_store = PostgresScoringLedgerStore(dsn=pg_dsn)
+            else:
+                from elephantbroker.runtime.consolidation.scoring_ledger_store import ScoringLedgerStore
+                c.scoring_ledger_store = ScoringLedgerStore(db_path=config.audit.scoring_ledger_db_path)
             await c.scoring_ledger_store.init_db()
         except Exception:
             pass
@@ -436,7 +458,6 @@ class RuntimeContainer:
             )
 
         if _enabled(tier, "IActorRegistry"):
-            pg_dsn = getattr(config, "postgres_dsn", "") or os.environ.get("EB_POSTGRES_DSN", "")
             if pg_dsn:
                 from elephantbroker.runtime.adapters.postgres.actor_registry import PostgresActorRegistry
                 c.actor_registry = PostgresActorRegistry(dsn=pg_dsn, dataset_name=dataset_name, gateway_id=gw_id)
@@ -557,15 +578,43 @@ class RuntimeContainer:
                 session_goal_store=None,  # set after session_goal_store creation
             )
 
+        c.procedure_audit = ProcedureAuditStore(
+            db_path=config.audit.procedure_audit_db_path,
+            enabled=config.audit.procedure_audit_enabled,
+        )
+        if pg_dsn:
+            from elephantbroker.runtime.adapters.postgres.structured_stores import PostgresProcedureAuditStore
+            c.procedure_audit = PostgresProcedureAuditStore(
+                dsn=pg_dsn,
+                enabled=config.audit.procedure_audit_enabled,
+            )
+        await c.procedure_audit.init_db()
+
+        c.session_goal_audit = SessionGoalAuditStore(
+            db_path=config.audit.session_goal_audit_db_path,
+            enabled=config.audit.session_goal_audit_enabled,
+        )
+        if pg_dsn:
+            from elephantbroker.runtime.adapters.postgres.structured_stores import PostgresSessionGoalAuditStore
+            c.session_goal_audit = PostgresSessionGoalAuditStore(
+                dsn=pg_dsn,
+                enabled=config.audit.session_goal_audit_enabled,
+            )
+        await c.session_goal_audit.init_db()
+
         if _enabled(tier, "IConsolidationEngine"):
             # Phase 9: Full ConsolidationEngine with all dependencies
             c.consolidation_report_store = None
             c.trace_query_client = None
             try:
-                from elephantbroker.runtime.consolidation.report_store import ConsolidationReportStore
-                c.consolidation_report_store = ConsolidationReportStore(
-                    db_path=config.audit.consolidation_reports_db_path,
-                )
+                if pg_dsn:
+                    from elephantbroker.runtime.adapters.postgres.structured_stores import PostgresConsolidationReportStore
+                    c.consolidation_report_store = PostgresConsolidationReportStore(dsn=pg_dsn)
+                else:
+                    from elephantbroker.runtime.consolidation.report_store import ConsolidationReportStore
+                    c.consolidation_report_store = ConsolidationReportStore(
+                        db_path=config.audit.consolidation_reports_db_path,
+                    )
                 await c.consolidation_report_store.init_db()
             except Exception:
                 pass
@@ -599,8 +648,8 @@ class RuntimeContainer:
                 report_store=c.consolidation_report_store,
                 trace_query_client=c.trace_query_client,
                 scoring_ledger_store=c.scoring_ledger_store,
-                procedure_audit_store=getattr(c, "procedure_audit_store", None),
-                session_goal_audit_store=getattr(c, "session_goal_audit_store", None),
+                procedure_audit_store=getattr(c, "procedure_audit", None),
+                session_goal_audit_store=getattr(c, "session_goal_audit", None),
                 gateway_id=gw_id,
                 dataset_name=dataset_name,
             )
@@ -743,25 +792,7 @@ class RuntimeContainer:
             metrics=c.metrics_ctx,
         )
 
-        # Audit stores
-        c.procedure_audit = ProcedureAuditStore(
-            db_path=config.audit.procedure_audit_db_path,
-            enabled=config.audit.procedure_audit_enabled,
-        )
-        await c.procedure_audit.init_db()
-
-        c.session_goal_audit = SessionGoalAuditStore(
-            db_path=config.audit.session_goal_audit_db_path,
-            enabled=config.audit.session_goal_audit_enabled,
-        )
-        await c.session_goal_audit.init_db()
-
-        # --- Phase 8: Org override + authority stores ---
-        from elephantbroker.runtime.profiles.org_override_store import OrgOverrideStore
         from elephantbroker.runtime.profiles.authority_store import AuthorityRuleStore
-        c.org_override_store = OrgOverrideStore(config.audit.org_overrides_db_path)
-        await c.org_override_store.init_db()
-        pg_dsn = getattr(config, "postgres_dsn", "") or os.environ.get("EB_POSTGRES_DSN", "")
         if pg_dsn:
             from elephantbroker.runtime.adapters.postgres.authority_store import PostgresAuthorityRuleStore
             c.authority_store = PostgresAuthorityRuleStore(dsn=pg_dsn)
@@ -780,9 +811,6 @@ class RuntimeContainer:
         c._bootstrap_checked = False
 
         # Wire org_store into ProfileRegistry (created earlier without it)
-        if c.profile_registry and c.org_override_store:
-            c.profile_registry._org_store = c.org_override_store
-
         # --- Phase 6: Context lifecycle stores + orchestrator ---
         # C2.2: tier-gated by IContextLifecycle. MEMORY_ONLY tier leaves
         # context_lifecycle/session_context_store/session_artifact_store at
