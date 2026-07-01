@@ -177,6 +177,50 @@ class TestMemoryRoutes:
         assert r.json() == []
         assert r.headers.get("x-eb-degraded") == "true"
 
+    async def test_search_facade_budget_stays_below_client_abort(self, client, container, monkeypatch):
+        captured: list[float] = []
+
+        async def capture_wait_for(awaitable, timeout: float = 0.0):
+            captured.append(timeout)
+            return await awaitable
+
+        monkeypatch.setattr("elephantbroker.api.routes.memory.asyncio.wait_for", capture_wait_for)
+        container.memory_store.search = AsyncMock(return_value=[])
+
+        r = await client.post("/memory/search", json={"query": "test"})
+
+        assert r.status_code == 200
+        assert captured == [25.0]
+        assert captured[0] < 30.0
+
+    async def test_search_retrieval_budget_stays_below_client_abort(self, client, container, monkeypatch):
+        captured: list[float] = []
+
+        async def capture_wait_for(awaitable, timeout: float = 0.0):
+            captured.append(timeout)
+            return await awaitable
+
+        profile = SimpleNamespace(
+            retrieval=object(),
+            autorecall=SimpleNamespace(
+                retrieval=object(),
+                auto_recall_injection_top_k=5,
+                min_similarity=0.0,
+            ),
+        )
+        monkeypatch.setattr("elephantbroker.api.routes.memory.asyncio.wait_for", capture_wait_for)
+        container.profile_registry.resolve_profile = AsyncMock(return_value=profile)
+        container.retrieval.retrieve_candidates = AsyncMock(return_value=[])
+
+        r = await client.post(
+            "/memory/search",
+            json={"query": "test", "profile_name": "coding"},
+        )
+
+        assert r.status_code == 200
+        assert captured == [25.0]
+        assert captured[0] < 30.0
+
     async def test_search_permission_error_is_not_degraded(self, client, container):
         container.memory_store.search = AsyncMock(side_effect=PermissionError("wrong gateway"))
 

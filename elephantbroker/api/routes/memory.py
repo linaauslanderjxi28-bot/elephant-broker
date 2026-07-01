@@ -29,6 +29,8 @@ logger = logging.getLogger("elephantbroker.api.routes.memory")
 
 router = APIRouter()
 
+_MEMORY_SEARCH_TIMEOUT_SECONDS = 25.0
+
 
 # --- Request/Response Models ---
 
@@ -210,7 +212,7 @@ async def search_memory(body: SearchRequest, request: Request):
                     auto_recall=body.auto_recall,
                     caller_gateway_id=caller_gw,
                 ),
-                timeout=30.0,
+                timeout=_MEMORY_SEARCH_TIMEOUT_SECONDS,
             )
         except PermissionError as e:
             return JSONResponse(status_code=403, content={"detail": str(e)})
@@ -250,7 +252,7 @@ async def search_memory(body: SearchRequest, request: Request):
                 auto_recall=body.auto_recall,
                 caller_gateway_id=caller_gw,
             ),
-            timeout=30.0,
+            timeout=_MEMORY_SEARCH_TIMEOUT_SECONDS,
         )
     except PermissionError as e:
         return JSONResponse(status_code=403, content={"detail": str(e)})

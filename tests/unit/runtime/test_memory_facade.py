@@ -580,6 +580,30 @@ class TestMemoryStoreFacadePhase4:
 
         assert [fact.id for fact in results] == [product.id]
 
+    async def test_search_times_out_graph_completion_and_returns_structural_results(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        facade, graph, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade._FACADE_GRAPH_COMPLETION_TIMEOUT_SECONDS",
+            0.01,
+        )
+        fact = make_fact_assertion()
+
+        async def slow_search(**kwargs):
+            await asyncio.sleep(1.0)
+            return []
+
+        mock_cognee.search = AsyncMock(side_effect=slow_search)
+        graph.query_cypher = AsyncMock(return_value=[{"props": self._fact_props(fact), "relations": []}])
+
+        results = await asyncio.wait_for(facade.search("test", scope=Scope.SESSION), timeout=0.2)
+
+        assert [result.id for result in results] == [fact.id]
+        graph.query_cypher.assert_awaited_once()
+
     async def test_search_computes_freshness_score(self, monkeypatch, mock_add_data_points, mock_cognee):
         facade, graph, *_ = self._make()
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)

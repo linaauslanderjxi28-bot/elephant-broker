@@ -43,6 +43,7 @@ logger = logging.getLogger("elephantbroker.memory.facade")
 
 _FACTS_COLLECTION = "FactDataPoint_text"
 _DEDUP_EMBED_TIMEOUT_SECONDS = 5.0
+_FACADE_GRAPH_COMPLETION_TIMEOUT_SECONDS = 8.0
 
 
 class DedupSkipped(Exception):  # noqa: N818 - public skip exception kept for compatibility.
@@ -323,11 +324,14 @@ class MemoryStoreFacade(IMemoryStoreFacade):
 
         # Stage 1: Semantic — Cognee graph-aware search
         try:
-            cognee_hits = await cognee.search(
-                query_type=SearchType.GRAPH_COMPLETION,
-                query_text=query,
-                only_context=True,
-                datasets=[self._dataset_name],
+            cognee_hits = await asyncio.wait_for(
+                cognee.search(
+                    query_type=SearchType.GRAPH_COMPLETION,
+                    query_text=query,
+                    only_context=True,
+                    datasets=[self._dataset_name],
+                ),
+                timeout=_FACADE_GRAPH_COMPLETION_TIMEOUT_SECONDS,
             )
             for fact in self._parse_graph_completion_to_facts(cognee_hits):
                 if not self._matches_search_filters(
