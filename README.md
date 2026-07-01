@@ -18,11 +18,13 @@ Elephants never forget, brokers always deliver — ElephantBroker is a unified c
 
 ## Architecture
 
-ElephantBroker is organized into four layers:
+ElephantBroker is organized as a monorepo: the backend runtime, infrastructure,
+agent plugins, configuration snapshots, and integration tests live together so
+API/schema changes and plugin adapters can evolve atomically.
 
 ```
-Layer A  Agent Integration     TypeScript plugins (24 tools, 8 lifecycle hooks)
-           ↓ HTTP + X-EB-* identity headers
+Layer A  Agent Integration     TypeScript/Python plugins (24+ tools, lifecycle hooks)
+            ↓ HTTP + X-EB-* identity headers
 Layer B  Cognitive Runtime     Python (17 modules, 84 API endpoints, FastAPI)
            ↓ Cognee SDK
 Layer C  Knowledge Plane       Cognee v0.5.x (7 DataPoint subclasses, graph+vector search)
@@ -30,12 +32,47 @@ Layer C  Knowledge Plane       Cognee v0.5.x (7 DataPoint subclasses, graph+vect
 Layer D  Infrastructure        Neo4j · Qdrant · Redis · SQLite · OTEL/Prometheus
 ```
 
-The runtime exposes two thin TypeScript plugin surfaces:
+The runtime API is consumed by two thin OpenClaw plugin surfaces plus additional
+agent adapters under `plugins/`:
 
 - **MemoryPlugin** — 24 tools across 6 groups (memory, goals, procedures, artifacts, guards, admin) + session lifecycle hooks
 - **ContextEnginePlugin** — 7 lifecycle methods (bootstrap, ingest, assemble, compact, afterTurn, subagent spawn/end) with degraded buffered mode
 
-All intelligence, scoring, storage, and policy logic lives in Python. The plugins are pass-through HTTP adapters.
+All intelligence, scoring, storage, and policy logic lives in Python. The plugins
+are pass-through HTTP adapters kept in the same repository to prevent API/plugin
+contract drift.
+
+## Monorepo Layout
+
+This repository is the source of truth for both ElephantBroker backend and
+ElephantBroker agent plugins.
+
+- Backend runtime: `elephantbroker/`, `infrastructure/`, `deploy/`, `tests/`.
+- Agent plugins: `plugins/claude-code/`, `plugins/antigravity-cli/`,
+  `plugins/opencode/`, `plugins/openclaw/`, `plugins/hermes-agent/`.
+- Plugin configuration snapshots: `plugins/configs/`.
+- OpenClaw plugin packages: `plugins/openclaw/memory/`,
+  `plugins/openclaw/context/`, and temporary shared helpers under
+  `plugins/openclaw/shared/`.
+
+The old standalone `elephantbroker-memory-plugins` repository is now treated as
+a migration source/archive. New plugin changes belong in this monorepo.
+
+Migration targets:
+
+| Previous path | Monorepo target |
+|---------------|-----------------|
+| `elephantbroker-memory-plugins/claude-code-plugin/` | `plugins/claude-code/` |
+| `elephantbroker-memory-plugins/antigravity-cli-plugin/` | `plugins/antigravity-cli/` |
+| `elephantbroker-memory-plugins/opencode-plugin/` | `plugins/opencode/` |
+| `elephantbroker-memory-plugins/openclaw-plugin/` | `plugins/openclaw/memory/` |
+| `openclaw-plugins/elephantbroker-context/` | `plugins/openclaw/context/` |
+| `openclaw-plugins/shared/` | `plugins/openclaw/shared/` |
+| `elephantbroker-memory-plugins/hermes-agent-plugin/` | `plugins/hermes-agent/` |
+| `elephantbroker-memory-plugins/configs/` | `plugins/configs/` |
+
+The legacy root `openclaw-plugins/` path has been superseded by
+`plugins/openclaw/`.
 
 ## Runtime Modules
 
@@ -214,9 +251,16 @@ elephantbroker/
   server.py                    # uvicorn entry point
   cli.py                       # ebrun admin CLI
 
-openclaw-plugins/
-  elephantbroker-memory/       # 24 tools + 8 lifecycle hooks
-  elephantbroker-context/      # ContextEnginePlugin (7 lifecycle methods)
+plugins/                      # Agent integrations and plugin packages
+  claude-code/                 # Claude Code plugin
+  antigravity-cli/             # Antigravity CLI plugin
+  opencode/                    # OpenCode plugin
+  openclaw/
+    memory/                    # OpenClaw MemoryPlugin
+    context/                   # OpenClaw ContextEnginePlugin
+    shared/                    # Shared OpenClaw plugin helpers
+  hermes-agent/                # Hermes Agent MemoryProvider plugin
+  configs/                     # Runtime config snapshots/templates
 
 infrastructure/                # Docker Compose (Neo4j, Qdrant, Redis, observability)
 hitl-middleware/               # HITL approval queue service (port 8421)

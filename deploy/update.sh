@@ -18,7 +18,7 @@
 # Default behavior (no --upgrade flag):
 #   1. git pull --ff-only origin <current-branch>
 #   2. uv sync --frozen --no-dev (installs EXACTLY what uv.lock specifies)
-#   3. rebuild TypeScript plugins (openclaw-plugins/*) — runs `npm ci`
+#   3. rebuild TypeScript plugins (plugins/openclaw/*) — runs `npm ci`
 #      + `npm run build` per plugin. Skipped with warning if npm is
 #      not on PATH (dedicated DB-VM deployments don't need plugins
 #      rebuilt here; co-located deployments do).
@@ -230,7 +230,7 @@ fi
 # =============================================================================
 log "Step 3/8: rebuild TypeScript plugins"
 # =============================================================================
-# After git pull, any TS plugin source changes (openclaw-plugins/*/src/*.ts)
+# After git pull, any TS plugin source changes (plugins/openclaw/*/src/*.ts)
 # need their bundled dist/ rebuilt — OpenClaw loads from dist/index.js per
 # each plugin's package.json `main` + `openclaw.extensions`. Without this
 # step, operators have to remember to cd into each plugin dir and run
@@ -248,7 +248,7 @@ log "Step 3/8: rebuild TypeScript plugins"
 # runtime and the OpenClaw gateway share one host) need the rebuild to
 # land here; dedicated DB-VM deployments build plugins on the gateway
 # host via its own update path.
-PLUGINS_DIR="$PREFIX/openclaw-plugins"
+PLUGINS_DIR="$PREFIX/plugins/openclaw"
 PLUGIN_FAILURES=()  # TODO-5-108: track failures so the summary at end of Step 3
                     # is loud and enumerated, not silent-continue.
 if [[ "$SKIP_PLUGINS" -eq 1 ]]; then
@@ -265,7 +265,7 @@ elif ! command -v npm &>/dev/null; then
     warn "================================================================"
     warn "  npm NOT FOUND on PATH — plugin rebuild SKIPPED"
     warn "================================================================"
-    warn "  dist/ in $PLUGINS_DIR/elephantbroker-* MAY BE STALE."
+    warn "  dist/ in $PLUGINS_DIR/{memory,context} MAY BE STALE."
     warn ""
     warn "  This is expected on dedicated DB-VM deployments (plugins are"
     warn "  built on the OpenClaw gateway host via its own update path)."
@@ -278,7 +278,7 @@ elif ! command -v npm &>/dev/null; then
 elif [[ ! -d "$PLUGINS_DIR" ]]; then
     warn "  $PLUGINS_DIR missing — skipping plugin rebuild"
 else
-    for plugin in "$PLUGINS_DIR"/elephantbroker-*; do
+    for plugin in "$PLUGINS_DIR"/memory "$PLUGINS_DIR"/context; do
         [[ -d "$plugin" ]] || continue
         [[ -f "$plugin/package.json" ]] || continue
         plugin_name=$(basename "$plugin")

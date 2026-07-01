@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# verify-plugin-dist.sh — enforce that committed openclaw-plugins/*/dist/
+# verify-plugin-dist.sh — enforce that committed plugins/openclaw/*/dist/
 # matches a fresh `npm ci && npm run build` off committed src/ + lockfile.
 #
-# Why: OpenClaw loads openclaw-plugins/*/dist/index.js at runtime per each
+# Why: OpenClaw loads plugins/openclaw/*/dist/index.js at runtime per each
 # plugin's package.json "main" + openclaw.plugin.json "entry". Committed
 # dist is the source of truth for what deploys; committed src is the
 # source of truth for what was written. Drift silently ships stale bytes
@@ -27,7 +27,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPO_ROOT="$( cd "${SCRIPT_DIR}/.." && pwd )"
 cd "${REPO_ROOT}"
 
-PLUGINS=(elephantbroker-context elephantbroker-memory)
+PLUGINS=(context memory)
 MODE="manual"
 if [[ "${1:-}" == "--hook" ]]; then
     MODE="hook"
@@ -40,7 +40,7 @@ if [[ "${MODE}" == "hook" ]]; then
     # git diff --cached --name-only prints staged file paths.
     STAGED="$(git diff --cached --name-only --diff-filter=ACMR)"
     for plugin in "${PLUGINS[@]}"; do
-        if printf '%s\n' "${STAGED}" | grep -q "^openclaw-plugins/${plugin}/src/"; then
+        if printf '%s\n' "${STAGED}" | grep -q "^plugins/openclaw/${plugin}/src/"; then
             PLUGINS_TO_CHECK+=("${plugin}")
         fi
     done
@@ -54,7 +54,7 @@ fi
 
 # Rebuild each affected plugin.
 for plugin in "${PLUGINS_TO_CHECK[@]}"; do
-    plugin_dir="openclaw-plugins/${plugin}"
+    plugin_dir="plugins/openclaw/${plugin}"
     if [[ ! -d "${plugin_dir}" ]]; then
         echo "verify-plugin-dist: plugin directory missing: ${plugin_dir}" >&2
         exit 1
@@ -83,7 +83,7 @@ done
 # git diff --exit-code returns 0 iff there's no diff.
 DIFF_PATHS=()
 for plugin in "${PLUGINS_TO_CHECK[@]}"; do
-    DIFF_PATHS+=("openclaw-plugins/${plugin}/dist/")
+    DIFF_PATHS+=("plugins/openclaw/${plugin}/dist/")
 done
 
 if ! git diff --exit-code -- "${DIFF_PATHS[@]}" >/dev/null; then
@@ -96,9 +96,9 @@ if ! git diff --exit-code -- "${DIFF_PATHS[@]}" >/dev/null; then
         echo ""
         echo "To fix:"
         for plugin in "${PLUGINS_TO_CHECK[@]}"; do
-            echo "  cd openclaw-plugins/${plugin} && npm ci && npm run build"
+            echo "  cd plugins/openclaw/${plugin} && npm ci && npm run build"
         done
-        echo "  git add openclaw-plugins/*/dist/"
+        echo "  git add plugins/openclaw/*/dist/"
         echo ""
         echo "Then re-run the commit. Manual verify: bash scripts/verify-plugin-dist.sh"
     } >&2

@@ -311,8 +311,8 @@ COGNEE_DISABLE_TELEMETRY=true
 - `elephantbroker/runtime/adapters/cognee/config.py` -- `COGNEE_DISABLE_TELEMETRY` + `ENABLE_BACKEND_ACCESS_CONTROL`
 - `elephantbroker/cli.py` -- `EB_ACTOR_ID`, `EB_RUNTIME_URL` for `ebrun` CLI
 - `hitl-middleware/hitl_middleware/config.py` -- HITL middleware env vars
-- `openclaw-plugins/elephantbroker-memory/index.ts` and `client.ts` -- TS plugin env vars
-- `openclaw-plugins/elephantbroker-context/index.ts` and `client.ts` -- TS context plugin env vars
+- `plugins/openclaw/memory/index.ts` and `client.ts` -- TS plugin env vars
+- `plugins/openclaw/context/index.ts` and `client.ts` -- TS context plugin env vars
 - `docs/DEPLOYMENT.md` and `docs/OPENCLAW-SETUP.md` -- deployment documentation
 
 
@@ -2168,7 +2168,7 @@ resolver picks `mistralai==1.12.4` automatically as a transitive of cognee.
 
 #### Memory Plugin (`openclaw.plugin.json`)
 
-**File:** `/openclaw-plugins/elephantbroker-memory/openclaw.plugin.json`
+**File:** `/plugins/openclaw/memory/openclaw.plugin.json`
 
 | Field | Value | Notes |
 |-------|-------|-------|
@@ -2181,7 +2181,7 @@ resolver picks `mistralai==1.12.4` automatically as a transitive of cognee.
 
 #### ContextEngine Plugin (`openclaw.plugin.json`)
 
-**File:** `/openclaw-plugins/elephantbroker-context/openclaw.plugin.json`
+**File:** `/plugins/openclaw/context/openclaw.plugin.json`
 
 | Field | Value | Notes |
 |-------|-------|-------|
@@ -2392,7 +2392,7 @@ openclaw config set tools.profile full
 
 #### Workspace Files
 
-Both files live in `openclaw-plugins/elephantbroker-memory/workspace/` as templates for surgical edits into `~/.openclaw/workspace/`:
+Both files live in `plugins/openclaw/memory/workspace/` as templates for surgical edits into `~/.openclaw/workspace/`:
 
 **`AGENTS.md`** -- Agent behavior instructions covering:
 - Session startup (read SOUL.md, USER.md)
@@ -2641,9 +2641,9 @@ export EB_RUNTIME_URL="http://10.10.0.10:8420"
 export EB_GATEWAY_SHORT_NAME="prod"
 
 ## 2. Symlink plugins
-ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory \
+ln -s /opt/elephantbroker/plugins/openclaw/memory \
       ~/.openclaw/extensions/elephantbroker-memory
-ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context \
+ln -s /opt/elephantbroker/plugins/openclaw/context \
       ~/.openclaw/extensions/elephantbroker-context
 
 ## 3. Install deps + build the bundle (npm ci + npm run build; NOT npm install)

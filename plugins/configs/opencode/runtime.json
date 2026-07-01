@@ -1,0 +1,13 @@
+{
+  "plugin": [
+    "elephantbroker-memory",
+    "/home/openclaw/.config/opencode/plugins/rtk.ts",
+    "oh-my-openagent@latest"
+  ],
+  "eb_runtime_url": "http://localhost:8420",
+  "eb_gateway_id": "gw-enterprise-prod",
+  "auth_token_env": "EB_AUTH_TOKEN",
+  "dataset": "elephantbroker",
+  "agent_name": "opencode-agent",
+  "agent_key": "opencode-agent"
+}

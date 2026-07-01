@@ -1,0 +1,59 @@
+{
+  "id": "elephantbroker-memory",
+  "kind": "memory",
+  "name": "ElephantBroker Memory",
+  "version": "0.2.0",
+  "description": "ElephantBroker Memory Plugin — durable knowledge, actor-aware retrieval, session lifecycle",
+  "activation": {
+    "onStartup": true
+  },
+  "compat": {
+    "pluginApi": ">=2026.3.24-beta.2",
+    "minGatewayVersion": "2026.3.24-beta.2"
+  },
+  "entry": "./dist/index.js",
+  "contracts": {
+    "tools": [
+      "memory_search",
+      "memory_search_global",
+      "memory_get",
+      "memory_store",
+      "memory_forget",
+      "memory_update",
+      "session_goals_list",
+      "goal_create",
+      "session_goals_update_status",
+      "session_goals_add_blocker",
+      "session_goals_progress",
+      "procedure_create",
+      "procedure_activate",
+      "procedure_complete",
+      "procedure_complete_step",
+      "procedure_session_status",
+      "procedure_status",
+      "procedure_audit_lookup",
+      "actor_inspect",
+      "claim_get",
+      "guards_list",
+      "guard_status",
+      "artifact_search",
+      "create_artifact",
+      "admin_create_org",
+      "admin_create_team",
+      "admin_register_actor",
+      "admin_add_member",
+      "admin_remove_member",
+      "admin_merge_actors"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "baseUrl": { "type": "string", "description": "ElephantBroker runtime URL" },
+      "gatewayId": { "type": "string", "description": "Gateway instance ID" },
+      "gatewayShortName": { "type": "string", "description": "Short display name" },
+      "actorId": { "type": "string", "description": "Registered EB actor UUID for authority-gated writes" },
+      "profileName": { "type": "string", "description": "Profile preset (coding, research, managerial, worker, personal_assistant)" }
+    }
+  }
+}

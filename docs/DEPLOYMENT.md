@@ -41,7 +41,7 @@ safety for per-tenant cleanup.)*
 ## Contributor Setup (one-time, per clone)
 
 After cloning the repo, enable the plugin-dist pre-commit hook so any
-commit that touches `openclaw-plugins/*/src/**` is automatically rebuilt
+commit that touches `plugins/openclaw/*/src/**` is automatically rebuilt
 and checked for dist drift:
 
 ```bash
@@ -419,8 +419,8 @@ journalctl -u elephantbroker -f       # follow runtime logs
 git clone https://github.com/elephant-broker/elephant-broker.git /opt/elephantbroker
 
 # Symlink plugins into OpenClaw extensions directory (FULL mode — both plugins)
-ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
-ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
+ln -s /opt/elephantbroker/plugins/openclaw/memory ~/.openclaw/extensions/elephantbroker-memory
+ln -s /opt/elephantbroker/plugins/openclaw/context ~/.openclaw/extensions/elephantbroker-context
 
 # Install runtime dependencies from the committed lockfile. `npm ci` is
 # lockfile-driven (the npm equivalent of `uv sync --frozen`).
@@ -444,7 +444,7 @@ cd ~/.openclaw/extensions/elephantbroker-context && npm ci
 > every time. Use it for any production deployment, CI run, or anywhere you
 > care about reproducibility.
 
-> **Why `dist/` is committed:** OpenClaw loads `openclaw-plugins/*/dist/index.js`
+> **Why `dist/` is committed:** OpenClaw loads `plugins/openclaw/*/dist/index.js`
 > directly — that file IS the plugin. Leaving `dist/` gitignored let src and
 > dist drift in working trees (this bit PR #6: a src fix shipped without the
 > corresponding rebuilt bundle). The repo now commits both plugins' `dist/`
@@ -501,7 +501,7 @@ Edit the agent's workspace files to use EB's durable memory instead of file-base
 
 **`~/.openclaw/workspace/TOOLS.md`** — add the ElephantBroker tool documentation section if not already present. Keep existing "Local Notes" and any user customizations.
 
-See `openclaw-plugins/elephantbroker-memory/workspace/` for reference templates showing the EB-specific sections to splice in. See docs/OPENCLAW-SETUP.md for detailed change instructions.
+See `plugins/openclaw/memory/workspace/` for reference templates showing the EB-specific sections to splice in. See docs/OPENCLAW-SETUP.md for detailed change instructions.
 
 ### 4. Plugin Registration & Gateway Configuration
 
@@ -590,14 +590,14 @@ git pull origin main
 # `src/**`. The hook is escapable with `--no-verify`; interop reviewers
 # independently verify parity on PRs that touch plugin src (see
 # `local/teams/REVIEWING.md` § Production).
-cd openclaw-plugins/elephantbroker-memory && npm ci
-cd ../elephantbroker-context && npm ci
+cd plugins/openclaw/memory && npm ci
+cd ../context && npm ci
 
 # OPTIONAL belt-and-braces rebuild. Not required (committed dist is trusted)
 # but useful if you want to reverify locally that the loaded bytes match a
 # fresh build of the pulled src.
-# cd openclaw-plugins/elephantbroker-memory && npm run build
-# cd ../elephantbroker-context && npm run build
+# cd plugins/openclaw/memory && npm run build
+# cd ../context && npm run build
 
 # Restart gateway to reload plugins
 openclaw gateway restart

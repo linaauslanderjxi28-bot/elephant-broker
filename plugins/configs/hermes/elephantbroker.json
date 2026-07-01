@@ -1,0 +1,6 @@
+{
+  "service_url": "http://localhost:8420",
+  "gateway_id": "gw-enterprise-prod",
+  "agent_key": "hermes-agent",
+  "profile_name": "coding"
+}

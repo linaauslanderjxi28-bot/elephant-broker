@@ -5,7 +5,7 @@ __pycache__/
 *.egg-info/
 dist/
 # Committed plugin dist bundles — see TODO-6-501 / PR #6.
-# OpenClaw loads openclaw-plugins/*/dist/index.js at runtime; committed dist
+# OpenClaw loads plugins/openclaw/*/dist/index.js at runtime; committed dist
 # is the source of truth. Client-side enforcement: .githooks/pre-commit
 # (opt-in via `git config core.hookspath .githooks`) runs scripts/verify-
 # plugin-dist.sh on commit to catch src↔dist drift. Hook is escapable with
@@ -14,6 +14,10 @@ dist/
 !openclaw-plugins/elephantbroker-context/dist/**
 !openclaw-plugins/elephantbroker-memory/dist/
 !openclaw-plugins/elephantbroker-memory/dist/**
+!plugins/openclaw/context/dist/
+!plugins/openclaw/context/dist/**
+!plugins/openclaw/memory/dist/
+!plugins/openclaw/memory/dist/**
 build/
 .env
 .ruff_cache/
