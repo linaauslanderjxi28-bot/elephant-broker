@@ -35,6 +35,8 @@ var ContextEngineClient = class {
     if (this.agentKey) headers["X-EB-Agent-Key"] = this.agentKey;
     if (this.agentId) headers["X-EB-Agent-ID"] = this.agentId;
     if (this.currentSessionKey) headers["X-EB-Session-Key"] = this.currentSessionKey;
+    const authToken = process.env.EB_AUTH_TOKEN || "";
+    if (authToken) headers["X-EB-Auth-Token"] = authToken;
     propagation.inject(context.active(), headers);
     return headers;
   }

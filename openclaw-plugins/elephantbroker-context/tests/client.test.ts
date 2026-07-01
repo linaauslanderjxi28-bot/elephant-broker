@@ -37,6 +37,21 @@ describe("ContextEngineClient.getConfig() — TODO-6-503 profile forwarding", ()
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+    delete process.env.EB_AUTH_TOKEN;
+  });
+
+  it("forwards EB_AUTH_TOKEN as X-EB-Auth-Token when configured", async () => {
+    process.env.EB_AUTH_TOKEN = "test-token";
+    const client = new ContextEngineClient(
+      "http://localhost:8420",
+      "gw-test",
+      "gw",
+      "coding",
+    );
+    await client.getConfig();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    expect((init.headers as Record<string, string>)["X-EB-Auth-Token"]).toBe("test-token");
   });
 
   it("forwards profileName as ?profile= query param when set", async () => {
