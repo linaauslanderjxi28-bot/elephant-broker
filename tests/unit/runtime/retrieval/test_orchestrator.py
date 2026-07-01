@@ -1,12 +1,14 @@
 """Tests for RetrievalOrchestrator — dataset name fix (Fix #32)."""
 from __future__ import annotations
 
+import asyncio
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from elephantbroker.runtime.retrieval.orchestrator import RetrievalOrchestrator
+from elephantbroker.runtime.interfaces.retrieval import RetrievalCandidate
 from elephantbroker.schemas.profile import IsolationScope, RetrievalPolicy
 from elephantbroker.schemas.trace import TraceEventType
 
@@ -374,9 +376,9 @@ class TestSourceFailureMetric:
         """A single source raising inside the asyncio.gather must fire
         `inc_search_stage_failure(source_name, exception_type, gateway_id=...)`
         adjacent to the existing trace event."""
-        captured: list = []
+        captured: list[tuple[str, str, str]] = []
 
-        def fake_inc(stage, exception_type, gateway_id=""):
+        def fake_inc(stage: str, exception_type: str, gateway_id: str = ""):
             captured.append((stage, exception_type, gateway_id))
 
         monkeypatch.setattr(
@@ -409,9 +411,9 @@ class TestSourceFailureMetric:
         value (not the orchestrator's configured gateway_id) must label
         the metric — same gateway-scoping rule the adjacent trace event
         already follows."""
-        captured: list = []
+        captured: list[tuple[str, str, str]] = []
 
-        def fake_inc(stage, exception_type, gateway_id=""):
+        def fake_inc(stage: str, exception_type: str, gateway_id: str = ""):
             captured.append((stage, exception_type, gateway_id))
 
         monkeypatch.setattr(
@@ -437,3 +439,42 @@ class TestSourceFailureMetric:
             )
 
         assert captured == [("structural", "ValueError", "caller-gw")]
+
+    async def test_source_timeout_returns_fast_source_results(self, monkeypatch):
+        captured: list[tuple[str, str, str]] = []
+
+        def fake_inc(stage: str, exception_type: str, gateway_id: str = ""):
+            captured.append((stage, exception_type, gateway_id))
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.retrieval.orchestrator.inc_search_stage_failure",
+            fake_inc,
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.retrieval.orchestrator._RETRIEVAL_SOURCE_TIMEOUT_SECONDS",
+            0.01,
+        )
+
+        orch = _make_orchestrator()
+        fact_id = str(uuid.uuid4())
+        policy = RetrievalPolicy(
+            structural_enabled=True,
+            keyword_enabled=True,
+            vector_enabled=False,
+            graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+
+        async def slow_keyword(query: str, dataset: str, limit: int) -> list[RetrievalCandidate]:
+            await asyncio.sleep(1.0)
+            return []
+
+        orch._graph.query_cypher = AsyncMock(return_value=[
+            {"props": _fact_props(fact_id), "relations": []},
+        ])
+
+        with patch.object(orch, "get_keyword_hits", new=slow_keyword):
+            candidates = await asyncio.wait_for(orch.retrieve_candidates("q", policy=policy), timeout=0.2)
+
+        assert [str(candidate.fact.id) for candidate in candidates] == [fact_id]
+        assert captured == [("keyword", "TimeoutError", "test-gw")]

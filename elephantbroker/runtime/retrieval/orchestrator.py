@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable
 
 import cognee
 from cognee.modules.search.types import SearchType
@@ -23,6 +24,13 @@ from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 logger = logging.getLogger("elephantbroker.retrieval.orchestrator")
 
 _FACTS_COLLECTION = "FactDataPoint_text"
+_RETRIEVAL_SOURCE_TIMEOUT_SECONDS = 8.0
+
+
+async def _with_source_timeout(
+    coro: Awaitable[list[RetrievalCandidate]],
+) -> list[RetrievalCandidate]:
+    return await asyncio.wait_for(coro, timeout=_RETRIEVAL_SOURCE_TIMEOUT_SECONDS)
 
 
 class RetrievalOrchestrator(IRetrievalOrchestrator):
@@ -63,36 +71,36 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         is_strict = policy.isolation_level == IsolationLevel.STRICT
 
         # Build concurrent tasks for enabled sources
-        tasks: dict[str, asyncio.Task] = {}
+        tasks: dict[str, asyncio.Task[list[RetrievalCandidate]]] = {}
         if policy.structural_enabled:
             tasks["structural"] = asyncio.ensure_future(
-                self.get_structural_hits(
+                _with_source_timeout(self.get_structural_hits(
                     scope=scope, actor_id=actor_id, memory_class=memory_class,
                     entity_type=entity_type, session_key=session_key, limit=policy.structural_fetch_k,
                     auto_recall=auto_recall,
                     caller_gateway_id=caller_gateway_id,
-                )
+                ))
             )
         if policy.keyword_enabled and not is_strict:
             tasks["keyword"] = asyncio.ensure_future(
-                self.get_keyword_hits(query, sk, policy.keyword_fetch_k)
+                _with_source_timeout(self.get_keyword_hits(query, sk, policy.keyword_fetch_k))
             )
         if policy.vector_enabled:
             if is_strict:
                 tasks["vector"] = asyncio.ensure_future(
-                    self._get_direct_vector_hits(query, session_key, policy.vector_fetch_k)
+                    _with_source_timeout(self._get_direct_vector_hits(query, session_key, policy.vector_fetch_k))
                 )
             else:
                 tasks["vector"] = asyncio.ensure_future(
-                    self.get_semantic_hits_cognee(query, sk, policy.vector_fetch_k)
+                    _with_source_timeout(self.get_semantic_hits_cognee(query, sk, policy.vector_fetch_k))
                 )
         if policy.graph_expansion_enabled:
             tasks["graph"] = asyncio.ensure_future(
-                self.get_graph_neighbors(query, sk, policy.graph_max_depth)
+                _with_source_timeout(self.get_graph_neighbors(query, sk, policy.graph_max_depth))
             )
         if policy.artifact_enabled:
             tasks["artifact"] = asyncio.ensure_future(
-                self._get_artifact_hits(query, sk, policy.artifact_fetch_k)
+                _with_source_timeout(self._get_artifact_hits(query, sk, policy.artifact_fetch_k))
             )
 
         # Await all
@@ -144,8 +152,12 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
                                  "enabled": True, "error": str(result)},
                     ))
                 continue
+            if not isinstance(result, list):
+                logger.warning("Retrieval source %s returned invalid result: %r", source_name, result)
+                continue
+            source_candidates = result
             weight = weight_map.get(source_name, 0.3)
-            for candidate in result:
+            for candidate in source_candidates:
                 candidate.score = candidate.score * weight
                 all_candidates.append(candidate)
             if self._trace:
@@ -153,7 +165,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
                     event_type=TraceEventType.RETRIEVAL_SOURCE_RESULT,
                     session_key=session_key or "",
                     gateway_id=_trace_gw,
-                    payload={"source_type": source_name, "result_count": len(result),
+                    payload={"source_type": source_name, "result_count": len(source_candidates),
                              "enabled": True},
                 ))
 
