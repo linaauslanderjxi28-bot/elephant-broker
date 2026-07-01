@@ -259,6 +259,11 @@ class RuntimeContainer:
         # Phase 8: Org/team identity + authority
         self.org_override_store = None
         self.authority_store = None
+
+        # Phase 11: Dashboard stores (API keys, operator guard rules, prefs)
+        self.api_key_store = None
+        self.custom_rule_store = None
+        self.dashboard_preferences_store = None
         self._bootstrap_mode: bool | None = None  # None = not yet checked
         self._bootstrap_checked: bool = False
 
@@ -757,6 +762,48 @@ class RuntimeContainer:
         c.authority_store = AuthorityRuleStore(config.audit.authority_rules_db_path)
         await c.authority_store.init_db()
 
+        # --- Phase 11: Dashboard stores (API keys, custom guard rules, prefs) ---
+        # Each construction is guarded independently so a missing/failed store
+        # class (e.g. the preferences store shipped in a later fix) never
+        # aborts container boot — the consumer routes tolerate ``None`` via
+        # getattr() and degrade to unauthenticated / empty behaviour.
+        try:
+            from elephantbroker.api.auth.api_key_store import ApiKeyStore
+            c.api_key_store = ApiKeyStore(db_path=config.audit.api_keys_db_path)
+            await c.api_key_store.init_db()
+        except Exception as exc:
+            logger.warning("ApiKeyStore wiring failed, continuing without: %s", exc)
+            c.api_key_store = None
+
+        try:
+            from elephantbroker.runtime.guards.custom_rule_store import CustomRuleStore
+            c.custom_rule_store = CustomRuleStore(db_path=config.audit.custom_guard_rules_db_path)
+            await c.custom_rule_store.init_db()
+        except Exception as exc:
+            logger.warning("CustomRuleStore wiring failed, continuing without: %s", exc)
+            c.custom_rule_store = None
+
+        try:
+            from elephantbroker.runtime.dashboard.preferences_store import (
+                DashboardPreferencesStore,
+            )
+            # The store's constructor signature is owned by a separate fix;
+            # try the gateway-scoped form first, fall back to db_path-only.
+            try:
+                c.dashboard_preferences_store = DashboardPreferencesStore(
+                    db_path=config.audit.dashboard_db_path, gateway_id=gw_id,
+                )
+            except TypeError:
+                c.dashboard_preferences_store = DashboardPreferencesStore(
+                    db_path=config.audit.dashboard_db_path,
+                )
+            init_db = getattr(c.dashboard_preferences_store, "init_db", None)
+            if init_db is not None:
+                await init_db()
+        except Exception as exc:
+            logger.warning("DashboardPreferencesStore wiring failed, continuing without: %s", exc)
+            c.dashboard_preferences_store = None
+
         # Bootstrap detection is LAZY — checked on first admin API request
         # via GET /admin/bootstrap-status. This avoids opening a Neo4j
         # connection during from_config() which can cause event loop binding
@@ -903,6 +950,16 @@ class RuntimeContainer:
         if self.authority_store:
             logger.info("Closing adapter: %s", "authority_store")
             await self.authority_store.close()
+        # Phase 11 cleanup
+        for store_attr in ("api_key_store", "custom_rule_store", "dashboard_preferences_store"):
+            store = getattr(self, store_attr, None)
+            close = getattr(store, "close", None) if store else None
+            if close is not None:
+                logger.info("Closing adapter: %s", store_attr)
+                try:
+                    await close()
+                except Exception as exc:
+                    logger.debug("Close failed for %s: %s", store_attr, exc)
         # Phase 7 cleanup
         if self.hitl_client:
             logger.info("Closing adapter: %s", "hitl_client")

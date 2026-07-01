@@ -100,6 +100,20 @@ async def session_start(body: SessionStartRequest, request: Request):
             except Exception as exc:
                 logger.warning("Subagent parent mapping failed: %s", exc)
 
+    # 3b. Register session in the per-gateway active_sessions SET so the
+    # dashboard live-sessions panel (SOW 11.2) reflects this session. SADD is
+    # idempotent; we refresh a 48h safety TTL on the SET key each time so a
+    # missed session_end (SREM below) cannot leak members indefinitely.
+    redis_keys = getattr(container, "redis_keys", None)
+    redis = getattr(container, "redis", None)
+    if redis_keys and redis:
+        try:
+            active_key = redis_keys.active_sessions()
+            await redis.sadd(active_key, body.session_key)
+            await redis.expire(active_key, 172800)
+        except Exception as exc:
+            logger.warning("active_sessions SADD failed: %s", exc)
+
     # 4. Emit trace event with full identity
     # TD-65: session_id is promoted to a top-level TraceEvent field so POST /trace/query
     # can filter by session_id. body.session_id is typed str but production TS plugins
@@ -317,6 +331,16 @@ async def session_end(body: SessionEndRequest, request: Request):
                 )
             except Exception as exc:
                 logger.warning("Session goal flush failed: %s", exc)
+
+    # Remove session from the per-gateway active_sessions SET so the dashboard
+    # live-sessions panel (SOW 11.2) drops it. Mirrors the SADD in /start.
+    redis_keys = getattr(container, "redis_keys", None)
+    redis = getattr(container, "redis", None)
+    if redis_keys and redis:
+        try:
+            await redis.srem(redis_keys.active_sessions(), body.session_key)
+        except Exception as exc:
+            logger.warning("active_sessions SREM failed: %s", exc)
 
     # Emit trace event
     # TD-65: session_id is promoted to a top-level TraceEvent field so POST /trace/query

@@ -1,10 +1,12 @@
 """Tests for error handler and auth middleware."""
 import logging
-from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
-from fastapi import Response
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request as StarletteRequest
 
 from elephantbroker.api.middleware.auth import AuthMiddleware
@@ -91,25 +93,67 @@ class TestErrorHandlerMiddleware:
         assert "denied" in body
 
 
+def _anon_container():
+    """Minimal container yielding an anonymous identity (no credentials)."""
+    c = SimpleNamespace()
+    c.api_key_store = None
+    c.actor_registry = None
+    c.gateway_id = ""
+    c.check_bootstrap_mode = AsyncMock(return_value=False)
+    c.config = None
+    return c
+
+
+def _make_app(container, *, auth_enabled: bool = False):
+    """Build a real app wiring AuthMiddleware so ``request.app`` exists.
+
+    A bare Starlette request no longer works: the Phase 11 AuthMiddleware reads
+    ``request.app.state.container`` to resolve identity, so the middleware must
+    run inside an ASGI app that carries the container on ``app.state``.
+    """
+    app = FastAPI()
+    config = SimpleNamespace(enabled=True) if auth_enabled else None
+    app.add_middleware(AuthMiddleware, config=config)
+    app.state.container = container
+
+    @app.get("/health/ping")
+    async def health_ping(request: Request):
+        ident = getattr(request.state, "identity", None)
+        return {"method": ident.method.value if ident else None}
+
+    @app.get("/health/created")
+    async def health_created():
+        return JSONResponse(content={"ok": True}, status_code=201)
+
+    return app
+
+
+async def _get(app, path, headers=None):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        return await ac.get(path, headers=headers or {})
+
+
 class TestAuthMiddleware:
     async def test_passes_request_through(self):
-        """G8 (#1494): Pins PROD risk — AuthMiddleware is a stub. No API key / token / HMAC
-        validation. Every request passes through regardless of authorization.
-
-        This is an intentional Phase 3 placeholder; real auth lands in a later phase.
-        If real auth is added (API key / JWT / mTLS), update this test and the flow plan.
+        """Phase 11: the unified AuthMiddleware is no longer a no-op stub — it
+        resolves a caller identity and stamps it on ``request.state``. With
+        dashboard auth DISABLED (the default, backward-compatible mode) it never
+        blocks, so an uncredentialed request still passes through exactly as
+        before. It is stamped with an anonymous identity rather than being
+        ignored entirely (pre-Phase-11 pass-through behavior preserved).
         """
-        middleware = AuthMiddleware(app=MagicMock())
-        request = _make_request()
-        expected = Response(content="ok")
-        call_next = AsyncMock(return_value=expected)
-        result = await middleware.dispatch(request, call_next)
-        assert result is expected
+        app = _make_app(_anon_container())
+        resp = await _get(app, "/health/ping")
+        assert resp.status_code == 200
+        assert resp.json()["method"] == "anonymous"
 
     async def test_preserves_response(self):
-        middleware = AuthMiddleware(app=MagicMock())
-        request = _make_request()
-        expected = Response(content="preserved", status_code=201)
-        call_next = AsyncMock(return_value=expected)
-        result = await middleware.dispatch(request, call_next)
-        assert result.status_code == 201
+        """The middleware returns the downstream response unchanged, including a
+        non-200 status code — it only stamps identity, it does not rewrite the
+        response when auth is disabled.
+        """
+        app = _make_app(_anon_container())
+        resp = await _get(app, "/health/created")
+        assert resp.status_code == 201
+        assert resp.json() == {"ok": True}

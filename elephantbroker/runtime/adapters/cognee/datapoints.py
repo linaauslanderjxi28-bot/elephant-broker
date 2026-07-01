@@ -134,6 +134,7 @@ class ActorDataPoint(DataPoint):
     team_ids: list[str] = []
     trust_level: float = 0.5
     tags: list[str] = []
+    active: bool = True
     eb_id: str = ""
     gateway_id: str = ""
     metadata: dict[str, Any] = {"index_fields": ["display_name"]}
@@ -150,6 +151,7 @@ class ActorDataPoint(DataPoint):
             team_ids=[str(t) for t in actor.team_ids],
             trust_level=actor.trust_level,
             tags=list(actor.tags),
+            active=actor.active,
             eb_id=str(actor.id),
             gateway_id=getattr(actor, "gateway_id", ""),
         )
@@ -166,6 +168,7 @@ class ActorDataPoint(DataPoint):
             team_ids=[uuid.UUID(t) for t in raw_team_ids],
             trust_level=self.trust_level,
             tags=list(self.tags),
+            active=self.active,
             gateway_id=self.gateway_id,
         )
 
@@ -196,6 +199,7 @@ class ActorDataPoint(DataPoint):
             team_ids=[str(t) for t in raw_team_ids],
             trust_level=entity.get("trust_level", 0.5),
             tags=list(entity.get("tags", []) or []),
+            active=entity.get("active", True),
             eb_id=eb_id,
             gateway_id=entity.get("gateway_id", ""),
         )

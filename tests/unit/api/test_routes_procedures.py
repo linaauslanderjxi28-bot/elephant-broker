@@ -16,27 +16,49 @@ class TestProcedureRoutes:
         assert r.status_code == 200
         assert r.json()["name"] == "Test procedure"
 
-    async def test_get_procedure(self, client):
-        """TODO-8-R1-005 — pin the *current stub contract*, not just 200.
-
-        ``GET /procedures/{procedure_id}`` is a Phase 4 stub
-        (``api/routes/procedures.py:42-44``) that returns
-        ``{"procedure_id": "<uuid>", "status": "stub"}`` without consulting
-        the engine. The previous test only asserted ``r.status_code == 200``,
-        which would silently keep passing even if the stub were replaced
-        with an unrelated 200-response handler (e.g. one that returns a
-        completed procedure with broken or empty fields). Asserting the
-        full stub shape is the closest we can get to "test the actual
-        behaviour" until the route is replaced with the real engine call.
-        When the stub is implemented, this test should be replaced with
-        engine-mock-driven coverage; the assertion failures here will
-        signal the migration is needed.
+    async def test_get_procedure_not_found(self, client, mock_graph):
+        """TD-21: ``GET /procedures/{id}`` is wired to a gateway-scoped graph
+        read (``api/routes/procedures.py:42-60``). When ``graph.get_entity``
+        returns ``None`` (no such procedure in this gateway) the route raises
+        HTTP 404 — not the old Phase 4 ``{"status": "stub"}`` shape.
         """
         proc_id = uuid.uuid4()
+        mock_graph.get_entity.return_value = None
+        r = await client.get(f"/procedures/{proc_id}")
+        assert r.status_code == 404
+        assert r.json()["detail"] == "Procedure not found"
+
+    async def test_get_procedure(self, client, mock_graph):
+        """TD-21: happy path — when the graph returns a stored procedure
+        entity, the route reconstructs it via
+        ``ProcedureDataPoint.to_schema_from_dict`` and returns the full
+        ``ProcedureDefinition`` JSON with a 200.
+        """
+        proc_id = uuid.uuid4()
+        # Realistic graph entity dict, matching what get_entity yields for a
+        # stored ProcedureDataPoint (JSON-string persisted collections).
+        mock_graph.get_entity.return_value = {
+            "eb_id": str(proc_id),
+            "name": "Deploy checklist",
+            "description": "Pre-deploy verification steps",
+            "scope": "session",
+            "gateway_id": "gw-test",
+            "is_manual_only": True,
+            "steps_json": "[]",
+            "activation_modes_json": "[]",
+            "red_line_bindings_json": "[]",
+            "approval_requirements_json": "[]",
+        }
         r = await client.get(f"/procedures/{proc_id}")
         assert r.status_code == 200
         body = r.json()
-        assert body == {"procedure_id": str(proc_id), "status": "stub"}
+        assert body["id"] == str(proc_id)
+        assert body["name"] == "Deploy checklist"
+        assert body["description"] == "Pre-deploy verification steps"
+        assert body["is_manual_only"] is True
+        # get_entity was consulted with gateway scoping.
+        mock_graph.get_entity.assert_awaited_once()
+        assert mock_graph.get_entity.await_args.args[0] == str(proc_id)
 
     async def test_activate_procedure(self, client, mock_graph, monkeypatch, mock_add_data_points, mock_cognee):
         monkeypatch.setattr("elephantbroker.runtime.procedures.engine.add_data_points", mock_add_data_points)

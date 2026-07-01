@@ -24,7 +24,14 @@ from elephantbroker.runtime.memory.cascade_helper import CascadeStatus, cascade_
 from elephantbroker.runtime.observability import GatewayLoggerAdapter, traced
 from elephantbroker.runtime.utils.tokens import count_tokens
 from elephantbroker.schemas.base import Scope
-from elephantbroker.schemas.fact import FactAssertion, MemoryClass
+from elephantbroker.schemas.fact import (
+    FactAssertion,
+    FactFilters,
+    FactPage,
+    FactSort,
+    FactSortField,
+    MemoryClass,
+)
 from elephantbroker.runtime.metrics import (
     MetricsContext, inc_cognee_capture_failure, inc_dedup, inc_edge,
     inc_fact_delete_cascade_failure, inc_gdpr_delete,
@@ -1119,3 +1126,148 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             except Exception:
                 continue
         return facts
+
+    async def ensure_fact_indexes(self) -> None:
+        """Create Neo4j indexes on FactDataPoint used by the dashboard browser.
+
+        Phase 11 (11.2): the paginated ``query_facts`` browser filters and
+        orders on ``gateway_id``, ``created_at``, ``confidence``, ``scope``
+        and ``memory_class``. Without backing indexes each browse triggers a
+        full label scan of FactDataPoint. These are idempotent
+        ``CREATE INDEX ... IF NOT EXISTS`` statements — safe to run on every
+        bootstrap. Best-effort: an index-creation failure (e.g. a Neo4j
+        deployment that rejects the syntax) is logged and swallowed so it
+        never blocks startup, exactly like the edge-creation best-effort
+        pattern in ``_try_add_edge``.
+        """
+        index_specs = (
+            ("eb_fact_gateway_id", "gateway_id"),
+            ("eb_fact_created_at", "created_at"),
+            ("eb_fact_confidence", "confidence"),
+            ("eb_fact_scope", "scope"),
+            ("eb_fact_memory_class", "memory_class"),
+        )
+        for index_name, prop in index_specs:
+            cypher = (
+                f"CREATE INDEX {index_name} IF NOT EXISTS "
+                f"FOR (f:FactDataPoint) ON (f.{prop})"
+            )
+            try:
+                await self._graph.query_cypher(cypher)
+            except Exception as exc:
+                self._log.warning(
+                    "Failed to create FactDataPoint index %s on f.%s: %s",
+                    index_name, prop, exc,
+                )
+
+    @traced
+    async def query_facts(
+        self,
+        *,
+        gateway_id: str,
+        filters: FactFilters | None = None,
+        page: int = 1,
+        page_size: int = 50,
+        sort: FactSort | None = None,
+    ) -> FactPage:
+        """Paginated, multi-filter, sorted structural fact query (Phase 11).
+
+        Powers the dashboard memory browser. Runs two gateway-scoped Cypher
+        queries against FactDataPoint: a ``count(f)`` for the pre-pagination
+        total, then a ``SKIP``/``LIMIT`` window ordered by a whitelisted
+        column. Mirrors the strict gateway filter + ``properties(f)``
+        projection shape of ``_build_structural_query`` / ``get_by_scope``.
+
+        Security notes:
+        - ``gateway_id`` is applied as a strict equality condition (never an
+          ``IS NULL`` fallback), matching the module-level Cypher rule.
+        - ``ORDER BY`` is built from the ``FactSortField`` enum only — user
+          input never reaches the Cypher string, so there is no injection
+          surface. Filter values are always passed as bound parameters.
+        - ``page_size`` is clamped to ``[1, 500]`` to bound result size.
+        """
+        filters = filters or FactFilters()
+        sort = sort or FactSort()
+        page = max(1, page)
+        page_size = max(1, min(page_size, 500))  # hard cap; reject-by-clamp
+        effective_gw = gateway_id or self._gateway_id
+
+        conditions: list[str] = ["f.gateway_id = $gateway_id"]  # STRICT
+        params: dict = {"gateway_id": effective_gw}
+        if filters.scope:
+            conditions.append("f.scope = $scope")
+            params["scope"] = filters.scope.value if hasattr(filters.scope, "value") else str(filters.scope)
+        if filters.memory_class:
+            conditions.append("f.memory_class = $memory_class")
+            params["memory_class"] = (
+                filters.memory_class.value
+                if hasattr(filters.memory_class, "value")
+                else str(filters.memory_class)
+            )
+        if filters.actor_id:
+            conditions.append("f.source_actor_id = $actor_id")
+            params["actor_id"] = filters.actor_id
+        if filters.session_key:
+            conditions.append("f.session_key = $session_key")
+            params["session_key"] = filters.session_key
+        if filters.session_id:
+            conditions.append("f.session_id = $session_id")
+            params["session_id"] = filters.session_id
+        if filters.category:
+            conditions.append("f.category = $category")
+            params["category"] = filters.category
+        if filters.archived is not None:
+            conditions.append("f.archived = $archived")
+            params["archived"] = filters.archived
+        if getattr(filters, "min_confidence", None) is not None:
+            conditions.append("f.confidence >= $min_confidence")
+            params["min_confidence"] = filters.min_confidence
+        if getattr(filters, "max_confidence", None) is not None:
+            conditions.append("f.confidence <= $max_confidence")
+            params["max_confidence"] = filters.max_confidence
+        if filters.text_contains:
+            conditions.append("toLower(f.text) CONTAINS toLower($text_contains)")
+            params["text_contains"] = filters.text_contains
+        if filters.created_after:
+            conditions.append("f.created_at >= $created_after")
+            params["created_after"] = filters.created_after.isoformat()
+        if filters.created_before:
+            conditions.append("f.created_at <= $created_before")
+            params["created_before"] = filters.created_before.isoformat()
+        where = " AND ".join(conditions)
+
+        # Total count (pre-pagination).
+        count_records = await self._graph.query_cypher(
+            f"MATCH (f:FactDataPoint) WHERE {where} RETURN count(f) AS total",
+            params,
+        )
+        total = count_records[0].get("total", 0) if count_records else 0
+
+        # ORDER BY column derives ONLY from the FactSortField enum — never
+        # from free text — so the f-string interpolation is injection-safe.
+        order_col = f"f.{sort.field.value}"
+        order_dir = "DESC" if sort.descending else "ASC"
+        skip = (page - 1) * page_size
+        page_params = {**params, "skip": skip, "limit": page_size}
+        records = await self._graph.query_cypher(
+            f"MATCH (f:FactDataPoint) WHERE {where} "
+            f"RETURN properties(f) AS props ORDER BY {order_col} {order_dir} "
+            "SKIP $skip LIMIT $limit",
+            page_params,
+        )
+        items: list[FactAssertion] = []
+        for rec in records:
+            props = clean_graph_props(rec["props"])
+            try:
+                items.append(FactDataPoint(**props).to_schema())
+            except Exception:
+                continue
+
+        total_pages = math.ceil(total / page_size) if total else 0
+        return FactPage(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
+        )

@@ -70,6 +70,21 @@ class SetProfileOverrideRequest(BaseModel):
     overrides: dict
 
 
+class AddGoalBlockerRequest(BaseModel):
+    blocker: str = Field(min_length=1)
+
+
+class CreateSubgoalRequest(BaseModel):
+    title: str = Field(min_length=1)
+    description: str = ""
+    success_criteria: list[str] = Field(default_factory=list)
+    owner_actor_ids: list[str] = Field(default_factory=list)
+
+
+class SetActorStatusRequest(BaseModel):
+    active: bool
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -137,6 +152,38 @@ async def update_authority_rule(action: str, body: UpdateAuthorityRuleRequest, r
     rule_data = body.model_dump(exclude_none=True)
     await container.authority_store.set_rule(action, rule_data)
     return {"action": action, "rule": rule_data}
+
+
+@router.delete("/authority-rules/{action}")
+async def reset_authority_rule(action: str, request: Request):
+    """TD-19: reset a custom authority rule back to its shipped default.
+
+    Drops the SQLite override (via ``delete_rule`` when the store exposes it)
+    so ``get_rule`` falls back to ``AUTHORITY_DEFAULTS``. When no native delete
+    exists, the override is overwritten with the shipped default, which is
+    behaviourally identical for known actions.
+    """
+    await _auth(request, "create_org")  # system admin required
+    container = request.app.state.container
+    store = container.authority_store
+    from elephantbroker.runtime.profiles.authority_store import AUTHORITY_DEFAULTS
+    default = AUTHORITY_DEFAULTS.get(action)
+    deleter = getattr(store, "delete_rule", None)
+    if deleter is not None:
+        removed = await deleter(action)
+        if not removed and default is None:
+            raise HTTPException(status_code=404, detail=f"No authority rule for action: {action}")
+    else:
+        if default is None:
+            raise HTTPException(
+                status_code=404, detail=f"No default authority rule for action: {action}"
+            )
+        await store.set_rule(action, dict(default))
+    reset = await store.get_rule(action)
+    metrics = getattr(container, "metrics_ctx", None)
+    if metrics:
+        metrics.inc_admin_op("reset_authority_rule", "success")
+    return {"action": action, "rule": reset, "status": "reset"}
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +551,69 @@ async def merge_actors(actor_id: str, request: Request):
     raise HTTPException(status_code=501, detail="Actor merge not implemented")
 
 
+async def _revoke_actor_sessions(actor) -> int:
+    """Best-effort revocation of SuperTokens sessions for a dashboard actor.
+
+    The dashboard maps a SuperTokens user to an actor whose handle is
+    ``dashboard:{st_user_id}`` (see ``api/auth/identity.py``). ST is a HEAVY,
+    OPTIONAL dependency, so it is lazy-imported and every failure degrades to a
+    no-op — a deactivated actor with no dashboard handle (e.g. an agent) simply
+    revokes nothing.
+    """
+    st_user_ids = [
+        h.split("dashboard:", 1)[1]
+        for h in (getattr(actor, "handles", None) or [])
+        if isinstance(h, str) and h.startswith("dashboard:")
+    ]
+    if not st_user_ids:
+        return 0
+    try:
+        from supertokens_python.recipe.session.asyncio import (
+            revoke_all_sessions_for_user,
+        )
+    except Exception as exc:  # ST not installed / not configured
+        logger.debug("SuperTokens session revocation unavailable: %s", exc)
+        return 0
+    revoked = 0
+    for uid in st_user_ids:
+        try:
+            handles = await revoke_all_sessions_for_user(uid)
+            revoked += len(handles) if handles else 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to revoke sessions for ST user %s: %s", uid, exc)
+    return revoked
+
+
+@router.put("/actors/{actor_id}/status")
+async def set_actor_status(actor_id: str, body: SetActorStatusRequest, request: Request):
+    """TD-22 (Phase 11): soft-(de)activate an actor.
+
+    Deactivation flips ``active=False`` (hiding the actor from active lists while
+    preserving the node for provenance — actors are never DETACH DELETE'd) and
+    revokes any live SuperTokens dashboard sessions bound to the actor so a
+    deactivated operator cannot keep using the dashboard.
+    """
+    await _auth(request, "register_actor")
+    container = request.app.state.container
+    actor = await container.actor_registry.resolve_actor(uuid.UUID(actor_id))
+    if not actor:
+        raise HTTPException(status_code=404, detail="Actor not found")
+    actor.active = body.active
+    await container.actor_registry.register_actor(actor)
+
+    revoked_sessions = 0
+    if not body.active:
+        revoked_sessions = await _revoke_actor_sessions(actor)
+
+    metrics = getattr(container, "metrics_ctx", None)
+    if metrics:
+        metrics.inc_admin_op("set_actor_status", "success")
+    logger.info(
+        "Actor %s active=%s (revoked %d sessions)", actor_id, body.active, revoked_sessions
+    )
+    return {"actor_id": actor_id, "active": body.active, "revoked_sessions": revoked_sessions}
+
+
 # ---------------------------------------------------------------------------
 # Persistent goals
 # ---------------------------------------------------------------------------
@@ -582,6 +692,84 @@ async def update_persistent_goal(goal_id: str, request: Request):
     if "status" in body:
         await container.goal_manager.update_goal_status(uuid.UUID(goal_id), GoalStatus(body["status"]))
     return {"goal_id": goal_id, "updated": True}
+
+
+@router.post("/goals/{goal_id}/blocker")
+async def add_persistent_goal_blocker(goal_id: str, body: AddGoalBlockerRequest, request: Request):
+    """TD-19: append a blocker to a PERSISTENT goal (session-goal parity with
+    ``routes/goals.add_session_goal_blocker``, but against the Cognee-backed
+    goal store)."""
+    await _auth(request, "create_global_goal")
+    container = request.app.state.container
+    gw_id = getattr(request.state, "gateway_id", "")
+    entity = await container.graph.get_entity(goal_id, gateway_id=gw_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    from elephantbroker.runtime.adapters.cognee.datapoints import GoalDataPoint
+    from elephantbroker.runtime.graph_utils import clean_graph_props
+
+    goal = GoalDataPoint(**clean_graph_props(entity)).to_schema()
+    if body.blocker not in goal.blockers:
+        goal.blockers = list(goal.blockers) + [body.blocker]
+    goal.gateway_id = goal.gateway_id or gw_id
+    await add_data_points([GoalDataPoint.from_schema(goal)])  # MERGE-by-id upsert
+
+    metrics = getattr(container, "metrics_ctx", None)
+    if metrics:
+        metrics.inc_goal_hint("blocker")
+    await container.trace_ledger.append_event(TraceEvent(
+        event_type=TraceEventType.SESSION_GOAL_BLOCKER_ADDED,
+        goal_ids=[goal.id],
+        payload={"blocker": body.blocker, "goal_id": goal_id},
+    ))
+    return goal.model_dump(mode="json")
+
+
+@router.post("/goals/{goal_id}/subgoal")
+async def add_persistent_subgoal(goal_id: str, body: CreateSubgoalRequest, request: Request):
+    """TD-19: create a child of a PERSISTENT goal (session-goal parity with
+    ``routes/goals.create_session_goal``'s parent linking). The subgoal inherits
+    the parent's scope/org/team and is linked via the CHILD_OF edge that
+    ``GoalManager.set_goal`` creates when ``parent_goal_id`` is set."""
+    container = request.app.state.container
+    gw_id = getattr(request.state, "gateway_id", "")
+    entity = await container.graph.get_entity(goal_id, gateway_id=gw_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Parent goal not found")
+
+    from elephantbroker.runtime.adapters.cognee.datapoints import GoalDataPoint
+    from elephantbroker.runtime.graph_utils import clean_graph_props
+
+    parent = GoalDataPoint(**clean_graph_props(entity)).to_schema()
+    parent_scope = parent.scope.value if hasattr(parent.scope, "value") else str(parent.scope)
+    action = SCOPE_ACTION_MAP.get(parent_scope, "create_global_goal")
+    await _auth(
+        request, action,
+        target_org_id=str(parent.org_id) if parent.org_id else None,
+        target_team_id=str(parent.team_id) if parent.team_id else None,
+    )
+
+    subgoal = GoalState(
+        title=body.title, description=body.description,
+        scope=parent.scope, status=GoalStatus.ACTIVE,
+        parent_goal_id=parent.id,
+        success_criteria=body.success_criteria,
+        owner_actor_ids=[uuid.UUID(a) for a in body.owner_actor_ids],
+        gateway_id=gw_id,
+        org_id=parent.org_id,
+        team_id=parent.team_id,
+    )
+    result = await container.goal_manager.set_goal(subgoal)
+
+    metrics = getattr(container, "metrics_ctx", None)
+    if metrics:
+        metrics.inc_goal_create()
+    await container.trace_ledger.append_event(TraceEvent(
+        event_type=TraceEventType.PERSISTENT_GOAL_CREATED,
+        payload={"goal_id": str(result.id), "parent_goal_id": goal_id, "scope": parent_scope},
+    ))
+    return result.model_dump(mode="json")
 
 
 # ---------------------------------------------------------------------------

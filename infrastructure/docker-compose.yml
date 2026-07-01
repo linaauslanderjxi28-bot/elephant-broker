@@ -74,6 +74,34 @@ services:
     profiles:
       - observability
 
+  # Phase 11: Dashboard auth — SuperTokens Core.
+  # Dev: leave SUPERTOKENS_POSTGRES_URI empty → the core runs with its built-in
+  # in-memory SQLite (data lost on restart, fine for local dev).
+  # Prod: set SUPERTOKENS_POSTGRES_URI to the postgres service below and enable
+  # the 'auth-prod' profile so durable state is persisted.
+  supertokens:
+    image: registry.supertokens.io/supertokens/supertokens-postgresql:9.2
+    ports:
+      - "13567:3567"
+    environment:
+      POSTGRESQL_CONNECTION_URI: ${SUPERTOKENS_POSTGRES_URI:-}
+    profiles:
+      - auth
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "15432:5432"
+    environment:
+      POSTGRES_USER: supertokens
+      # dev/staging only — use a real secret in production
+      POSTGRES_PASSWORD: ${SUPERTOKENS_POSTGRES_PASSWORD:-supertokens_dev}
+      POSTGRES_DB: supertokens
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    profiles:
+      - auth-prod
+
   # ElephantBroker runtime runs natively via Python venv (not containerized).
   # See docs/DEPLOYMENT.md for setup instructions.
   # Infrastructure services above are the only Docker dependencies.
@@ -83,3 +111,4 @@ volumes:
   qdrant_data:
   redis_data:
   clickhouse_data:
+  postgres_data:

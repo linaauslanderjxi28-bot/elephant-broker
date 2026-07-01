@@ -15,9 +15,11 @@ from elephantbroker.api.routes import (
     actors,
     admin,
     artifacts,
+    auth,
     claims,
     consolidation,
     context,
+    dashboard,
     goals,
     guards,
     health,
@@ -72,7 +74,80 @@ def create_app(container: RuntimeContainer) -> FastAPI:
     if hasattr(container, "config") and container.config and hasattr(container.config, "gateway"):
         default_gw = container.config.gateway.gateway_id
     app.add_middleware(GatewayIdentityMiddleware, default_gateway_id=default_gw)
+
+    # Phase 11 dashboard auth (SuperTokens + CORS). Only wired when explicitly
+    # enabled so pre-Phase-11 deployments and existing tests keep the
+    # no-enforcement behaviour. Everything below degrades gracefully when the
+    # optional ``supertokens_python`` dependency is not installed.
+    dashboard_auth_cfg = None
+    if hasattr(container, "config") and container.config:
+        dashboard_auth_cfg = getattr(container.config, "dashboard_auth", None)
+
+    if dashboard_auth_cfg is not None and getattr(dashboard_auth_cfg, "enabled", False):
+        # Initialize the SuperTokens SDK (emailpassword + session + usermetadata).
+        # init_supertokens is non-fatal: it returns False and logs a warning when
+        # the SDK is unavailable, leaving session auth simply inactive.
+        try:
+            from elephantbroker.api.auth.supertokens_config import (
+                get_supertokens_middleware,
+                init_supertokens,
+            )
+
+            # CRITICAL: only wire the SuperTokens ASGI middleware if init
+            # actually SUCCEEDED. init_supertokens() returns False (and logs a
+            # warning) when the SDK is unavailable OR the config is invalid
+            # (e.g. missing/placeholder domain). If we add the ST middleware
+            # after a failed init, its __call__ raises
+            # `GeneralError: Initialisation not done` on EVERY request → HTTP
+            # 500 on all routes, including auth-exempt ones like /guards. Gating
+            # on the return value keeps routes passing through with anonymous
+            # identity (pre-Phase-11 behaviour) whenever ST isn't fully up.
+            if init_supertokens(dashboard_auth_cfg):
+                # SuperTokens ASGI middleware handles the auto-generated /auth/*
+                # routes and token refresh. Added here so — after the
+                # reverse-order wrapping — it runs AFTER gateway/CORS but BEFORE
+                # AuthMiddleware.
+                st_mw = get_supertokens_middleware()
+                if st_mw is not None:
+                    app.add_middleware(st_mw)
+            else:
+                logging.getLogger("elephantbroker.api").warning(
+                    "SuperTokens init did not succeed — ST middleware NOT wired; "
+                    "session auth inactive, routes pass through with anonymous "
+                    "identity."
+                )
+        except Exception as exc:  # pragma: no cover - import/init safety net
+            logging.getLogger("elephantbroker.api").warning(
+                "SuperTokens wiring skipped: %s", exc
+            )
+
     app.middleware("http")(error_handler_middleware)
+
+    # CORS for the dashboard origin. Outermost middleware (added last) so
+    # cross-origin preflight (OPTIONS) is answered before auth runs, and CORS
+    # headers are attached to every response including errors. Credentialed
+    # requests are required because SuperTokens uses cookies. Only added when
+    # dashboard auth is enabled — same-origin prod (/ui/*) needs no CORS.
+    if dashboard_auth_cfg is not None and getattr(dashboard_auth_cfg, "enabled", False):
+        from fastapi.middleware.cors import CORSMiddleware
+
+        cors_headers = ["Content-Type", "Authorization"]
+        try:
+            from supertokens_python import get_all_cors_headers
+
+            cors_headers = ["Content-Type"] + get_all_cors_headers()
+        except Exception:
+            pass
+
+        website_domain = getattr(dashboard_auth_cfg, "website_domain", "") or ""
+        allow_origins = [website_domain] if website_domain else []
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=allow_origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=cors_headers,
+        )
 
     # Log validation errors with full detail (helps debug 422s from plugins)
     @app.exception_handler(RequestValidationError)
@@ -116,5 +191,26 @@ def create_app(container: RuntimeContainer) -> FastAPI:
     app.include_router(consolidation.router, prefix="/consolidation", tags=["consolidation"])
     app.include_router(metrics.router, tags=["metrics"])
     app.include_router(admin.router, prefix="/admin", tags=["admin"])
+    # Phase 11 routers self-declare their prefixes (/auth, /dashboard) on the
+    # APIRouter, so they are included with no additional prefix (like guards).
+    app.include_router(auth.router, tags=["auth"])
+    app.include_router(dashboard.router, tags=["dashboard"])
+
+    # Serve the built dashboard bundle same-origin at /ui in production (AD-11).
+    # Off unless EB_DASHBOARD_STATIC_DIR / dashboard_auth.static_dir points at a
+    # real directory — no CORS needed for this path.
+    static_dir = getattr(dashboard_auth_cfg, "static_dir", "") if dashboard_auth_cfg else ""
+    if static_dir:
+        import os
+
+        if os.path.isdir(static_dir):
+            from fastapi.staticfiles import StaticFiles
+
+            app.mount("/ui", StaticFiles(directory=static_dir, html=True), name="ui")
+        else:
+            logging.getLogger("elephantbroker.api").warning(
+                "EB_DASHBOARD_STATIC_DIR=%r is not a directory — /ui not served",
+                static_dir,
+            )
 
     return app

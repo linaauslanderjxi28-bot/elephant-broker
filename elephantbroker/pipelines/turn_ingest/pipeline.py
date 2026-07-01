@@ -464,6 +464,7 @@ class TurnIngestPipeline:
                 gateway_id=gw,
                 payload={
                     "facts_count": len(assertions),
+                    "fact_ids": [str(f.id) for f in stored_assertions],
                     "profile_name": profile_name,
                     "session_key": session_key,
                 },

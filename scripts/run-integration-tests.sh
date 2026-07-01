@@ -119,6 +119,20 @@ fi
 echo "Running integration tests..."
 source .venv/bin/activate
 
+# --- Fresh Cognee LOCAL disk state (authorized: full clean before every run) ---
+# `docker compose ... down -v` above already wipes the Neo4j/Qdrant/Redis
+# container volumes. But Cognee ALSO keeps a host-side cache inside its package
+# dir — `.data_storage/*.txt` (raw ingested text) + `.cognee_system/databases`
+# (bookkeeping) — which survives container teardown. Stale entries there make
+# `cognee.cognify()`'s incremental loader raise `FileNotFoundError` on a full
+# suite run (the T2 `test_full_module_flow_searchable` flake). Wipe it so every
+# run starts from truly fresh infra with zero cross-run noise.
+CG_DIR=$(python -c 'import os, cognee; print(os.path.dirname(cognee.__file__))' 2>/dev/null)
+if [ -n "$CG_DIR" ] && [ -d "$CG_DIR" ]; then
+    rm -rf "$CG_DIR/.data_storage" "$CG_DIR/.cognee_system"
+    echo "  Cleared Cognee local cache: $CG_DIR/{.data_storage,.cognee_system}"
+fi
+
 # ElephantBroker config — tells our adapters where to connect
 export EB_NEO4J_URI=bolt://localhost:${TEST_NEO4J_BOLT_PORT}
 export EB_NEO4J_USER=neo4j

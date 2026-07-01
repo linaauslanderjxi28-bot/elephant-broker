@@ -41,12 +41,57 @@ async def create_procedure(procedure: ProcedureDefinition, request: Request):
 
 @router.get("/{procedure_id}")
 async def get_procedure(procedure_id: uuid.UUID, request: Request):
-    return {"procedure_id": str(procedure_id), "status": "stub"}
+    # TD-21: gateway-scoped read from Neo4j via the graph adapter, mirroring
+    # ProcedureEngine.activate()'s reconstruction path (get_entity +
+    # ProcedureDataPoint.to_schema_from_dict).
+    metrics = _get_metrics(request)
+    if metrics:
+        metrics.inc_procedure_tool("get")
+    container = get_container(request)
+    graph = getattr(container, "graph", None)
+    if graph is None:
+        raise HTTPException(status_code=501, detail="Graph adapter not available")
+    gw_id = getattr(request.state, "gateway_id", "")
+    entity = await graph.get_entity(str(procedure_id), gateway_id=gw_id)
+    if entity is None:
+        raise HTTPException(status_code=404, detail="Procedure not found")
+    from elephantbroker.runtime.adapters.cognee.datapoints import ProcedureDataPoint
+    proc = ProcedureDataPoint.to_schema_from_dict(entity)
+    return proc.model_dump(mode="json")
 
 
 @router.put("/{procedure_id}")
-async def update_procedure(procedure_id: uuid.UUID, request: Request):
-    return {"procedure_id": str(procedure_id), "status": "updated"}
+async def update_procedure(procedure_id: uuid.UUID, procedure: ProcedureDefinition, request: Request):
+    # TD-21: gateway-scoped update. Verify the procedure exists in this
+    # gateway, then upsert via the engine (add_data_points MERGE-by-id).
+    metrics = _get_metrics(request)
+    if metrics:
+        metrics.inc_procedure_tool("update")
+    engine = get_procedure_engine(request)
+    if engine is None:
+        raise HTTPException(status_code=501, detail="Procedure engine not available")
+    container = get_container(request)
+    graph = getattr(container, "graph", None)
+    gw_id = getattr(request.state, "gateway_id", "")
+    if graph is not None:
+        existing = await graph.get_entity(str(procedure_id), gateway_id=gw_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Procedure not found")
+    # Path id is authoritative; middleware wins unconditionally over any
+    # caller-supplied procedure.gateway_id (tenant-isolation boundary — see
+    # create_procedure() / TD-41).
+    procedure.id = procedure_id
+    _state_gw = getattr(request.state, "gateway_id", None)
+    if _state_gw is not None:
+        procedure.gateway_id = _state_gw
+    result = await engine.store_procedure(procedure)
+    # Invalidate the engine's in-memory definition cache so subsequent
+    # activations reconstruct from the updated graph state.
+    try:
+        engine._definitions.pop(procedure_id, None)
+    except Exception:
+        pass
+    return result.model_dump(mode="json")
 
 
 class ActivateRequestV2(BaseModel):

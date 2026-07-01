@@ -399,6 +399,9 @@ audit:
   consolidation_reports_db_path: "data/consolidation_reports.db"  # Phase 9 consolidation run reports
   tuning_deltas_db_path: "data/tuning_deltas.db"           # Phase 9 ScoringTuner weight deltas
   scoring_ledger_db_path: "data/scoring_ledger.db"         # Phase 9 per-fact scoring history
+  api_keys_db_path: "data/api_keys.db"                     # Phase 11 dashboard API keys (SHA-256 hashed)
+  custom_guard_rules_db_path: "data/custom_guard_rules.db" # Phase 11 operator-defined guard rules
+  dashboard_db_path: "data/dashboard.db"                   # Phase 11 dashboard prefs + saved views
   retention_days: 90                    # SQLite row retention for procedure_audit + session_goals_audit
 
 
@@ -408,6 +411,28 @@ audit:
 
 profile_cache:
   ttl_seconds: 300                      # 5 min — too low = SQLite hammered every request; too high = stale org overrides
+
+
+# -----------------------------------------------------------------------------
+# Dashboard auth — SuperTokens + API keys (Phase 11)
+# -----------------------------------------------------------------------------
+# Disabled by default: AuthMiddleware only stamps identity and never blocks a
+# request while enabled=false (backward-compatible with pre-Phase-11 deploys).
+# Set enabled=true (env: EB_DASHBOARD_AUTH_ENABLED) to turn on session/API-key
+# enforcement on /admin and /dashboard, mount SuperTokens /auth/* routes, and
+# add credentialed CORS scoped to website_domain.
+
+dashboard_auth:
+  enabled: false                        # env: EB_DASHBOARD_AUTH_ENABLED
+  core_uri: "http://localhost:3567"     # env: EB_SUPERTOKENS_CORE_URI — SuperTokens Core connection URI
+  api_domain: "http://localhost:8420"   # env: EB_DASHBOARD_API_DOMAIN — where the EB runtime is reachable
+  website_domain: "http://localhost:5173"  # env: EB_DASHBOARD_WEBSITE_DOMAIN — dashboard origin (CORS)
+  api_keys_db_path: "data/api_keys.db"
+  preferences_db_path: "data/dashboard.db"
+  bootstrap_complete: false             # env: EB_DASHBOARD_BOOTSTRAP_COMPLETE — set true after first admin
+  static_dir: ""                        # env: EB_DASHBOARD_STATIC_DIR — built dashboard bundle served at /ui (empty = off)
+  cookie_secure: false                  # env: EB_DASHBOARD_COOKIE_SECURE — true behind HTTPS in production
+  cookie_same_site: "lax"               # env: EB_DASHBOARD_COOKIE_SAME_SITE — lax | strict | none
 
 
 # -----------------------------------------------------------------------------

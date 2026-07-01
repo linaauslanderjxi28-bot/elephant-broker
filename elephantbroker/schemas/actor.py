@@ -36,6 +36,12 @@ class ActorRef(BaseModel):
     trust_level: float = Field(default=0.5, ge=0.0, le=1.0)
     tags: list[str] = Field(default_factory=list)
     gateway_id: str = ""
+    # TD-22 (Phase 11): soft-deactivation. Actors are never DETACH DELETE'd
+    # (which would destroy audit trail / edges); instead active=False hides
+    # them from active lists and revokes dashboard sessions while preserving
+    # the node for provenance. Listing queries filter WHERE a.active = true
+    # (or IS NULL for backward compat with pre-Phase-11 nodes).
+    active: bool = True
 
 
 class RelationshipType(StrEnum):

@@ -159,6 +159,44 @@ async def run_all_scenarios_live(
 
 
 # ---------------------------------------------------------------------------
+# Graph cleanup for CI (PT-3)
+# ---------------------------------------------------------------------------
+
+
+async def clean_scenario_graph(gateway_id: str = "local") -> int:
+    """Delete all scenario-generated nodes from Neo4j for a gateway.
+
+    Removes every node whose ``session_key`` starts with ``"scenario:"`` (the
+    prefix stamped by ``Scenario.__init__``), scoped to *gateway_id* per the
+    CLAUDE.md gateway-isolation rule. Returns the count of deleted nodes.
+
+    Used by the ``--clean-before`` / ``--clean-after`` CLI flags to give CI
+    deterministic graph state between test cycles. Heavy imports are deferred
+    so importing the runner (e.g. for the registry) never pulls in neo4j.
+    """
+    # Lazy-import: neo4j + config loading are only needed for graph cleanup.
+    from elephantbroker.runtime.adapters.cognee.graph import GraphAdapter
+    from elephantbroker.schemas.config import ElephantBrokerConfig
+
+    config = ElephantBrokerConfig.load()
+    adapter = GraphAdapter(config.cognee)
+    try:
+        # Gateway-scoped DETACH DELETE. RETURN count(n) after DELETE yields the
+        # number of matched (deleted) nodes.
+        records = await adapter.query_cypher(
+            "MATCH (n) "
+            "WHERE n.session_key STARTS WITH $prefix AND n.gateway_id = $gateway_id "
+            "DETACH DELETE n "
+            "RETURN count(n) AS deleted",
+            {"prefix": "scenario:", "gateway_id": gateway_id},
+        )
+    finally:
+        await adapter.close()
+
+    return int(records[0]["deleted"]) if records else 0
+
+
+# ---------------------------------------------------------------------------
 # Aggregate scoring
 # ---------------------------------------------------------------------------
 
@@ -317,6 +355,20 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Auth token for live mode gateway")
     parser.add_argument("--agent-id", type=str, default=None,
                         help="Agent ID for live mode")
+    # Graph cleanup flags (PT-3) — delete scenario:* nodes for CI determinism
+    parser.add_argument(
+        "--clean-graph", action="store_true", default=False,
+        help="Delete all scenario:* nodes before AND after the run "
+             "(shorthand for --clean-before --clean-after)",
+    )
+    parser.add_argument(
+        "--clean-before", action="store_true", default=False,
+        help="Delete all scenario:* nodes from Neo4j before running",
+    )
+    parser.add_argument(
+        "--clean-after", action="store_true", default=False,
+        help="Delete all scenario:* nodes from Neo4j after running",
+    )
     return parser
 
 
@@ -338,6 +390,13 @@ def main() -> None:
         print(f"Auto-detected max phase: {max_phase}")
 
     gateway_id = "local"
+
+    # PT-3: pre-run graph cleanup for deterministic CI state.
+    clean_before = args.clean_before or args.clean_graph
+    clean_after = args.clean_after or args.clean_graph
+    if clean_before:
+        deleted = asyncio.run(clean_scenario_graph(gateway_id=gateway_id))
+        print(f"Cleaned {deleted} scenario:* node(s) before run")
 
     if args.live:
         if not args.gateway_url or not args.gateway_token:
@@ -379,6 +438,12 @@ def main() -> None:
         print(json.dumps(output, indent=2))
     else:
         print_report(results, l4_score=l4_score)
+
+    # PT-3: post-run graph cleanup (runs regardless of pass/fail so CI leaves
+    # no scenario:* residue behind).
+    if clean_after:
+        deleted = asyncio.run(clean_scenario_graph(gateway_id=gateway_id))
+        print(f"Cleaned {deleted} scenario:* node(s) after run")
 
     # Exit with non-zero if any scenario failed
     if any(not r.passed for r in results):

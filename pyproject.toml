@@ -29,6 +29,10 @@ dependencies = [
     "prometheus_client==0.24.1",
     "pyyaml==6.0.3",
     "clickhouse-connect==0.15.1",
+    # Phase 11 dashboard auth. Heavy + optional at runtime: every import site
+    # lazy-imports it and degrades gracefully when absent (dashboard_auth is
+    # disabled by default), but it is pinned here for reproducible installs.
+    "supertokens-python==0.30.0",
 ]
 
 [project.scripts]

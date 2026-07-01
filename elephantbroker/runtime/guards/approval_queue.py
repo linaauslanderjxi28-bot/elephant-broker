@@ -6,6 +6,7 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from elephantbroker.runtime.guards.pending_approvals import PendingApprovalsIndex
 from elephantbroker.runtime.observability import GatewayLoggerAdapter
 from elephantbroker.runtime.redis_keys import RedisKeyBuilder
 from elephantbroker.schemas.config import HitlConfig
@@ -26,6 +27,37 @@ class ApprovalQueue:
         self._config = config or HitlConfig()
         self._log = GatewayLoggerAdapter(logger, {"gateway_id": gateway_id})
         self._trace = trace_ledger
+        # Cross-session pending-approvals index (Phase 11 / TD-24). Aggregates
+        # open request_ids per gateway so the dashboard can render one queue.
+        self._pending = PendingApprovalsIndex(redis, redis_keys, gateway_id=gateway_id)
+
+    async def _effective_agent_id(self, request_id: uuid.UUID, agent_id: str) -> str:
+        """Resolve the owning agent_id for a request.
+
+        Per-approval records are keyed by (agent_id, request_id), but the
+        cross-session dashboard queue and the HITL callback only know the
+        request_id (they pass ``agent_id=""``). When agent_id is empty we look
+        it up from the reverse index written at create() time. Returns the
+        original (empty) value if the reverse index is missing — callers then
+        get a clean miss (404), never a crash.
+        """
+        if agent_id:
+            return agent_id
+        try:
+            raw = await self._redis.get(self._keys.approval_agent(str(request_id)))
+        except Exception:  # noqa: BLE001 - reverse index is best-effort
+            return agent_id
+        if raw is None:
+            return agent_id
+        return raw.decode() if isinstance(raw, bytes) else raw
+
+    async def _drain_pending(self, request_id: uuid.UUID) -> None:
+        """Remove a resolved approval from the cross-session pending queue + reverse index."""
+        try:
+            await self._pending.remove(str(request_id))
+            await self._redis.delete(self._keys.approval_agent(str(request_id)))
+        except Exception as exc:  # noqa: BLE001 - draining is best-effort
+            self._log.warning("Failed to drain pending approval %s: %s", request_id, exc)
 
     async def create(
         self,
@@ -55,6 +87,15 @@ class ApprovalQueue:
         idx_key = self._keys.approvals_by_session(agent_id, str(request.session_id))
         await self._redis.sadd(idx_key, str(request.id))
         await self._redis.expire(idx_key, ttl)
+
+        # Cross-session pending queue + reverse index (Phase 11 / TD-24) so the
+        # dashboard queue and the HITL callback can hydrate/resolve from a bare
+        # request_id (they pass agent_id=""). Best-effort; never blocks create.
+        try:
+            await self._redis.setex(self._keys.approval_agent(str(request.id)), ttl, agent_id)
+            await self._pending.add(str(request.id))
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning("Failed to index pending approval %s: %s", request.id, exc)
 
         # Auto-goal creation
         if session_goal_store and session_key and session_id:
@@ -96,6 +137,7 @@ class ApprovalQueue:
         return request
 
     async def get(self, request_id: uuid.UUID, agent_id: str) -> ApprovalRequest | None:
+        agent_id = await self._effective_agent_id(request_id, agent_id)
         key = self._keys.approval(agent_id, str(request_id))
         data = await self._redis.get(key)
         if data is None:
@@ -123,9 +165,12 @@ class ApprovalQueue:
         session_goal_store=None,
         session_key: str = "",
     ) -> ApprovalRequest | None:
+        agent_id = await self._effective_agent_id(request_id, agent_id)
         req = await self.get(request_id, agent_id)
         if req is None:
             return None
+        if req.status != ApprovalStatus.PENDING:
+            return req  # idempotent: already resolved — don't flip a finalized decision (review #2)
         req.status = ApprovalStatus.APPROVED
         req.resolved_at = datetime.now(UTC)
         req.resolved_by = approved_by
@@ -136,6 +181,7 @@ class ApprovalQueue:
             await self._redis.setex(key, remaining_ttl, req.model_dump_json())
         else:
             self._log.warning("Approval %s TTL expired during approve — update dropped", request_id)
+        await self._drain_pending(request_id)
         await self.resolve_approval_goal(req, session_goal_store, session_key, GoalStatus.COMPLETED)
         self._log.info("Approved request %s by=%s", request_id, approved_by or "unknown")
         return req
@@ -150,9 +196,12 @@ class ApprovalQueue:
         session_goal_store=None,
         session_key: str = "",
     ) -> ApprovalRequest | None:
+        agent_id = await self._effective_agent_id(request_id, agent_id)
         req = await self.get(request_id, agent_id)
         if req is None:
             return None
+        if req.status != ApprovalStatus.PENDING:
+            return req  # idempotent: already resolved — don't flip a finalized decision (review #2)
         req.status = ApprovalStatus.REJECTED
         req.resolved_at = datetime.now(UTC)
         req.resolved_by = rejected_by
@@ -163,6 +212,7 @@ class ApprovalQueue:
             await self._redis.setex(key, remaining_ttl, req.model_dump_json())
         else:
             self._log.warning("Approval %s TTL expired during reject — update dropped", request_id)
+        await self._drain_pending(request_id)
         await self.resolve_approval_goal(req, session_goal_store, session_key, GoalStatus.ABANDONED)
         self._log.info("Rejected request %s by=%s reason=%s", request_id, rejected_by or "unknown", reason[:80])
         return req
@@ -177,9 +227,12 @@ class ApprovalQueue:
         session_key: str = "",
     ) -> ApprovalRequest | None:
         """Cancel a pending approval (e.g., on session end). Uses CANCELLED status."""
+        agent_id = await self._effective_agent_id(request_id, agent_id)
         req = await self.get(request_id, agent_id)
         if req is None:
             return None
+        if req.status != ApprovalStatus.PENDING:
+            return req  # idempotent: already resolved — don't flip a finalized decision (review #2)
         req.status = ApprovalStatus.CANCELLED
         req.resolved_at = datetime.now(UTC)
         req.resolved_by = "system"
@@ -188,6 +241,7 @@ class ApprovalQueue:
         remaining_ttl = await self._redis.ttl(key)
         if remaining_ttl > 0:
             await self._redis.setex(key, remaining_ttl, req.model_dump_json())
+        await self._drain_pending(request_id)
         await self.resolve_approval_goal(req, session_goal_store, session_key, GoalStatus.ABANDONED)
         self._log.info("Cancelled request %s reason=%s", request_id, reason[:80])
         return req
@@ -207,6 +261,7 @@ class ApprovalQueue:
         INFORM: downgrade to inform, action auto-proceeds → TIMED_OUT (guard maps to INFORM)
         AUTONOMOUS: auto-approve on timeout (silence = consent) → APPROVED
         """
+        agent_id = await self._effective_agent_id(request_id, agent_id)
         req = await self.get(request_id, agent_id)
         if req is None or req.status != ApprovalStatus.PENDING:
             return req
@@ -227,6 +282,7 @@ class ApprovalQueue:
 
             key = self._keys.approval(agent_id, str(request_id))
             await self._redis.setex(key, 300, req.model_dump_json())
+            await self._drain_pending(request_id)
             await self.resolve_approval_goal(req, session_goal_store, session_key, goal_status)
         return req
 

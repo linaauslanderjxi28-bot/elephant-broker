@@ -78,3 +78,55 @@ class FactConflict(BaseModel):
     detected_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     resolved: bool = False
     resolution: str | None = None
+
+
+class FactSortField(StrEnum):
+    """Whitelisted sortable columns for the dashboard fact browser (Phase 11).
+
+    Each value is an exact ``FactDataPoint`` property name; it is interpolated
+    into the Cypher ``ORDER BY`` clause by ``MemoryStoreFacade.query_facts``, so
+    this enum is the injection-safety boundary — user input never reaches the
+    query string.
+    """
+    CREATED_AT = "created_at"
+    UPDATED_AT = "updated_at"
+    CONFIDENCE = "confidence"
+    USE_COUNT = "use_count"
+    LAST_USED_AT = "last_used_at"
+
+
+class FactSort(BaseModel):
+    """Sort specification for the paginated dashboard fact query (Phase 11)."""
+    field: FactSortField = FactSortField.CREATED_AT
+    descending: bool = True
+
+
+class FactFilters(BaseModel):
+    """Structural filters for the dashboard memory browser (Phase 11).
+
+    Every field is optional, so ``FactFilters()`` selects all facts in the
+    gateway. All values are passed to Cypher as bound parameters (never
+    interpolated). Consumed by ``MemoryStoreFacade.query_facts`` and
+    ``/dashboard/memory/browse``.
+    """
+    scope: Scope | None = None
+    memory_class: MemoryClass | None = None
+    category: str | None = None
+    actor_id: str | None = None
+    session_key: str | None = None
+    session_id: str | None = None
+    archived: bool | None = None
+    min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    text_contains: str | None = None
+    created_after: datetime | None = None
+    created_before: datetime | None = None
+
+
+class FactPage(BaseModel):
+    """One page of facts returned by ``MemoryStoreFacade.query_facts`` (Phase 11)."""
+    items: list[FactAssertion] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 50
+    total_pages: int = 0

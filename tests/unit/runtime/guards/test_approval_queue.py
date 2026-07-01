@@ -43,7 +43,13 @@ class TestApprovalQueue:
         queue, redis = _make_queue()
         req = _make_request()
         result = await queue.create(req, "agent1")
-        redis.setex.assert_called_once()
+        # create() now writes two keys via setex: the approval record AND the
+        # request_id->agent_id reverse index (Phase 11 / TD-24) so the dashboard
+        # queue + HITL callback can resolve a bare request_id.
+        assert redis.setex.call_count == 2
+        setex_keys = {c.args[0] for c in redis.setex.call_args_list}
+        assert any(":approval:" in k for k in setex_keys)
+        assert any(":approval_agent:" in k for k in setex_keys)
 
     @pytest.mark.asyncio
     async def test_create_sets_timeout_at(self):
@@ -58,7 +64,13 @@ class TestApprovalQueue:
         queue, redis = _make_queue()
         req = _make_request()
         await queue.create(req, "agent1")
-        redis.sadd.assert_called_once()
+        # create() now SADDs two sets: the per-session index AND the
+        # cross-session pending-approvals queue (Phase 11 / TD-24) the dashboard
+        # reads via GET /dashboard/guards/approvals/pending.
+        assert redis.sadd.call_count == 2
+        sadd_keys = {c.args[0] for c in redis.sadd.call_args_list}
+        assert any(":approvals_by_session:" in k for k in sadd_keys)
+        assert any(k.endswith(":pending_approvals") for k in sadd_keys)
 
     @pytest.mark.asyncio
     async def test_get_returns_request(self):

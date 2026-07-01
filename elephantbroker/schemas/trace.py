@@ -79,6 +79,12 @@ class TraceEvent(BaseModel):
     claim_ids: list[uuid.UUID] = Field(default_factory=list)
     procedure_ids: list[uuid.UUID] = Field(default_factory=list)
     goal_ids: list[uuid.UUID] = Field(default_factory=list)
+    # AD-21 (Phase 11): FACT_EXTRACTED events carry the ids of the facts the
+    # turn-ingest pipeline created, enabling the dashboard fact->trace link
+    # (Fact Detail page resolves the originating trace event via these ids).
+    # Additive top-level list mirroring the other id-list fields; empty for
+    # event types that don't extract facts.
+    fact_ids: list[uuid.UUID] = Field(default_factory=list)
     payload: dict[str, object] = Field(default_factory=dict)
     parent_event_id: uuid.UUID | None = None
     gateway_id: str | None = None

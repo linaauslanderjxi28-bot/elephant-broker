@@ -1,0 +1,55 @@
+{
+  "name": "elephantbroker-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "ElephantBroker operator dashboard (Refine + MUI). Phase 11 frontend.",
+  "license": "AGPL-3.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint \"src/**/*.{ts,tsx}\""
+  },
+  "dependencies": {
+    "@emotion/react": "^11.13.3",
+    "@emotion/styled": "^11.13.0",
+    "@mui/icons-material": "^5.16.7",
+    "@mui/material": "^5.16.7",
+    "@mui/x-charts": "^6.19.8",
+    "@mui/x-data-grid": "^6.20.4",
+    "@refinedev/core": "^4.57.9",
+    "@refinedev/mui": "^5.20.0",
+    "@refinedev/react-hook-form": "^4.9.3",
+    "@refinedev/react-router-v6": "^4.6.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-hook-form": "^7.53.0",
+    "react-router-dom": "^6.26.2",
+    "supertokens-auth-react": "^0.47.0",
+    "supertokens-web-js": "^0.14.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.5.0",
+    "@testing-library/react": "^16.0.1",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "@typescript-eslint/eslint-plugin": "^8.8.0",
+    "@typescript-eslint/parser": "^8.8.0",
+    "@vitejs/plugin-react": "^4.3.2",
+    "eslint": "^8.57.1",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "eslint-plugin-react-refresh": "^0.4.12",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.8",
+    "vitest": "^2.1.2"
+  },
+  "engines": {
+    "node": ">=18.18"
+  }
+}

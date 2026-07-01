@@ -813,6 +813,10 @@ NON_CONFIG_ENV_VARS: set[str] = {
     # runtime, NOT by the runtime itself. They never reach ElephantBrokerConfig.
     "EB_ACTOR_ID",
     "EB_RUNTIME_URL",
+    # Phase 11 (11.4): API-key credential for `ebrun`, read for the
+    # `--api-key > EB_API_KEY env > ~/.ebrun config` precedence. Client-side
+    # only; sent as the X-EB-API-Key header, never stored in ElephantBrokerConfig.
+    "EB_API_KEY",
     # Runtime safety escape hatches — checked once at bootstrap, not stored
     # in the config object. These bypass the strict-defaults safety guard
     # added in Bucket A. Documented in CLAUDE.md (Gateway Identity section).

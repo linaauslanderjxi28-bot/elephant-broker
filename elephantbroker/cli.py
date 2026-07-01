@@ -3,6 +3,11 @@
 All commands call the runtime API over HTTP (requires runtime to be running).
 Actor identity: --actor-id flag > EB_ACTOR_ID env > ~/.elephantbroker/config.json.
 
+Authentication (Phase 11):
+    When an API key is configured (--api-key flag > EB_API_KEY env >
+    ~/.ebrun/config.toml), requests send ``X-EB-API-Key``. Otherwise ebrun
+    falls back to the Phase 8 ``X-EB-Actor-Id`` header (local trust boundary).
+
 Usage:
     ebrun bootstrap --org-name "Acme" --team-name "Backend" --admin-name "Admin"
     ebrun org create --name "Acme"
@@ -12,6 +17,8 @@ Usage:
     ebrun authority list
     ebrun goal create --title "Q1 Roadmap" --scope organization
     ebrun config set actor-id <uuid>
+    ebrun config set api-key eb_key_xxxx
+    ebrun auth create-key --label "my-workstation"
 """
 from __future__ import annotations
 
@@ -20,6 +27,18 @@ import os
 import sys
 
 import click
+
+from elephantbroker import cli_auth
+
+# Active API key resolved by the top-level ``cli`` group and consumed by
+# ``_api()`` for header injection. ``None`` means no key configured (fall back
+# to the actor-id header).
+_API_KEY: str | None = None
+
+# Sentinel: when ``_api(..., api_key=_USE_GLOBAL)`` (the default) the module
+# global ``_API_KEY`` is used. Pass ``api_key=None`` explicitly to force an
+# unauthenticated request (used by the ``--bootstrap`` key-creation flow).
+_USE_GLOBAL = object()
 
 
 def _config_path() -> str:
@@ -65,11 +84,21 @@ def _resolve_runtime_url(ctx_url: str | None) -> str:
     return cfg.get("runtime_url", "http://localhost:8420")
 
 
-def _api(method: str, url: str, actor_id: str, body: dict | None = None) -> dict:
-    """Make an HTTP request to the runtime API."""
+def _api(method: str, url: str, actor_id: str, body: dict | None = None,
+         api_key: object = _USE_GLOBAL) -> dict:
+    """Make an HTTP request to the runtime API.
+
+    Header selection: when an API key is available (``api_key`` arg, else the
+    resolved module global ``_API_KEY``) send ``X-EB-API-Key``; otherwise fall
+    back to the Phase 8 ``X-EB-Actor-Id`` header. Pass ``api_key=None`` to force
+    an unauthenticated request (bootstrap key creation).
+    """
     import httpx
     headers = {"Content-Type": "application/json"}
-    if actor_id:
+    resolved_key = _API_KEY if api_key is _USE_GLOBAL else api_key
+    if resolved_key:
+        headers["X-EB-API-Key"] = resolved_key
+    elif actor_id:
         headers["X-EB-Actor-Id"] = actor_id
     # 60s timeout: admin ops may trigger cognify() or graph writes that take tens of seconds
     try:
@@ -96,12 +125,19 @@ def _api(method: str, url: str, actor_id: str, body: dict | None = None) -> dict
 @click.group()
 @click.option("--actor-id", default=None, envvar="EB_ACTOR_ID", help="Actor UUID for authorization")
 @click.option("--runtime-url", default=None, envvar="EB_RUNTIME_URL", help="Runtime API URL")
+@click.option("--api-key", default=None, envvar="EB_API_KEY",
+              help="API key for authentication (overrides stored ~/.ebrun/config.toml)")
 @click.pass_context
-def cli(ctx: click.Context, actor_id: str | None, runtime_url: str | None) -> None:
+def cli(ctx: click.Context, actor_id: str | None, runtime_url: str | None,
+        api_key: str | None) -> None:
     """ebrun — ElephantBroker admin CLI."""
+    global _API_KEY
     ctx.ensure_object(dict)
     ctx.obj["actor_id"] = _resolve_actor_id(actor_id)
     ctx.obj["runtime_url"] = _resolve_runtime_url(runtime_url)
+    resolved_key = cli_auth.resolve_api_key(api_key)
+    ctx.obj["api_key"] = resolved_key
+    _API_KEY = resolved_key
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +153,11 @@ def config_group() -> None:
 @click.argument("key")
 @click.argument("value")
 def config_set(key: str, value: str) -> None:
-    """Set a config value (actor-id, runtime-url)."""
+    """Set a config value (actor-id, runtime-url, api-key)."""
+    if key == "api-key":
+        cli_auth.set_api_key(value)
+        click.echo(f"Set api-key = {cli_auth.mask_api_key(value)}")
+        return
     cfg = _load_config()
     key_map = {"actor-id": "actor_id", "runtime-url": "runtime_url"}
     cfg[key_map.get(key, key)] = value
@@ -125,10 +165,52 @@ def config_set(key: str, value: str) -> None:
     click.echo(f"Set {key} = {value}")
 
 
+@config_group.command("get")
+@click.argument("key")
+def config_get(key: str) -> None:
+    """Get a config value (api-key is shown masked)."""
+    if key == "api-key":
+        stored = cli_auth.get_stored_api_key()
+        if not stored:
+            click.echo("api-key is not set")
+            return
+        click.echo(cli_auth.mask_api_key(stored))
+        return
+    cfg = _load_config()
+    key_map = {"actor-id": "actor_id", "runtime-url": "runtime_url"}
+    resolved = cfg.get(key_map.get(key, key))
+    if resolved is None:
+        click.echo(f"{key} is not set")
+        return
+    click.echo(resolved)
+
+
+@config_group.command("unset")
+@click.argument("key")
+def config_unset(key: str) -> None:
+    """Remove a config value (e.g. api-key)."""
+    if key == "api-key":
+        removed = cli_auth.unset_api_key()
+        click.echo("Removed api-key" if removed else "api-key was not set")
+        return
+    cfg = _load_config()
+    key_map = {"actor-id": "actor_id", "runtime-url": "runtime_url"}
+    mapped = key_map.get(key, key)
+    if mapped in cfg:
+        del cfg[mapped]
+        _save_config(cfg)
+        click.echo(f"Removed {key}")
+    else:
+        click.echo(f"{key} was not set")
+
+
 @config_group.command("show")
 def config_show() -> None:
     """Show current CLI configuration."""
     cfg = _load_config()
+    stored_key = cli_auth.get_stored_api_key()
+    if stored_key:
+        cfg = {**cfg, "api_key": cli_auth.mask_api_key(stored_key)}
     click.echo(json.dumps(cfg, indent=2))
 
 
@@ -465,6 +547,58 @@ def goal_list(ctx: click.Context, scope: str | None, org_id: str | None) -> None
     if params:
         url += "?" + "&".join(params)
     result = _api("GET", url, ctx.obj["actor_id"])
+    click.echo(json.dumps(result, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Auth (API keys)
+# ---------------------------------------------------------------------------
+
+@cli.group("auth")
+def auth_group() -> None:
+    """API-key authentication management."""
+
+
+@auth_group.command("create-key")
+@click.option("--label", required=True, help="Human-readable label for the key")
+@click.option("--authority-level", default=0, type=int, help="Authority level granted to the key")
+@click.option("--actor-id", "bind_actor_id", default=None, help="Optional actor to bind the key to")
+@click.option("--bootstrap", is_flag=True,
+              help="Allow unauthenticated key creation when bootstrap_complete=false")
+@click.pass_context
+def auth_create_key(ctx: click.Context, label: str, authority_level: int,
+                    bind_actor_id: str | None, bootstrap: bool) -> None:
+    """Create a new API key (plaintext shown ONCE)."""
+    body: dict = {"label": label, "authority_level": authority_level}
+    if bind_actor_id:
+        body["actor_id"] = bind_actor_id
+    # --bootstrap forces an unauthenticated request; otherwise use configured auth.
+    if bootstrap:
+        result = _api("POST", f"{ctx.obj['runtime_url']}/auth/api-keys", "", body, api_key=None)
+    else:
+        result = _api("POST", f"{ctx.obj['runtime_url']}/auth/api-keys", ctx.obj["actor_id"], body)
+    click.echo(json.dumps(result, indent=2))
+    plaintext = result.get("key")
+    if plaintext:
+        click.echo("")
+        click.echo("Store this key now — it will not be shown again:")
+        click.echo(f"  ebrun config set api-key {plaintext}")
+
+
+@auth_group.command("list-keys")
+@click.pass_context
+def auth_list_keys(ctx: click.Context) -> None:
+    """List API keys for the current actor (masked)."""
+    result = _api("GET", f"{ctx.obj['runtime_url']}/auth/api-keys", ctx.obj["actor_id"])
+    click.echo(json.dumps(result, indent=2))
+
+
+@auth_group.command("revoke-key")
+@click.argument("key_id")
+@click.pass_context
+def auth_revoke_key(ctx: click.Context, key_id: str) -> None:
+    """Revoke an API key by its key id."""
+    result = _api("DELETE", f"{ctx.obj['runtime_url']}/auth/api-keys/{key_id}", ctx.obj["actor_id"])
     click.echo(json.dumps(result, indent=2))
 
 

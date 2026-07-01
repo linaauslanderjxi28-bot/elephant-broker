@@ -80,6 +80,13 @@ class ProcedureDefinition(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     version: int = Field(default=1, ge=1)
     gateway_id: str = ""
+    # TD-20 (Phase 11): org/team scoping. scope may be "organization"/"team"
+    # but without these fields a scoped procedure can't be filtered to a
+    # specific org/team (GoalDataPoint already carries both). Mirrors the
+    # ProcedureDataPoint additions so org/team-scoped procedures resolve
+    # correctly in the dashboard.
+    org_id: uuid.UUID | None = None
+    team_id: uuid.UUID | None = None
     # #1146 RESOLVED (R2-P2.1): procedures must specify at least one
     # activation_mode OR explicitly mark is_manual_only=True. A procedure
     # with no activation_modes and no manual-only flag was latent dead

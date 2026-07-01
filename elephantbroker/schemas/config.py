@@ -306,12 +306,50 @@ class AuditConfig(_StrictBase):
     consolidation_reports_db_path: str = "data/consolidation_reports.db"
     tuning_deltas_db_path: str = "data/tuning_deltas.db"
     scoring_ledger_db_path: str = "data/scoring_ledger.db"
+    # Phase 11 dashboard stores (API keys + operator-defined guard rules).
+    # The DB paths live here (alongside the other SQLite stores) so the
+    # RuntimeContainer wires ApiKeyStore/CustomRuleStore from a single config
+    # section. DashboardAuthConfig mirrors api_keys_db_path for auth-layer use.
+    api_keys_db_path: str = "data/api_keys.db"
+    custom_guard_rules_db_path: str = "data/custom_guard_rules.db"
+    dashboard_db_path: str = "data/dashboard.db"
     retention_days: int = Field(default=90, ge=7)
 
 
 class ProfileCacheConfig(_StrictBase):
     """Profile resolution cache configuration."""
     ttl_seconds: int = Field(default=300, ge=10)
+
+
+class DashboardAuthConfig(_StrictBase):
+    """Dashboard authentication + SuperTokens configuration (Phase 11).
+
+    Disabled by default so pre-Phase-11 deployments (and every existing test)
+    keep the backward-compatible no-enforcement behaviour: ``AuthMiddleware``
+    only stamps ``request.state.identity`` and never blocks a request while
+    ``enabled`` is ``False``.
+
+    When ``enabled`` is ``True`` the runtime initializes the SuperTokens SDK
+    (``emailpassword`` + ``session`` + ``usermetadata``), mounts the SuperTokens
+    ASGI middleware (auto-generating the ``/auth/*`` routes), and adds a CORS
+    middleware scoped to ``website_domain`` with credentialed requests allowed.
+
+    ``core_uri`` / ``api_domain`` / ``website_domain`` and the two cookie fields
+    are consumed by ``api/auth/supertokens_config.py::init_supertokens``.
+    ``static_dir`` is the built dashboard bundle served same-origin at ``/ui``
+    in production (empty = not served). ``bootstrap_complete`` gates the
+    first-admin self-bootstrap path (see ``api/routes/auth.py``).
+    """
+    enabled: bool = False
+    core_uri: str = "http://localhost:3567"
+    api_domain: str = "http://localhost:8420"
+    website_domain: str = "http://localhost:5173"
+    api_keys_db_path: str = "data/api_keys.db"
+    preferences_db_path: str = "data/dashboard.db"
+    bootstrap_complete: bool = False
+    static_dir: str = ""
+    cookie_secure: bool = False
+    cookie_same_site: str = "lax"
 
 
 class GatewayConfig(_StrictBase):
@@ -611,6 +649,19 @@ ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
     ("EB_DEV_CONSOLIDATION_AUTO_TRIGGER", "consolidation.dev_auto_trigger_interval", "str"),
     ("EB_CONSOLIDATION_BATCH_SIZE", "consolidation.batch_size", "int"),
 
+    # --- Phase 11 dashboard auth (SuperTokens + API keys) ---
+    ("EB_DASHBOARD_AUTH_ENABLED", "dashboard_auth.enabled", "bool"),
+    ("EB_SUPERTOKENS_CORE_URI", "dashboard_auth.core_uri", "str"),
+    ("EB_DASHBOARD_API_DOMAIN", "dashboard_auth.api_domain", "str"),
+    ("EB_DASHBOARD_WEBSITE_DOMAIN", "dashboard_auth.website_domain", "str"),
+    ("EB_DASHBOARD_COOKIE_SECURE", "dashboard_auth.cookie_secure", "bool"),
+    ("EB_DASHBOARD_COOKIE_SAME_SITE", "dashboard_auth.cookie_same_site", "str"),
+    ("EB_DASHBOARD_STATIC_DIR", "dashboard_auth.static_dir", "str"),
+    ("EB_DASHBOARD_BOOTSTRAP_COMPLETE", "dashboard_auth.bootstrap_complete", "bool"),
+    ("EB_API_KEYS_DB_PATH", "audit.api_keys_db_path", "str"),
+    ("EB_CUSTOM_GUARD_RULES_DB_PATH", "audit.custom_guard_rules_db_path", "str"),
+    ("EB_DASHBOARD_DB_PATH", "audit.dashboard_db_path", "str"),
+
     # --- Top-level toggles & global limits ---
     ("EB_ENABLE_TRACE_LEDGER", "enable_trace_ledger", "bool"),
     ("EB_GUARDS_ENABLED", "guards.enabled", "bool"),
@@ -742,6 +793,9 @@ class ElephantBrokerConfig(_StrictBase):
     consolidation_min_retention_seconds: int = Field(default=172800, ge=3600)
     # Phase 8 config sections
     profile_cache: ProfileCacheConfig = Field(default_factory=ProfileCacheConfig)
+    # Phase 11 dashboard auth (SuperTokens + API keys). Disabled by default —
+    # see DashboardAuthConfig for the backward-compatibility contract.
+    dashboard_auth: DashboardAuthConfig = Field(default_factory=DashboardAuthConfig)
     # F4 (TODO-3-009): consolidation was previously a `@property` that read
     # EB_DEV_CONSOLIDATION_AUTO_TRIGGER + EB_CONSOLIDATION_BATCH_SIZE directly
     # from os.environ on first access and cached the result. That created two

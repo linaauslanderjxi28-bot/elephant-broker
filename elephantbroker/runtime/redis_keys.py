@@ -113,6 +113,15 @@ class RedisKeyBuilder:
     def approvals_by_session(self, agent_id: str, session_id: str) -> str:
         return f"{self._prefix}:{agent_id}:approvals_by_session:{session_id}"
 
+    def approval_agent(self, request_id: str) -> str:
+        """Reverse index request_id -> agent_id (Phase 11 / TD-24).
+
+        The per-approval record is keyed by (agent_id, request_id), but the
+        cross-session dashboard queue and the HITL callback only know the
+        request_id. This lets `ApprovalQueue.get/approve/reject` resolve the
+        owning agent_id from a bare request_id (callers pass agent_id="")."""
+        return f"{self._prefix}:approval_agent:{request_id}"
+
     def fact_domains(self, session_key: str, session_id: str) -> str:
         return f"{self._prefix}:fact_domains:{session_key}:{session_id}"
 
@@ -128,6 +137,28 @@ class RedisKeyBuilder:
     def consolidation_status(self) -> str:
         """Current consolidation status (running/idle/last_run_at)."""
         return f"{self._prefix}:consolidation_status"
+
+    # --- Phase 11 dashboard aggregates (one set per gateway) ---
+
+    def active_sessions(self) -> str:
+        """Redis SET of currently-active session_keys for this gateway.
+
+        Populated on session_start (SADD), pruned on session_end (SREM). One
+        set per gateway (no session args) — the dashboard reads the whole set
+        to render the live-sessions panel. A 48h safety TTL guards against
+        leaked members if a session_end hook is missed.
+        """
+        return f"{self._prefix}:active_sessions"
+
+    def pending_approvals(self) -> str:
+        """Redis SET of open HITL approval request_ids for this gateway.
+
+        Aggregates approvals across sessions so the dashboard can show a single
+        pending-approvals queue without scanning per-session keys. request_ids
+        are SADD'd when an approval is created and SREM'd when it is resolved
+        (approved / denied / timed-out).
+        """
+        return f"{self._prefix}:pending_approvals"
 
     # --- Global (NOT gateway-scoped) ---
 
