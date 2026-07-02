@@ -12,6 +12,7 @@ import {
   useApiUrl,
   useCustom,
   useCustomMutation,
+  useGetIdentity,
   useNotification,
   usePermissions,
 } from "@refinedev/core";
@@ -51,11 +52,21 @@ import {
   MEMORY_CLASS_HEX,
   MEMORY_CLASS_LABELS,
   SCOPE_LABELS,
+  type ChipColor,
   type FactDetailResponse,
   type FactEdge,
   type MemoryClass,
   type Scope,
 } from "./types";
+
+// ClaimStatus (elephantbroker/schemas/evidence.py) -> chip color.
+const CLAIM_STATUS_COLORS: Record<string, ChipColor> = {
+  unverified: "default",
+  self_supported: "info",
+  tool_supported: "success",
+  supervisor_verified: "success",
+  rejected: "error",
+};
 
 function relativeAge(iso?: string | null): string {
   if (!iso) return "—";
@@ -112,9 +123,14 @@ export const MemoryShow: FC = () => {
   const apiUrl = useApiUrl();
   const { open } = useNotification();
   const { data: permissions } = usePermissions<{ authorityLevel?: number }>();
+  const { data: identity } = useGetIdentity<{ id?: string }>();
   const authorityLevel = permissions?.authorityLevel ?? 0;
   const canEdit = authorityLevel >= AUTH_EDIT;
   const canDelete = authorityLevel >= AUTH_DELETE;
+  // Claims review (verify/reject) follows the edit threshold (>=50); the
+  // archive toggle follows the delete threshold (>=70) per SOW 11.3.
+  const canReviewClaims = canEdit;
+  const canArchive = canDelete;
 
   const { data, isLoading, isError, refetch } = useCustom<FactDetailResponse>({
     url: `${apiUrl}/dashboard/memory/${id}/detail`,
@@ -131,6 +147,15 @@ export const MemoryShow: FC = () => {
   const [draftConfidence, setDraftConfidence] = useState<number>(1);
   const { mutate: customMutate } = useCustomMutation();
   const [deleteOpen, setDeleteOpen] = useState(false);
+
+  // --- Claims review + archive toggle state ------------------------------
+  // Local per-claim status overrides so verify/reject update inline without
+  // waiting for (or racing) a full detail refetch.
+  const [claimStatusOverrides, setClaimStatusOverrides] = useState<Record<string, string>>({});
+  const [claimBusyId, setClaimBusyId] = useState<string | null>(null);
+  const [rejectTargetId, setRejectTargetId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
+  const [archiveBusy, setArchiveBusy] = useState(false);
 
   useEffect(() => {
     if (fact) {
@@ -178,6 +203,78 @@ export const MemoryShow: FC = () => {
   const copyId = () => {
     if (id) navigator.clipboard?.writeText(id);
     notifyOk("ID copied");
+  };
+
+  // --- Archive toggle (PATCH /memory/{id} { archived }) ------------------
+  const toggleArchive = () => {
+    const nextArchived = !fact?.archived;
+    setArchiveBusy(true);
+    customMutate(
+      {
+        url: `${apiUrl}/memory/${id}`,
+        method: "patch",
+        values: { archived: nextArchived },
+      },
+      {
+        onSuccess: () => {
+          notifyOk(nextArchived ? "Fact archived" : "Fact unarchived");
+          refetch();
+        },
+        onError: () => notifyErr("Archive update failed"),
+        onSettled: () => setArchiveBusy(false),
+      },
+    );
+  };
+
+  // --- Claims review (POST /claims/{id}/verify | /claims/{id}/reject) ----
+  const verifyClaim = (claimId: string) => {
+    setClaimBusyId(claimId);
+    customMutate(
+      { url: `${apiUrl}/claims/${claimId}/verify`, method: "post", values: {} },
+      {
+        onSuccess: (res) => {
+          const status = (res?.data as { status?: string } | undefined)?.status;
+          if (status) {
+            setClaimStatusOverrides((prev) => ({ ...prev, [claimId]: status }));
+          } else {
+            refetch();
+          }
+          notifyOk("Claim verified");
+        },
+        onError: () => notifyErr("Verify failed"),
+        onSettled: () => setClaimBusyId(null),
+      },
+    );
+  };
+
+  const submitReject = () => {
+    // Backend requires a non-empty reason (EvidenceEngine.reject()).
+    const claimId = rejectTargetId;
+    const reason = rejectReason.trim();
+    if (!claimId || !reason) return;
+    setClaimBusyId(claimId);
+    customMutate(
+      {
+        url: `${apiUrl}/claims/${claimId}/reject`,
+        method: "post",
+        values: {
+          reason,
+          ...(identity?.id ? { rejector_actor_id: identity.id } : {}),
+        },
+      },
+      {
+        onSuccess: (res) => {
+          const status =
+            (res?.data as { status?: string } | undefined)?.status ?? "rejected";
+          setClaimStatusOverrides((prev) => ({ ...prev, [claimId]: status }));
+          notifyOk("Claim rejected");
+          setRejectTargetId(null);
+          setRejectReason("");
+        },
+        onError: () => notifyErr("Reject failed"),
+        onSettled: () => setClaimBusyId(null),
+      },
+    );
   };
 
   const edgeItems = useMemo(() => (detail?.edges ?? []).map(edgeSentence), [detail]);
@@ -296,6 +393,17 @@ export const MemoryShow: FC = () => {
               </Typography>
             )}
             {fact.archived && <Chip size="small" label="Archived" color="warning" />}
+            {canArchive && (
+              <Button
+                size="small"
+                variant="outlined"
+                color={fact.archived ? "success" : "warning"}
+                disabled={archiveBusy}
+                onClick={toggleArchive}
+              >
+                {fact.archived ? "Unarchive" : "Archive"}
+              </Button>
+            )}
           </Stack>
         </CardContent>
       </Card>
@@ -399,21 +507,57 @@ export const MemoryShow: FC = () => {
               Evidence for claims
             </Typography>
             <Stack spacing={1}>
-              {detail!.claims.map((c) => (
-                <Stack
-                  key={c.claim_id}
-                  direction="row"
-                  spacing={1}
-                  alignItems="center"
-                  flexWrap="wrap"
-                >
-                  <Typography variant="body2">{c.claim_text}</Typography>
-                  <Chip size="small" label={c.status} />
-                  <Typography variant="caption" color="text.secondary">
-                    {c.evidence_count} evidence
-                  </Typography>
-                </Stack>
-              ))}
+              {detail!.claims.map((c) => {
+                const status = claimStatusOverrides[c.claim_id] ?? c.status;
+                const busy = claimBusyId === c.claim_id;
+                return (
+                  <Stack
+                    key={c.claim_id}
+                    direction="row"
+                    spacing={1}
+                    alignItems="center"
+                    flexWrap="wrap"
+                    useFlexGap
+                  >
+                    <Typography variant="body2">{c.claim_text}</Typography>
+                    <Chip
+                      size="small"
+                      label={status}
+                      color={CLAIM_STATUS_COLORS[status] ?? "default"}
+                    />
+                    <Typography variant="caption" color="text.secondary">
+                      {c.evidence_count} evidence
+                    </Typography>
+                    {/* REJECTED is terminal on the backend (EvidenceEngine.verify
+                        refuses the transition), so hide review actions then. */}
+                    {canReviewClaims && status !== "rejected" && (
+                      <>
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          color="success"
+                          disabled={busy}
+                          onClick={() => verifyClaim(c.claim_id)}
+                        >
+                          Verify
+                        </Button>
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          color="error"
+                          disabled={busy}
+                          onClick={() => {
+                            setRejectReason("");
+                            setRejectTargetId(c.claim_id);
+                          }}
+                        >
+                          Reject
+                        </Button>
+                      </>
+                    )}
+                  </Stack>
+                );
+              })}
             </Stack>
           </CardContent>
         </Card>
@@ -508,6 +652,42 @@ export const MemoryShow: FC = () => {
           <Button onClick={() => setDeleteOpen(false)}>Cancel</Button>
           <Button color="error" onClick={doDelete}>
             Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Reject claim (reason required by the backend) */}
+      <Dialog
+        open={rejectTargetId !== null}
+        onClose={() => setRejectTargetId(null)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>Reject this claim?</DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ mb: 2 }}>
+            Rejection is terminal — a rejected claim cannot be re-verified. A
+            rejection reason is required and is recorded in the trace ledger.
+          </DialogContentText>
+          <TextField
+            autoFocus
+            required
+            fullWidth
+            multiline
+            minRows={2}
+            label="Rejection reason"
+            value={rejectReason}
+            onChange={(e) => setRejectReason(e.target.value)}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRejectTargetId(null)}>Cancel</Button>
+          <Button
+            color="error"
+            disabled={!rejectReason.trim() || claimBusyId !== null}
+            onClick={submitReject}
+          >
+            Reject
           </Button>
         </DialogActions>
       </Dialog>

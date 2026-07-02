@@ -8,8 +8,9 @@
 //
 // Implements plan Section 2 "Memory Browse" + SOW page 2.
 
-import { useCallback, useMemo, useState, type FC } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FC } from "react";
 import { useNavigate } from "react-router";
+import { useSearchParams } from "react-router-dom";
 import {
   useApiUrl,
   useCustom,
@@ -40,6 +41,7 @@ import {
   DialogTitle,
   Divider,
   FormControl,
+  IconButton,
   InputLabel,
   LinearProgress,
   MenuItem,
@@ -80,6 +82,8 @@ interface FilterState {
   category: string;
   minConfidence: number;
   text: string;
+  goalId: string;
+  sourceActorId: string;
 }
 
 const EMPTY_FILTERS: FilterState = {
@@ -88,7 +92,58 @@ const EMPTY_FILTERS: FilterState = {
   category: "",
   minConfidence: 0,
   text: "",
+  goalId: "",
+  sourceActorId: "",
 };
+
+// Translate a FilterState into the CrudFilters the dataProvider maps onto the
+// `POST /dashboard/memory/browse` request body. Field/operator pairs must
+// survive the dataProvider's `flattenFilters` (which suffixes `_gte` /
+// `_contains`) and land on the names `buildMemoryBrowseBody` reads:
+//   confidence + gte  -> confidence_gte -> body.min_confidence
+//   text + contains   -> text_contains  -> body.text_contains
+function buildCrudFilters(next: FilterState): CrudFilters {
+  const crud: CrudFilters = [];
+  if (next.scope) crud.push({ field: "scope", operator: "eq", value: next.scope });
+  if (next.memoryClass)
+    crud.push({ field: "memory_class", operator: "eq", value: next.memoryClass });
+  if (next.category) crud.push({ field: "category", operator: "eq", value: next.category });
+  if (next.minConfidence > 0)
+    crud.push({ field: "confidence", operator: "gte", value: next.minConfidence });
+  if (next.text.trim())
+    crud.push({ field: "text", operator: "contains", value: next.text.trim() });
+  if (next.goalId) crud.push({ field: "goal_id", operator: "eq", value: next.goalId });
+  if (next.sourceActorId)
+    crud.push({ field: "source_actor_id", operator: "eq", value: next.sourceActorId });
+  return crud;
+}
+
+// Deep links from other pages land here with URL search params, e.g.
+// `/memory?goal_id=…` (Goals "Related facts") and
+// `/memory?source_actor_id=…` (Actor "View all facts"). Parse the params the
+// browse endpoint understands into a partial FilterState.
+function parseFiltersFromSearch(params: URLSearchParams): Partial<FilterState> {
+  const out: Partial<FilterState> = {};
+  const scope = params.get("scope");
+  if (scope && (SCOPE_OPTIONS as string[]).includes(scope)) out.scope = scope as Scope;
+  const memoryClass = params.get("memory_class");
+  if (memoryClass && (MEMORY_CLASS_OPTIONS as string[]).includes(memoryClass))
+    out.memoryClass = memoryClass as MemoryClass;
+  const category = params.get("category");
+  if (category && CATEGORY_OPTIONS.includes(category)) out.category = category;
+  const minConfidence = params.get("min_confidence");
+  if (minConfidence !== null) {
+    const v = Number(minConfidence);
+    if (Number.isFinite(v) && v > 0) out.minConfidence = Math.min(1, v);
+  }
+  const text = params.get("text") ?? params.get("text_contains");
+  if (text) out.text = text;
+  const goalId = params.get("goal_id");
+  if (goalId) out.goalId = goalId;
+  const sourceActorId = params.get("source_actor_id");
+  if (sourceActorId) out.sourceActorId = sourceActorId;
+  return out;
+}
 
 interface SavedView {
   id: string;
@@ -147,16 +202,26 @@ export const MemoryList: FC = () => {
   const canEdit = authorityLevel >= AUTH_EDIT;
   const canDelete = authorityLevel >= AUTH_DELETE;
 
+  // Deep links (e.g. `/memory?goal_id=…`, `/memory?source_actor_id=…`) seed
+  // the initial filter state; afterwards filtering stays purely local.
+  const [searchParams] = useSearchParams();
+  const initialFilters = useMemo<FilterState>(
+    () => ({ ...EMPTY_FILTERS, ...parseFiltersFromSearch(searchParams) }),
+    // Parse once on mount — later param changes are handled by the effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
   const { dataGridProps, setFilters, setSorters, tableQueryResult } =
     useDataGrid<FactAssertion>({
       resource: "memory",
       pagination: { pageSize: 50, mode: "server" },
       sorters: { mode: "server", initial: [{ field: "created_at", order: "desc" }] },
-      filters: { mode: "server" },
+      filters: { mode: "server", initial: buildCrudFilters(initialFilters) },
       syncWithLocation: false,
     });
 
-  const [filters, setLocalFilters] = useState<FilterState>(EMPTY_FILTERS);
+  const [filters, setLocalFilters] = useState<FilterState>(initialFilters);
   const [selection, setSelection] = useState<GridRowSelectionModel>([]);
 
   // x-data-grid changed the selection model shape across major versions
@@ -173,24 +238,26 @@ export const MemoryList: FC = () => {
   // --- Filter application ------------------------------------------------
   const applyFilters = useCallback(
     (next: FilterState) => {
-      const crud: CrudFilters = [];
-      if (next.scope) crud.push({ field: "scope", operator: "eq", value: next.scope });
-      if (next.memoryClass)
-        crud.push({ field: "memory_class", operator: "eq", value: next.memoryClass });
-      if (next.category)
-        crud.push({ field: "category", operator: "eq", value: next.category });
-      if (next.minConfidence > 0)
-        crud.push({
-          field: "min_confidence",
-          operator: "gte",
-          value: next.minConfidence,
-        });
-      if (next.text.trim())
-        crud.push({ field: "text_contains", operator: "contains", value: next.text.trim() });
-      setFilters(crud, "replace");
+      setFilters(buildCrudFilters(next), "replace");
     },
     [setFilters],
   );
+
+  // If the URL search params change while this page is already mounted
+  // (e.g. an in-app navigation to `/memory?goal_id=…`), merge them in.
+  const appliedSearchRef = useRef(searchParams.toString());
+  useEffect(() => {
+    const search = searchParams.toString();
+    if (search === appliedSearchRef.current) return;
+    appliedSearchRef.current = search;
+    const parsed = parseFiltersFromSearch(searchParams);
+    if (Object.keys(parsed).length === 0) return;
+    setLocalFilters((prev) => {
+      const next = { ...prev, ...parsed };
+      applyFilters(next);
+      return next;
+    });
+  }, [searchParams, applyFilters]);
 
   const updateFilter = useCallback(
     (patch: Partial<FilterState>) => {
@@ -239,6 +306,18 @@ export const MemoryList: FC = () => {
         key: "text",
         label: `Contains: "${filters.text.trim()}"`,
         clear: () => updateFilter({ text: "" }),
+      });
+    if (filters.goalId)
+      chips.push({
+        key: "goal",
+        label: `Goal: ${filters.goalId.slice(0, 8)}…`,
+        clear: () => updateFilter({ goalId: "" }),
+      });
+    if (filters.sourceActorId)
+      chips.push({
+        key: "sourceActor",
+        label: `Source actor: ${filters.sourceActorId.slice(0, 8)}…`,
+        clear: () => updateFilter({ sourceActorId: "" }),
       });
     return chips;
   }, [filters, updateFilter]);
@@ -382,6 +461,29 @@ export const MemoryList: FC = () => {
       if (view.sort) setSorters([{ field: view.sort.field, order: view.sort.order }]);
     },
     [savedViews, applyFilters, setSorters],
+  );
+
+  // DELETE /dashboard/saved-views/{view_id} — with confirmation dialog.
+  const [deleteViewTarget, setDeleteViewTarget] = useState<SavedView | null>(null);
+  const deleteView = useCallback(
+    (view: SavedView) => {
+      customMutate(
+        {
+          url: `${apiUrl}/dashboard/saved-views/${view.id}`,
+          method: "delete",
+          values: {},
+        },
+        {
+          onSuccess: () => {
+            notifyOk(`Deleted view "${view.name}"`);
+            refetchViews();
+          },
+          onError: () => notifyErr("Delete view failed"),
+        },
+      );
+      setDeleteViewTarget(null);
+    },
+    [apiUrl, customMutate, refetchViews],
   );
 
   // --- Columns -----------------------------------------------------------
@@ -528,7 +630,30 @@ export const MemoryList: FC = () => {
           >
             {savedViews.map((v) => (
               <MenuItem key={v.id} value={v.id}>
-                {v.name}
+                <Box
+                  sx={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    width: "100%",
+                    gap: 1,
+                  }}
+                >
+                  <span>{v.name}</span>
+                  <Tooltip title="Delete view">
+                    <IconButton
+                      size="small"
+                      edge="end"
+                      aria-label={`Delete saved view ${v.name}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setDeleteViewTarget(v);
+                      }}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </Box>
               </MenuItem>
             ))}
           </Select>
@@ -732,6 +857,26 @@ export const MemoryList: FC = () => {
             }
           >
             Promote
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Delete saved view confirmation */}
+      <Dialog open={deleteViewTarget !== null} onClose={() => setDeleteViewTarget(null)}>
+        <DialogTitle>Delete saved view?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            This permanently deletes the saved view &quot;{deleteViewTarget?.name}&quot;. This
+            cannot be undone.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteViewTarget(null)}>Cancel</Button>
+          <Button
+            color="error"
+            onClick={() => deleteViewTarget && deleteView(deleteViewTarget)}
+          >
+            Delete
           </Button>
         </DialogActions>
       </Dialog>

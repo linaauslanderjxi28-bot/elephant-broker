@@ -21,6 +21,7 @@ import {
   List,
   ListItem,
   ListItemText,
+  Menu,
   MenuItem,
   Stack,
   Tab,
@@ -31,6 +32,7 @@ import {
 import AddIcon from "@mui/icons-material/Add";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import MoreVertIcon from "@mui/icons-material/MoreVert";
 import {
   apiGet,
   apiSend,
@@ -60,37 +62,288 @@ function goalId(g: GoalState): string {
   return String(g.goal_id ?? g.eb_id ?? g.id ?? "");
 }
 
+// Allowed status transitions per current GoalStatus (schemas/goal.py enum:
+// proposed | active | paused | completed | abandoned). The backend
+// (PUT /admin/goals/{id} -> GoalManager.update_goal_status) accepts any enum
+// value; this map just presents sensible lifecycle actions.
+const STATUS_ACTIONS: Record<string, Array<{ label: string; status: string }>> = {
+  proposed: [
+    { label: "Activate", status: "active" },
+    { label: "Abandon", status: "abandoned" },
+  ],
+  active: [
+    { label: "Complete", status: "completed" },
+    { label: "Pause", status: "paused" },
+    { label: "Abandon", status: "abandoned" },
+  ],
+  paused: [
+    { label: "Reactivate", status: "active" },
+    { label: "Complete", status: "completed" },
+    { label: "Abandon", status: "abandoned" },
+  ],
+  completed: [{ label: "Reactivate", status: "active" }],
+  abandoned: [{ label: "Reactivate", status: "active" }],
+};
+
+// Minimum authority to create a subgoal, mirroring the backend's
+// SCOPE_ACTION_MAP -> authority_store defaults for the parent's scope
+// (global: create_global_goal 90, organization: 70, team: 50, actor: 0
+// with self-ownership enforced server-side).
+function subgoalMinAuthority(scope: string | undefined): number {
+  switch ((scope || "").toLowerCase()) {
+    case "global":
+      return 90;
+    case "organization":
+      return 70;
+    case "team":
+      return 50;
+    default:
+      return 0;
+  }
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function AddSubgoalDialog(props: {
+  open: boolean;
+  parent: GoalState;
+  onClose: () => void;
+  onCreated: (created: GoalState) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [criteria, setCriteria] = useState("");
+  const [owners, setOwners] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async () => {
+    const ownerIds = owners
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const bad = ownerIds.find((o) => !UUID_RE.test(o));
+    if (bad) {
+      setErr(`Owner actor id is not a valid UUID: ${bad}`);
+      return;
+    }
+    setSaving(true);
+    setErr(null);
+    try {
+      const created = await apiSend<GoalState>(
+        "POST",
+        `/admin/goals/${goalId(props.parent)}/subgoal`,
+        {
+          title,
+          description,
+          success_criteria: criteria
+            .split("\n")
+            .map((s) => s.trim())
+            .filter(Boolean),
+          owner_actor_ids: ownerIds,
+        },
+      );
+      props.onCreated(created);
+      props.onClose();
+      setTitle("");
+      setDescription("");
+      setCriteria("");
+      setOwners("");
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={props.open} onClose={props.onClose} fullWidth maxWidth="sm">
+      <DialogTitle>Add subgoal to “{props.parent.title}”</DialogTitle>
+      <DialogContent>
+        {err && <Alert severity="error">{err}</Alert>}
+        <Typography variant="caption" color="text.secondary">
+          The subgoal inherits the parent&apos;s scope
+          {props.parent.scope ? ` (${props.parent.scope})` : ""}, org and team.
+        </Typography>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          <TextField
+            label="Title"
+            required
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+          />
+          <TextField
+            label="Description"
+            multiline
+            minRows={2}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
+          <TextField
+            label="Success criteria (one per line)"
+            multiline
+            minRows={2}
+            value={criteria}
+            onChange={(e) => setCriteria(e.target.value)}
+          />
+          <TextField
+            label="Owner actor IDs (comma-separated UUIDs, optional)"
+            value={owners}
+            onChange={(e) => setOwners(e.target.value)}
+            helperText="Owners can only be set at creation — the backend has no owner-reassignment endpoint."
+          />
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={props.onClose}>Cancel</Button>
+        <Button variant="contained" disabled={!title || saving} onClick={submit}>
+          Create subgoal
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+function AddBlockerDialog(props: {
+  open: boolean;
+  goal: GoalState;
+  onClose: () => void;
+  onAdded: (updated: GoalState) => void;
+}) {
+  const [text, setText] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async () => {
+    setSaving(true);
+    setErr(null);
+    try {
+      // POST /admin/goals/{id}/blocker returns the full updated GoalState.
+      const updated = await apiSend<GoalState>(
+        "POST",
+        `/admin/goals/${goalId(props.goal)}/blocker`,
+        { blocker: text.trim() },
+      );
+      props.onAdded(updated);
+      props.onClose();
+      setText("");
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={props.open} onClose={props.onClose} fullWidth maxWidth="sm">
+      <DialogTitle>Add blocker to “{props.goal.title}”</DialogTitle>
+      <DialogContent>
+        {err && (
+          <Alert severity="error" sx={{ mb: 1 }}>
+            {err}
+          </Alert>
+        )}
+        <TextField
+          label="Blocker description"
+          required
+          fullWidth
+          multiline
+          minRows={2}
+          sx={{ mt: 1 }}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        <Typography variant="caption" color="text.secondary">
+          Blockers can only be appended — the backend exposes no
+          blocker-removal endpoint.
+        </Typography>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={props.onClose}>Cancel</Button>
+        <Button
+          variant="contained"
+          disabled={!text.trim() || saving}
+          onClick={submit}
+        >
+          Add blocker
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 function GoalRow(props: {
   goal: GoalState;
   depth: number;
   onView: (id: string) => void;
+  onChanged: () => void;
 }) {
   const { goal, depth } = props;
   const [open, setOpen] = useState(false);
   const [children, setChildren] = useState<GoalState[] | null>(null);
   const [loadingChildren, setLoadingChildren] = useState(false);
+  const [status, setStatus] = useState(goal.status);
+  const [blockers, setBlockers] = useState<string[]>(goal.blockers ?? []);
+  const [menuAnchor, setMenuAnchor] = useState<null | HTMLElement>(null);
+  const [subgoalOpen, setSubgoalOpen] = useState(false);
+  const [blockerOpen, setBlockerOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [rowErr, setRowErr] = useState<string | null>(null);
   const authority = useAuthority();
+
+  // GET /goals/hierarchy returns a GoalHierarchy model
+  // ({ root_goals: GoalState[], children: { "<root_id>": GoalState[] } },
+  // schemas/goal.py) — this goal's children live in the children map under
+  // this goal's own id.
+  const loadChildren = useCallback(async () => {
+    setLoadingChildren(true);
+    try {
+      const id = goalId(goal);
+      const res = await apiGet<any>("/goals/hierarchy", { root_goal_id: id });
+      const kids: GoalState[] = Array.isArray(res)
+        ? res
+        : (res.children?.[id] ?? res.items ?? res.goals ?? []);
+      setChildren(kids.filter((k) => goalId(k) !== id));
+    } catch {
+      setChildren([]);
+    } finally {
+      setLoadingChildren(false);
+    }
+  }, [goal]);
 
   const toggle = useCallback(async () => {
     const next = !open;
     setOpen(next);
     if (next && children === null) {
-      setLoadingChildren(true);
-      try {
-        const res = await apiGet<any>("/goals/hierarchy", {
-          root_goal_id: goalId(goal),
-        });
-        const kids: GoalState[] = Array.isArray(res)
-          ? res
-          : (res.items ?? res.children ?? res.goals ?? []);
-        setChildren(kids.filter((k) => goalId(k) !== goalId(goal)));
-      } catch {
-        setChildren([]);
-      } finally {
-        setLoadingChildren(false);
-      }
+      await loadChildren();
     }
-  }, [open, children, goal]);
+  }, [open, children, loadChildren]);
+
+  // PUT /admin/goals/{id} — the backend only applies the "status" field
+  // (admin.py:update_persistent_goal); other fields in the body are ignored,
+  // so there is no owner-reassignment support here.
+  const changeStatus = useCallback(
+    async (next: string) => {
+      setMenuAnchor(null);
+      setBusy(true);
+      setRowErr(null);
+      try {
+        await apiSend("PUT", `/admin/goals/${goalId(goal)}`, { status: next });
+        setStatus(next);
+        // Note: GET /admin/goals only returns active goals, so a root moved
+        // away from "active" disappears from the list on refresh.
+        props.onChanged();
+      } catch (e) {
+        setRowErr((e as Error).message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [goal, props],
+  );
+
+  const statusActions = STATUS_ACTIONS[(status || "active").toLowerCase()] ?? [];
 
   return (
     <>
@@ -100,10 +353,20 @@ function GoalRow(props: {
           <Stack direction="row" spacing={1} alignItems="center">
             <Chip
               size="small"
-              label={goal.status || "active"}
-              color={goalStatusColor(goal.status)}
+              label={status || "active"}
+              color={goalStatusColor(status)}
             />
             {goal.scope && <Chip size="small" label={goal.scope} variant="outlined" />}
+            {authority >= 70 && statusActions.length > 0 && (
+              <IconButton
+                size="small"
+                aria-label="Goal status actions"
+                disabled={busy}
+                onClick={(e) => setMenuAnchor(e.currentTarget)}
+              >
+                <MoreVertIcon fontSize="small" />
+              </IconButton>
+            )}
           </Stack>
         }
       >
@@ -115,8 +378,24 @@ function GoalRow(props: {
           secondary={goal.description?.slice(0, 100)}
         />
       </ListItem>
+      <Menu
+        anchorEl={menuAnchor}
+        open={Boolean(menuAnchor)}
+        onClose={() => setMenuAnchor(null)}
+      >
+        {statusActions.map((a) => (
+          <MenuItem key={a.status} onClick={() => void changeStatus(a.status)}>
+            {a.label}
+          </MenuItem>
+        ))}
+      </Menu>
       <Collapse in={open} timeout="auto" unmountOnExit>
         <Box sx={{ pl: 4 + depth * 3, pr: 2, pb: 1 }}>
+          {rowErr && (
+            <Alert severity="error" onClose={() => setRowErr(null)} sx={{ my: 1 }}>
+              {rowErr}
+            </Alert>
+          )}
           {goal.success_criteria && goal.success_criteria.length > 0 && (
             <>
               <Typography variant="caption" color="text.secondary">
@@ -131,26 +410,31 @@ function GoalRow(props: {
               </ul>
             </>
           )}
-          {goal.blockers && goal.blockers.length > 0 && (
+          {blockers.length > 0 && (
+            // Blocker removal is not built: the backend only exposes
+            // POST /admin/goals/{id}/blocker (append). No removal endpoint
+            // exists in api/routes/admin.py or api/routes/goals.py.
             <Alert severity="warning" sx={{ my: 1 }}>
-              Blockers: {goal.blockers.join("; ")}
+              Blockers: {blockers.join("; ")}
+              <Typography variant="caption" display="block">
+                Blocker removal is not supported by the backend (append-only).
+              </Typography>
             </Alert>
           )}
           <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
-            {authority >= 50 && (
+            {/* Backend gates blocker-add at create_global_goal (authority 90). */}
+            {authority >= 90 && (
               <Button
                 size="small"
-                onClick={async () => {
-                  const text = window.prompt("Blocker description");
-                  if (text)
-                    await apiSend(
-                      "POST",
-                      `/admin/goals/${goalId(goal)}/blocker`,
-                      { blocker: text },
-                    );
-                }}
+                disabled={busy}
+                onClick={() => setBlockerOpen(true)}
               >
                 Add blocker
+              </Button>
+            )}
+            {authority >= subgoalMinAuthority(goal.scope) && (
+              <Button size="small" onClick={() => setSubgoalOpen(true)}>
+                Add subgoal
               </Button>
             )}
             <Button
@@ -171,12 +455,34 @@ function GoalRow(props: {
                   goal={c}
                   depth={depth + 1}
                   onView={props.onView}
+                  onChanged={props.onChanged}
                 />
               ))}
             </List>
           )}
         </Box>
       </Collapse>
+      <AddSubgoalDialog
+        open={subgoalOpen}
+        parent={goal}
+        onClose={() => setSubgoalOpen(false)}
+        onCreated={(created) => {
+          // If children were never fetched, refetch the hierarchy so existing
+          // siblings are not masked by seeding the list with just the new one.
+          if (children === null) {
+            void loadChildren();
+          } else {
+            setChildren([...children, created]);
+          }
+          setOpen(true);
+        }}
+      />
+      <AddBlockerDialog
+        open={blockerOpen}
+        goal={goal}
+        onClose={() => setBlockerOpen(false)}
+        onAdded={(updated) => setBlockers(updated.blockers ?? [])}
+      />
     </>
   );
 }
@@ -377,6 +683,7 @@ export const GoalsPage: React.FC = () => {
                   goal={g}
                   depth={0}
                   onView={(path) => push(path)}
+                  onChanged={loadRoots}
                 />
               ))}
             </List>

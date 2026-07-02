@@ -174,6 +174,47 @@ export interface MemoryStatsResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Knowledge graph (GET /dashboard/memory/graph)
+// ---------------------------------------------------------------------------
+
+/** A single knowledge-graph node projected from a gateway-scoped Cypher row. */
+export interface MemoryGraphNode {
+  /** eb_id */
+  id: string;
+  /** labels(n)[0], e.g. "FactDataPoint" */
+  type: string;
+  /** coalesce(display_name, title, name, left(text,80), eb_id) */
+  label: string;
+  /**
+   * Curated scalar projection (None keys dropped by the backend):
+   * scope, memory_class, category, confidence, status, actor_type,
+   * authority_level, source_actor_id, archived, created_at_ms (int epoch-ms).
+   */
+  properties: Record<string, unknown>;
+}
+
+/** A directed, typed edge between two in-gateway nodes. */
+export interface MemoryGraphEdge {
+  source: string;
+  target: string;
+  /**
+   * type(r): ABOUT_ACTOR | CREATED_BY | SERVES_GOAL | CHILD_OF | SUPPORTS |
+   * MEMBER_OF | OWNED_BY | BELONGS_TO | SUPERSEDES
+   */
+  relation_type: string;
+}
+
+/** Gateway-scoped subgraph for the Obsidian-style memory graph explorer. */
+export interface MemoryGraphResponse {
+  nodes: MemoryGraphNode[];
+  edges: MemoryGraphEdge[];
+  /** len(nodes) >= max_nodes */
+  truncated: boolean;
+  node_count: number;
+  edge_count: number;
+}
+
+// ---------------------------------------------------------------------------
 // Display maps
 // ---------------------------------------------------------------------------
 

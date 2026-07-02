@@ -17,6 +17,8 @@
  *    `GatewaySelector` writes when the operator switches gateways.
  */
 
+import { getStoredGateway, setStoredGateway } from "./gatewayKey";
+
 // --- Base URL resolution --------------------------------------------------
 
 const RAW_BASE = (import.meta as any).env?.VITE_EB_RUNTIME_URL as
@@ -43,20 +45,12 @@ export class HttpError extends Error {
 
 // --- Selected-gateway store ----------------------------------------------
 
-const GATEWAY_STORAGE_KEY = "eb:selected_gateway";
 /** Broadcast when the selected gateway changes so views can refetch. */
 export const GATEWAY_CHANGED_EVENT = "eb:gateway-changed";
 
-let _selectedGateway = "";
-
-// Hydrate from localStorage once at module load (guard for SSR/tests).
-if (typeof window !== "undefined" && window.localStorage) {
-  try {
-    _selectedGateway = window.localStorage.getItem(GATEWAY_STORAGE_KEY) ?? "";
-  } catch {
-    _selectedGateway = "";
-  }
-}
+// Hydrate from localStorage once at module load. `getStoredGateway()` is
+// SSR/test-safe and migrates the legacy "eb_selected_gateway" key if present.
+let _selectedGateway = getStoredGateway();
 
 /** Return the currently selected gateway_id ("" => runtime default). */
 export function getSelectedGateway(): string {
@@ -69,16 +63,8 @@ export function getSelectedGateway(): string {
  */
 export function setSelectedGateway(gatewayId: string): void {
   _selectedGateway = gatewayId ?? "";
-  if (typeof window !== "undefined" && window.localStorage) {
-    try {
-      if (_selectedGateway) {
-        window.localStorage.setItem(GATEWAY_STORAGE_KEY, _selectedGateway);
-      } else {
-        window.localStorage.removeItem(GATEWAY_STORAGE_KEY);
-      }
-    } catch {
-      /* ignore storage failures (private mode, quota) */
-    }
+  setStoredGateway(_selectedGateway);
+  if (typeof window !== "undefined") {
     window.dispatchEvent(
       new CustomEvent(GATEWAY_CHANGED_EVENT, { detail: _selectedGateway }),
     );

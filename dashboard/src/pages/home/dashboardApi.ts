@@ -9,19 +9,29 @@
 
 import { usePermissions } from "@refinedev/core";
 
+import { getSelectedGateway } from "../../providers/apiClient";
+import { SELECTED_GATEWAY_KEY } from "../../providers/gatewayKey";
+
 export const API_URL: string =
   ((import.meta as any).env?.VITE_EB_RUNTIME_URL as string | undefined) ||
   "http://localhost:8420";
 
-/** Key GatewaySelector persists the active gateway under (localStorage mirror). */
-export const GATEWAY_STORAGE_KEY = "eb_selected_gateway";
+/**
+ * Canonical localStorage key for the active gateway (re-exported from the
+ * shared gatewayKey module).
+ * @deprecated import `SELECTED_GATEWAY_KEY` from providers/gatewayKey, or use
+ * the get/set helpers there / in providers/apiClient instead of touching
+ * localStorage directly.
+ */
+export const GATEWAY_STORAGE_KEY = SELECTED_GATEWAY_KEY;
 
+/**
+ * Active gateway_id ("" => runtime default). Delegates to the apiClient
+ * module-level store, which GatewaySelector updates and which is hydrated
+ * from (and persisted to) the canonical localStorage key.
+ */
 export function getGatewayId(): string {
-  try {
-    return window.localStorage.getItem(GATEWAY_STORAGE_KEY) || "";
-  } catch {
-    return "";
-  }
+  return getSelectedGateway();
 }
 
 function buildUrl(path: string, params?: Record<string, unknown>): string {

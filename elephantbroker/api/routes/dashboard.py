@@ -48,8 +48,11 @@ from elephantbroker.schemas.dashboard import (
     FactUsageSummary,
     GatewayInfo,
     GoalSummary,
+    GraphEdge,
+    GraphNode,
     GuardActivityResponse,
     GuardRuleUpdate,
+    KnowledgeGraphResponse,
     LinkedClaim,
     MemoryBrowseRequest,
     MemoryStatsResponse,
@@ -79,8 +82,14 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 # once the auth module is present.
 # ---------------------------------------------------------------------------
 try:  # pragma: no cover - exercised via integration
-    from elephantbroker.api.auth.require_authority import require_authority
+    from elephantbroker.api.auth import require_authority
 except Exception:  # noqa: BLE001 - degrade gracefully when auth layer absent
+    logger.warning(
+        "Auth layer unavailable — /dashboard routes are running WITHOUT "
+        "authority enforcement (permissive fallback). This must never happen "
+        "in production.",
+        exc_info=True,
+    )
 
     def require_authority(min_level: int):  # type: ignore[misc]
         async def _dep(request: Request):
@@ -722,6 +731,184 @@ async def memory_stats(request: Request, time_range: str = Query("24h")):
         dedup_rate=dedup_rate,
         supersession_rate=supersession_rate,
         creation_over_time=creation_over_time,
+    ).model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
+# Memory — knowledge-graph explorer (Obsidian-style)
+# ---------------------------------------------------------------------------
+
+# Content labels that carry ``gateway_id`` and are safe to expose in the graph.
+# Org/Team DataPoints intentionally carry no gateway_id (TD-66) and are excluded
+# — a $gw filter would match 0 rows and there is no cross-gateway aggregation.
+_GRAPH_ALLOWED_LABELS: tuple[str, ...] = (
+    "FactDataPoint",
+    "ActorDataPoint",
+    "GoalDataPoint",
+    "ArtifactDataPoint",
+    "ProcedureDataPoint",
+)
+_GRAPH_MAX_DEPTH = 3
+_GRAPH_NODE_CAP = 2000
+
+# Curated scalar projection keys placed under GraphNode.properties (None-dropped).
+_GRAPH_NODE_PROP_KEYS: tuple[str, ...] = (
+    "scope",
+    "memory_class",
+    "category",
+    "confidence",
+    "status",
+    "actor_type",
+    "authority_level",
+    "source_actor_id",
+    "archived",
+    "created_at_ms",
+)
+
+
+def _resolve_graph_labels(node_types: str | None) -> list[str]:
+    """Split/strip a CSV of node labels, intersect against the allowed content set.
+
+    Empty/invalid input (including any Org/Team labels, which are rejected)
+    falls back to the full allowed set.
+    """
+    if not node_types:
+        return list(_GRAPH_ALLOWED_LABELS)
+    requested = [t.strip() for t in node_types.split(",") if t.strip()]
+    allowed = [t for t in requested if t in _GRAPH_ALLOWED_LABELS]
+    return allowed or list(_GRAPH_ALLOWED_LABELS)
+
+
+def _graph_node_from_row(row: dict) -> GraphNode:
+    """Build a GraphNode from a curated Cypher projection row, dropping None props."""
+    props = {k: row[k] for k in _GRAPH_NODE_PROP_KEYS if row.get(k) is not None}
+    return GraphNode(
+        id=str(row.get("id") or ""),
+        type=str(row.get("type") or ""),
+        label=str(row.get("label") if row.get("label") is not None else (row.get("id") or "")),
+        properties=props,
+    )
+
+
+def _graph_edges_from_rows(rows: list) -> list[GraphEdge]:
+    """Build GraphEdges from source/target/relation_type rows, dropping incomplete ones."""
+    edges: list[GraphEdge] = []
+    for e in rows or []:
+        src = e.get("source")
+        tgt = e.get("target")
+        rel = e.get("relation_type")
+        if not src or not tgt or not rel:
+            continue
+        edges.append(GraphEdge(source=str(src), target=str(tgt), relation_type=str(rel)))
+    return edges
+
+
+@router.get("/memory/graph", dependencies=[READ])
+async def memory_graph(
+    request: Request,
+    center_id: str | None = None,
+    depth: int = Query(1, ge=1, le=3),
+    node_types: str | None = None,
+    max_nodes: int = Query(300, ge=1, le=_GRAPH_NODE_CAP),
+):
+    """Gateway-scoped knowledge subgraph for the Obsidian-style graph explorer.
+
+    Two modes:
+
+    * **Mode A** (no ``center_id``) — whole-gateway capped subgraph via two
+      queries: Q1 fetches up to ``max_nodes`` content nodes (newest first), Q2
+      fetches the directed edges *among* those returned ids. Both endpoints are
+      ``$gw``-scoped so there are no dangling edges and no cross-gateway leak.
+    * **Mode B** (``center_id`` + ``depth``) — a BFS neighborhood around an
+      in-gateway node. The variable-length range bound cannot be a Cypher param
+      (Neo4j requires an int literal), so ``depth`` is clamped to
+      ``MAX_DEPTH=3`` and %-interpolated as a validated int exactly like
+      ``GraphAdapter.query_subgraph``; ``$gw``/``$center_id``/``$labels``/
+      ``$max_nodes`` stay bound. The per-hop ``all(x IN nodes(path) WHERE
+      x.gateway_id = $gw)`` predicate drops any path crossing into another
+      tenant. A center id not present in this gateway yields empty rows → an
+      empty graph (effectively 404/empty).
+
+    ``gateway_id`` is read only from ``request.state`` (never from the client).
+    On graph outage ``_cypher`` returns ``[]`` → empty graph.
+    """
+    container = get_container(request)
+    gw = _gateway_id(request)
+    labels = _resolve_graph_labels(node_types)
+
+    nodes: list[GraphNode] = []
+    edges: list[GraphEdge] = []
+
+    if not center_id:
+        # MODE A — whole-gateway capped subgraph (2 queries).
+        node_rows = await _cypher(
+            container,
+            "MATCH (n) WHERE n.gateway_id = $gw "
+            "AND any(l IN labels(n) WHERE l IN $labels) "
+            "RETURN n.eb_id AS id, head([l IN labels(n) WHERE l IN $labels]) AS type, "
+            "coalesce(n.display_name, n.title, n.name, left(n.text, 80), n.eb_id) AS label, "
+            "n.scope AS scope, n.memory_class AS memory_class, n.category AS category, "
+            "n.confidence AS confidence, n.status AS status, n.actor_type AS actor_type, "
+            "n.authority_level AS authority_level, n.source_actor_id AS source_actor_id, "
+            "n.archived AS archived, n.eb_created_at AS created_at_ms "
+            "ORDER BY coalesce(n.eb_created_at, 0) DESC LIMIT $max_nodes",
+            {"gw": gw, "labels": labels, "max_nodes": max_nodes},
+        )
+        nodes = [_graph_node_from_row(r) for r in node_rows]
+        ids = [n.id for n in nodes if n.id]
+        if ids:
+            edge_rows = await _cypher(
+                container,
+                "MATCH (a)-[r]->(b) "
+                "WHERE a.gateway_id = $gw AND b.gateway_id = $gw "
+                "AND a.eb_id IN $ids AND b.eb_id IN $ids "
+                "RETURN a.eb_id AS source, b.eb_id AS target, type(r) AS relation_type",
+                {"gw": gw, "ids": ids},
+            )
+            edges = _graph_edges_from_rows(edge_rows)
+    else:
+        # MODE B — BFS neighborhood. Range bound is a validated int literal
+        # (Cypher forbids parameterizing range bounds); everything else bound.
+        d = min(max(int(depth), 1), _GRAPH_MAX_DEPTH)
+        query = (
+            "MATCH path=(c {eb_id: $center_id, gateway_id: $gw})-[*1..%(depth)d]-(m) "
+            "WHERE all(x IN nodes(path) WHERE x.gateway_id = $gw) "
+            "AND all(x IN nodes(path) WHERE any(l IN labels(x) WHERE l IN $labels)) "
+            "UNWIND nodes(path) AS n "
+            "WITH collect(DISTINCT {id: n.eb_id, type: head([l IN labels(n) WHERE l IN $labels]), "
+            "label: coalesce(n.display_name, n.title, n.name, left(n.text, 80), n.eb_id), "
+            "scope: n.scope, memory_class: n.memory_class, category: n.category, "
+            "confidence: n.confidence, status: n.status, actor_type: n.actor_type, "
+            "authority_level: n.authority_level, source_actor_id: n.source_actor_id, "
+            "archived: n.archived, created_at_ms: n.eb_created_at}) AS nodes, "
+            "collect(relationships(path)) AS rels_nested "
+            "UNWIND rels_nested AS rels UNWIND rels AS rel "
+            "WITH nodes, collect(DISTINCT {source: startNode(rel).eb_id, "
+            "target: endNode(rel).eb_id, relation_type: type(rel)}) AS edges "
+            "RETURN nodes[0..$max_nodes] AS nodes, edges"
+        ) % {"depth": d}
+        rows = await _cypher(
+            container,
+            query,
+            {"gw": gw, "center_id": center_id, "labels": labels, "max_nodes": max_nodes},
+        )
+        if rows:
+            nodes = [_graph_node_from_row(r) for r in (rows[0].get("nodes") or [])]
+            edges = _graph_edges_from_rows(rows[0].get("edges") or [])
+
+    # Drop dangling edges: when Mode B's node slice (nodes[0..$max_nodes]) trims
+    # the neighborhood, some collected edges may reference sliced-away nodes.
+    # Keep only edges whose BOTH endpoints survive in the returned node set.
+    # (No-op for Mode A, whose edge query is already scoped to the returned ids.)
+    kept = {n.id for n in nodes if n.id}
+    edges = [e for e in edges if e.source in kept and e.target in kept]
+
+    return KnowledgeGraphResponse(
+        nodes=nodes,
+        edges=edges,
+        truncated=len(nodes) >= max_nodes,
+        node_count=len(nodes),
+        edge_count=len(edges),
     ).model_dump(mode="json")
 
 

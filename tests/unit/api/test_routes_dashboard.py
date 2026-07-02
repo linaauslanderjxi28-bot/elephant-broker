@@ -341,6 +341,222 @@ class TestMemoryDetailStats:
 
 
 # ---------------------------------------------------------------------------
+# Memory — knowledge-graph explorer
+# ---------------------------------------------------------------------------
+
+
+def _graph_calls(query_cypher_mock):
+    """Return [(query, params), ...] for every query_cypher call with 2+ args."""
+    return [
+        (c.args[0], c.args[1])
+        for c in query_cypher_mock.call_args_list
+        if len(c.args) >= 2 and isinstance(c.args[1], dict)
+    ]
+
+
+class TestMemoryGraph:
+    async def test_graph_route_uses_read_authority_dependency(self):
+        # (a) authority>=70: the /memory/graph route declares the SAME module-level
+        # READ = Depends(require_authority(70)) object that memory_browse and
+        # memory_detail use — and NOT the WRITE(90) dependency.
+        from elephantbroker.api.routes.dashboard import READ, WRITE, router
+
+        route = next(
+            r
+            for r in router.routes
+            if getattr(r, "path", "") == "/dashboard/memory/graph"
+            and "GET" in (getattr(r, "methods", set()) or set())
+        )
+        deps = getattr(route, "dependencies", [])
+        assert deps, "memory/graph declares no auth dependency"
+        assert READ in deps
+        assert WRITE not in deps
+
+    async def test_graph_mode_a_gateway_scoped_and_shape(self, admin_client, container):
+        # (b) + (c): Mode A issues 2 gateway-scoped queries and shapes {nodes,edges}.
+        container.graph.query_cypher.reset_mock()
+        node_rows = [
+            {
+                "id": "f1",
+                "type": "FactDataPoint",
+                "label": "hello world",
+                "scope": "session",
+                "memory_class": "semantic",
+                "category": "event",
+                "confidence": 0.9,
+                "status": None,  # None-valued keys must be dropped from properties
+                "actor_type": None,
+                "authority_level": None,
+                "source_actor_id": "a1",
+                "archived": False,
+                "created_at_ms": 1234,
+            },
+            {
+                "id": "a1",
+                "type": "ActorDataPoint",
+                "label": "Alice",
+                "scope": None,
+                "memory_class": None,
+                "category": None,
+                "confidence": None,
+                "status": None,
+                "actor_type": "human_coordinator",
+                "authority_level": 90,
+                "source_actor_id": None,
+                "archived": None,
+                "created_at_ms": 5678,
+            },
+        ]
+        edge_rows = [{"source": "f1", "target": "a1", "relation_type": "ABOUT_ACTOR"}]
+        container.graph.query_cypher.side_effect = [node_rows, edge_rows]
+
+        r = await admin_client.get("/dashboard/memory/graph")
+        assert r.status_code == 200
+        body = r.json()
+
+        # Shape
+        assert body["node_count"] == 2
+        assert body["edge_count"] == 1
+        assert body["truncated"] is False
+        ids = {n["id"] for n in body["nodes"]}
+        assert ids == {"f1", "a1"}
+        f1 = next(n for n in body["nodes"] if n["id"] == "f1")
+        assert f1["type"] == "FactDataPoint"
+        assert f1["label"] == "hello world"
+        # Curated scalar projection with None keys dropped.
+        assert f1["properties"] == {
+            "scope": "session",
+            "memory_class": "semantic",
+            "category": "event",
+            "confidence": 0.9,
+            "source_actor_id": "a1",
+            "archived": False,
+            "created_at_ms": 1234,
+        }
+        assert body["edges"] == [
+            {"source": "f1", "target": "a1", "relation_type": "ABOUT_ACTOR"}
+        ]
+
+        # (b) Both queries are strictly gateway-scoped via a bound $gw param.
+        calls = _graph_calls(container.graph.query_cypher)
+        assert len(calls) == 2  # Q1 nodes, Q2 edges-among-ids
+        q_nodes, p_nodes = calls[0]
+        assert "n.gateway_id = $gw" in q_nodes
+        assert "$labels" in q_nodes and "$max_nodes" in q_nodes
+        assert isinstance(p_nodes["gw"], str)
+        assert p_nodes["gw"] == container.gateway_id or p_nodes["gw"] == ""
+        assert p_nodes["max_nodes"] == 300
+        assert p_nodes["labels"] == [
+            "FactDataPoint",
+            "ActorDataPoint",
+            "GoalDataPoint",
+            "ArtifactDataPoint",
+            "ProcedureDataPoint",
+        ]
+        q_edges, p_edges = calls[1]
+        assert "a.gateway_id = $gw" in q_edges and "b.gateway_id = $gw" in q_edges
+        assert p_edges["gw"] == p_nodes["gw"]
+        assert p_edges["ids"] == ["f1", "a1"]
+        # gateway_id is never string-interpolated into the query text.
+        assert "$gw" in q_nodes and "$gw" in q_edges
+
+    async def test_graph_mode_b_center_bfs_scoped(self, admin_client, container):
+        # Mode B: a single BFS query, per-hop gateway guard, depth interpolated.
+        container.graph.query_cypher.reset_mock()
+        mode_b_rows = [
+            {
+                "nodes": [
+                    {
+                        "id": "c1",
+                        "type": "GoalDataPoint",
+                        "label": "Ship it",
+                        "status": "active",
+                        "scope": "org",
+                        "confidence": 0.7,
+                        "created_at_ms": 42,
+                    },
+                    {
+                        "id": "f2",
+                        "type": "FactDataPoint",
+                        "label": "supporting fact",
+                        "confidence": 0.8,
+                    },
+                ],
+                "edges": [
+                    {"source": "f2", "target": "c1", "relation_type": "SERVES_GOAL"}
+                ],
+            }
+        ]
+        container.graph.query_cypher.side_effect = [mode_b_rows]
+
+        r = await admin_client.get("/dashboard/memory/graph?center_id=c1&depth=2")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["node_count"] == 2
+        assert body["edge_count"] == 1
+        assert {n["id"] for n in body["nodes"]} == {"c1", "f2"}
+        assert body["edges"][0]["relation_type"] == "SERVES_GOAL"
+
+        calls = _graph_calls(container.graph.query_cypher)
+        assert len(calls) == 1  # Mode B is a single query
+        q, p = calls[0]
+        # Per-hop tenant guard + center bound param, depth interpolated as int literal.
+        assert "all(x IN nodes(path) WHERE x.gateway_id = $gw)" in q
+        assert "*1..2" in q  # validated depth interpolated, NOT a param
+        assert p["center_id"] == "c1"
+        assert isinstance(p["gw"], str)
+        assert "depth" not in p  # depth is never a bound param
+
+    async def test_graph_node_types_filter_rejects_org_team(self, admin_client, container):
+        container.graph.query_cypher.reset_mock()
+        container.graph.query_cypher.side_effect = [[], []]
+        r = await admin_client.get(
+            "/dashboard/memory/graph"
+            "?node_types=FactDataPoint,OrganizationDataPoint,TeamDataPoint,bogus"
+        )
+        assert r.status_code == 200
+        calls = _graph_calls(container.graph.query_cypher)
+        _, p = calls[0]
+        # Org/Team/unknown labels are stripped; only the allowed content label remains.
+        assert p["labels"] == ["FactDataPoint"]
+
+    async def test_graph_empty_on_graph_outage(self, admin_client, container):
+        # _cypher degrades to [] on outage → empty graph, edges query skipped.
+        container.graph.query_cypher.reset_mock()
+        container.graph.query_cypher.return_value = []
+        container.graph.query_cypher.side_effect = None
+        r = await admin_client.get("/dashboard/memory/graph")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["nodes"] == []
+        assert body["edges"] == []
+        assert body["truncated"] is False
+        assert body["node_count"] == 0 and body["edge_count"] == 0
+        # No edge query when there are no node ids.
+        assert len(_graph_calls(container.graph.query_cypher)) == 1
+
+    async def test_graph_truncated_flag(self, admin_client, container):
+        container.graph.query_cypher.reset_mock()
+        one_node = [
+            {"id": "f1", "type": "FactDataPoint", "label": "x", "created_at_ms": 1}
+        ]
+        container.graph.query_cypher.side_effect = [one_node, []]
+        r = await admin_client.get("/dashboard/memory/graph?max_nodes=1")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["node_count"] == 1
+        assert body["truncated"] is True  # len(nodes) >= max_nodes
+
+    async def test_graph_depth_over_ceiling_422(self, admin_client):
+        r = await admin_client.get("/dashboard/memory/graph?center_id=c1&depth=9")
+        assert r.status_code == 422
+
+    async def test_graph_max_nodes_over_ceiling_422(self, admin_client):
+        r = await admin_client.get("/dashboard/memory/graph?max_nodes=5000")
+        assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
 # Sessions
 # ---------------------------------------------------------------------------
 

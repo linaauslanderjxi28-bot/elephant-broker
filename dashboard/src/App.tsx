@@ -21,12 +21,21 @@
  *   ./pages/sessions/list|show          — default page components
  *   ./pages/guards/list                 — default GuardsPage
  *   ./pages/profiles/list               — default ProfilesPage
+ *   ./pages/consolidation/list          — default ConsolidationPage
+ *   ./pages/trace/list                  — default TraceListPage
  *   ./pages/settings/api-keys|preferences|authority|config — default page components
  *   ./pages/auth/login|register|forgot-password            — default page components
  */
-import { Authenticated, Refine, type ResourceProps } from "@refinedev/core";
+import {
+  Authenticated,
+  CanAccess,
+  Refine,
+  useGetIdentity,
+  type ResourceProps,
+} from "@refinedev/core";
 import {
   ErrorComponent,
+  HamburgerMenu,
   RefineSnackbarProvider,
   ThemedLayoutV2,
   useNotificationProvider,
@@ -38,8 +47,13 @@ import routerBindings, {
   UnsavedChangesNotifier,
 } from "@refinedev/react-router-v6";
 
+import AppBar from "@mui/material/AppBar";
+import Avatar from "@mui/material/Avatar";
 import CssBaseline from "@mui/material/CssBaseline";
 import GlobalStyles from "@mui/material/GlobalStyles";
+import Stack from "@mui/material/Stack";
+import Toolbar from "@mui/material/Toolbar";
+import Typography from "@mui/material/Typography";
 import { ThemeProvider } from "@mui/material/styles";
 
 // Section icons (MUI)
@@ -48,6 +62,7 @@ import StorageIcon from "@mui/icons-material/Storage";
 import TableRowsIcon from "@mui/icons-material/TableRows";
 import SearchIcon from "@mui/icons-material/Search";
 import BarChartIcon from "@mui/icons-material/BarChart";
+import BubbleChartIcon from "@mui/icons-material/BubbleChart";
 import HubIcon from "@mui/icons-material/Hub";
 import FlagIcon from "@mui/icons-material/Flag";
 import PlaylistPlayIcon from "@mui/icons-material/PlaylistPlay";
@@ -63,8 +78,16 @@ import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import ManageAccountsIcon from "@mui/icons-material/ManageAccounts";
 import GavelIcon from "@mui/icons-material/Gavel";
 import DescriptionIcon from "@mui/icons-material/Description";
+import BedtimeIcon from "@mui/icons-material/Bedtime";
+import ManageSearchIcon from "@mui/icons-material/ManageSearch";
 
-import { BrowserRouter, Outlet, Route, Routes } from "react-router-dom";
+import {
+  BrowserRouter,
+  Link as RouterLink,
+  Outlet,
+  Route,
+  Routes,
+} from "react-router-dom";
 import { SuperTokensWrapper } from "supertokens-auth-react";
 
 // Side-effect: initialize the SuperTokens React SDK (owned by providers agent).
@@ -72,8 +95,13 @@ import "./supertokens";
 
 import { authProvider } from "./providers/authProvider";
 import { dataProvider } from "./providers/dataProvider";
-import { accessControlProvider } from "./accessControlProvider";
+import {
+  accessControlProvider,
+  invalidateAuthorityCache,
+} from "./accessControlProvider";
 import { ebTheme } from "./theme";
+import GatewaySelector from "./components/GatewaySelector";
+import BrandLogo from "./components/BrandLogo";
 
 // --- Pages (owned by pages agents; referenced by default import) ---
 import OverviewPage from "./pages/home";
@@ -81,6 +109,7 @@ import MemoryList from "./pages/memory/list";
 import MemoryShow from "./pages/memory/show";
 import MemorySearch from "./pages/memory/search";
 import MemoryStats from "./pages/memory/stats";
+import MemoryGraph from "./pages/memory/graph";
 import GoalsList from "./pages/goals/list";
 import ProceduresList from "./pages/procedures/list";
 import ActorsList from "./pages/actors/list";
@@ -91,6 +120,8 @@ import SessionsList from "./pages/sessions/list";
 import SessionShow from "./pages/sessions/show";
 import GuardsPage from "./pages/guards/list";
 import ProfilesPage from "./pages/profiles/list";
+import ConsolidationPage from "./pages/consolidation/list";
+import TraceExplorerPage from "./pages/trace/list";
 import ApiKeysPage from "./pages/settings/api-keys";
 import PreferencesPage from "./pages/settings/preferences";
 import AuthorityRulesPage from "./pages/settings/authority";
@@ -131,6 +162,11 @@ const resources: ResourceProps[] = [
     name: "memory-stats",
     list: "/memory/stats",
     meta: { parent: "memory_section", label: "Stats", icon: <BarChartIcon /> },
+  },
+  {
+    name: "memory-graph",
+    list: "/memory/graph",
+    meta: { parent: "memory_section", label: "Graph", icon: <BubbleChartIcon /> },
   },
 
   // --- Section: Knowledge ---
@@ -196,6 +232,24 @@ const resources: ResourceProps[] = [
     list: "/profiles",
     meta: { parent: "runtime_section", label: "Profiles", icon: <TuneIcon /> },
   },
+  {
+    name: "consolidation",
+    list: "/consolidation",
+    meta: {
+      parent: "runtime_section",
+      label: "Consolidation",
+      icon: <BedtimeIcon />,
+    },
+  },
+  {
+    name: "trace",
+    list: "/trace",
+    meta: {
+      parent: "runtime_section",
+      label: "Trace Explorer",
+      icon: <ManageSearchIcon />,
+    },
+  },
 
   // --- Section: Settings ---
   {
@@ -239,6 +293,59 @@ const resources: ResourceProps[] = [
 // BrowserRouter basename derived from Vite's base ("/ui/" in prod, "/" in dev).
 const basename = import.meta.env.BASE_URL.replace(/\/$/, "") || "/";
 
+/**
+ * Layout header — mirrors Refine's default ThemedHeaderV2 (sticky AppBar,
+ * hamburger toggle, identity block) with the GatewaySelector mounted in the
+ * middle. The selector persists via the unified gateway-key helpers
+ * (providers/gatewayKey.ts, through apiClient's get/setSelectedGateway) and
+ * broadcasts GATEWAY_CHANGED_EVENT; we additionally drop the cached authority
+ * level on switch so access-control gates re-resolve for the new scope.
+ */
+/**
+ * Sidebar brand slot (Refine ThemedLayoutV2 `Title` contract) — the
+ * elephant.broker lockup from the EB Logo - Monogram design; seal-only when
+ * the sider is collapsed. Links home like Refine's default title.
+ */
+const AppTitle = ({ collapsed }: { collapsed: boolean }) => (
+  <RouterLink to="/" style={{ textDecoration: "none", display: "flex" }}>
+    <BrandLogo size={32} sealOnly={collapsed} />
+  </RouterLink>
+);
+
+const AppHeader = () => {
+  const { data: user } = useGetIdentity<{ name?: string; avatar?: string }>();
+
+  return (
+    <AppBar position="sticky">
+      <Toolbar>
+        <HamburgerMenu />
+        <Stack
+          direction="row"
+          width="100%"
+          justifyContent="flex-end"
+          alignItems="center"
+          gap="16px"
+        >
+          <GatewaySelector onChange={() => invalidateAuthorityCache()} />
+          <Stack
+            direction="row"
+            gap="16px"
+            alignItems="center"
+            justifyContent="center"
+          >
+            {user?.name && (
+              <Typography variant="subtitle2" data-testid="header-user-name">
+                {user.name}
+              </Typography>
+            )}
+            {user?.avatar && <Avatar src={user.avatar} alt={user.name} />}
+          </Stack>
+        </Stack>
+      </Toolbar>
+    </AppBar>
+  );
+};
+
 function App() {
   return (
     <BrowserRouter basename={basename}>
@@ -252,7 +359,7 @@ function App() {
               dataProvider={dataProvider}
               authProvider={authProvider}
               accessControlProvider={accessControlProvider}
-              notificationProvider={useNotificationProvider()}
+              notificationProvider={useNotificationProvider}
               resources={resources}
               options={{
                 syncWithLocation: true,
@@ -270,7 +377,7 @@ function App() {
                       key="authenticated-app"
                       fallback={<CatchAllNavigate to="/login" />}
                     >
-                      <ThemedLayoutV2>
+                      <ThemedLayoutV2 Header={AppHeader} Title={AppTitle}>
                         <Outlet />
                       </ThemedLayoutV2>
                     </Authenticated>
@@ -282,6 +389,7 @@ function App() {
                     <Route index element={<MemoryList />} />
                     <Route path="search" element={<MemorySearch />} />
                     <Route path="stats" element={<MemoryStats />} />
+                    <Route path="graph" element={<MemoryGraph />} />
                     <Route path=":id" element={<MemoryShow />} />
                   </Route>
 
@@ -305,6 +413,24 @@ function App() {
 
                   <Route path="guards" element={<GuardsPage />} />
                   <Route path="profiles" element={<ProfilesPage />} />
+                  <Route
+                    path="consolidation"
+                    element={<ConsolidationPage />}
+                  />
+                  <Route
+                    path="trace"
+                    element={
+                      // Route-level gate expected by pages/trace/list.tsx (its
+                      // in-page authority check is the courtesy fallback).
+                      <CanAccess
+                        resource="trace"
+                        action="list"
+                        fallback={<ErrorComponent />}
+                      >
+                        <TraceExplorerPage />
+                      </CanAccess>
+                    }
+                  />
 
                   <Route path="settings">
                     <Route path="api-keys" element={<ApiKeysPage />} />

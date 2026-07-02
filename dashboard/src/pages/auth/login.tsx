@@ -17,6 +17,8 @@ import {
   Typography,
 } from "@mui/material";
 
+import BrandLogo from "../../components/BrandLogo";
+
 export const LoginPage: React.FC = () => {
   const { mutate: login, isLoading } = useLogin();
   const { push } = useNavigation();
@@ -52,9 +54,9 @@ export const LoginPage: React.FC = () => {
     >
       <Card sx={{ width: 380 }} variant="outlined">
         <CardContent>
-          <Typography variant="h5" align="center" gutterBottom>
-            ElephantBroker
-          </Typography>
+          <Box sx={{ display: "flex", justifyContent: "center", my: 1.5 }}>
+            <BrandLogo size={44} />
+          </Box>
           <Typography
             variant="body2"
             align="center"

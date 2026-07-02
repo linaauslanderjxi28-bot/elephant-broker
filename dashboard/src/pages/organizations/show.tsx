@@ -2,7 +2,8 @@
 //
 // Org info, teams with expandable member lists (add / remove members), and a
 // form-based profile-override editor. Team management gated at authority >= 50;
-// override editing and org edit at >= 70.
+// override editing at >= 70. Org rename gated at >= 90 (backend create_org
+// rule); team rename at >= 70 (backend create_team rule).
 
 import React, { useCallback, useEffect, useState } from "react";
 import { useParsed } from "@refinedev/core";
@@ -31,6 +32,7 @@ import {
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import DeleteIcon from "@mui/icons-material/Delete";
+import EditIcon from "@mui/icons-material/Edit";
 import { apiGet, apiSend, useAuthority } from "../home/dashboardApi";
 
 interface OrgDetail {
@@ -45,13 +47,38 @@ interface OrgDetail {
 
 function TeamPanel(props: {
   team: any;
+  orgId: string;
   onChanged: () => void;
   canManage: boolean;
+  canEdit: boolean;
 }) {
   const { team } = props;
   const teamId = String(team.team_id ?? team.eb_id ?? team.id ?? "");
   const [members, setMembers] = useState<any[] | null>(null);
   const [newActor, setNewActor] = useState("");
+  const [editOpen, setEditOpen] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editLabel, setEditLabel] = useState("");
+  const [editError, setEditError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const saveEdit = async () => {
+    setSaving(true);
+    setEditError(null);
+    try {
+      await apiSend("PUT", `/admin/teams/${teamId}`, {
+        name: editName,
+        display_label: editLabel,
+        org_id: props.orgId,
+      });
+      setEditOpen(false);
+      props.onChanged();
+    } catch (e) {
+      setEditError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const loadMembers = useCallback(async () => {
     try {
@@ -63,6 +90,7 @@ function TeamPanel(props: {
   }, [teamId]);
 
   return (
+    <>
     <Accordion
       onChange={(_, exp) => {
         if (exp && members === null) void loadMembers();
@@ -72,6 +100,23 @@ function TeamPanel(props: {
         <Typography sx={{ flex: 1 }}>
           {team.name ?? team.display_label}
         </Typography>
+        {props.canEdit && (
+          <IconButton
+            component="span"
+            size="small"
+            aria-label="Edit team"
+            sx={{ mr: 1, my: -0.5 }}
+            onClick={(e) => {
+              e.stopPropagation();
+              setEditName(String(team.name ?? ""));
+              setEditLabel(String(team.display_label ?? ""));
+              setEditError(null);
+              setEditOpen(true);
+            }}
+          >
+            <EditIcon fontSize="small" />
+          </IconButton>
+        )}
         <Typography variant="body2" color="text.secondary">
           {team.member_count ?? members?.length ?? 0} members
         </Typography>
@@ -138,6 +183,42 @@ function TeamPanel(props: {
         )}
       </AccordionDetails>
     </Accordion>
+
+    <Dialog open={editOpen} onClose={() => setEditOpen(false)} fullWidth>
+        <DialogTitle>Edit team</DialogTitle>
+        <DialogContent>
+          {editError && (
+            <Alert severity="error" sx={{ mb: 1 }}>
+              {editError}
+            </Alert>
+          )}
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              autoFocus
+              label="Team name"
+              required
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+            />
+            <TextField
+              label="Display label"
+              value={editLabel}
+              onChange={(e) => setEditLabel(e.target.value)}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            disabled={!editName.trim() || saving}
+            onClick={saveEdit}
+          >
+            Save
+          </Button>
+        </DialogActions>
+    </Dialog>
+    </>
   );
 }
 
@@ -150,12 +231,46 @@ export const OrganizationShowPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [addTeamOpen, setAddTeamOpen] = useState(false);
   const [teamName, setTeamName] = useState("");
+  const [editOrgOpen, setEditOrgOpen] = useState(false);
+  const [orgName, setOrgName] = useState("");
+  const [orgLabel, setOrgLabel] = useState("");
+  const [orgEditError, setOrgEditError] = useState<string | null>(null);
+  const [orgSaving, setOrgSaving] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setData(await apiGet(`/dashboard/organizations/${orgId}`));
+      // There is no GET /dashboard/organizations/{org_id} endpoint on the
+      // backend — compose the detail view from the org list plus the admin
+      // endpoints. Teams / actors / overrides are best-effort: they require
+      // higher authority (403s degrade to empty sections, not a dead page).
+      const res = await apiGet<{ organizations?: any[] }>(
+        "/dashboard/organizations",
+      );
+      const org = (res.organizations ?? []).find(
+        (o) => String(o.org_id ?? o.eb_id ?? "") === orgId,
+      );
+      if (!org) throw new Error(`Organization ${orgId} not found`);
+      const [teams, actors, overrides] = await Promise.all([
+        apiGet<any[]>("/admin/teams", { org_id: orgId }).catch(() => []),
+        apiGet<any[]>("/admin/actors", { org_id: orgId }).catch(() => []),
+        apiGet<any[]>(`/admin/profiles/overrides/${orgId}`).catch(
+          () => [] as any[],
+        ),
+      ]);
+      const profile_overrides: Record<string, any> = {};
+      for (const ov of Array.isArray(overrides) ? overrides : []) {
+        if (ov && ov.profile_id) profile_overrides[ov.profile_id] = ov.overrides;
+      }
+      setData({
+        org_id: orgId,
+        name: org.name,
+        display_label: org.display_label,
+        teams: Array.isArray(teams) ? teams : [],
+        actors: Array.isArray(actors) ? actors : [],
+        profile_overrides,
+      });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -171,12 +286,50 @@ export const OrganizationShowPage: React.FC = () => {
   if (error) return <Alert severity="error">{error}</Alert>;
   if (!data) return null;
 
+  const saveOrgEdit = async () => {
+    setOrgSaving(true);
+    setOrgEditError(null);
+    try {
+      await apiSend("PUT", `/admin/organizations/${orgId}`, {
+        name: orgName,
+        display_label: orgLabel,
+      });
+      setEditOrgOpen(false);
+      void load();
+    } catch (e) {
+      setOrgEditError((e as Error).message);
+    } finally {
+      setOrgSaving(false);
+    }
+  };
+
   return (
     <Box sx={{ p: 2 }}>
-      <Typography variant="h5" gutterBottom>
-        {data.name}
-        {data.display_label ? ` — ${data.display_label}` : ""}
-      </Typography>
+      <Stack
+        direction="row"
+        alignItems="center"
+        spacing={1}
+        sx={{ mb: 1.5 }}
+      >
+        <Typography variant="h5">
+          {data.name}
+          {data.display_label ? ` — ${data.display_label}` : ""}
+        </Typography>
+        {authority >= 90 && (
+          <IconButton
+            size="small"
+            aria-label="Edit organization"
+            onClick={() => {
+              setOrgName(String(data.name ?? ""));
+              setOrgLabel(String(data.display_label ?? ""));
+              setOrgEditError(null);
+              setEditOrgOpen(true);
+            }}
+          >
+            <EditIcon fontSize="small" />
+          </IconButton>
+        )}
+      </Stack>
 
       <Box
         sx={{
@@ -203,8 +356,10 @@ export const OrganizationShowPage: React.FC = () => {
                 <TeamPanel
                   key={i}
                   team={t}
+                  orgId={orgId}
                   onChanged={load}
                   canManage={authority >= 50}
+                  canEdit={authority >= 70}
                 />
               ))}
               {(data.teams ?? []).length === 0 && (
@@ -293,6 +448,45 @@ export const OrganizationShowPage: React.FC = () => {
             }}
           >
             Add
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={editOrgOpen}
+        onClose={() => setEditOrgOpen(false)}
+        fullWidth
+      >
+        <DialogTitle>Edit organization</DialogTitle>
+        <DialogContent>
+          {orgEditError && (
+            <Alert severity="error" sx={{ mb: 1 }}>
+              {orgEditError}
+            </Alert>
+          )}
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              autoFocus
+              label="Name"
+              required
+              value={orgName}
+              onChange={(e) => setOrgName(e.target.value)}
+            />
+            <TextField
+              label="Display label"
+              value={orgLabel}
+              onChange={(e) => setOrgLabel(e.target.value)}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditOrgOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            disabled={!orgName.trim() || orgSaving}
+            onClick={saveOrgEdit}
+          >
+            Save
           </Button>
         </DialogActions>
       </Dialog>

@@ -18,6 +18,8 @@ import {
   Typography,
 } from "@mui/material";
 
+import BrandLogo from "../../components/BrandLogo";
+
 async function supertokensSignUp(
   email: string,
   password: string,
@@ -94,6 +96,9 @@ export const RegisterPage: React.FC = () => {
     >
       <Card sx={{ width: 380 }} variant="outlined">
         <CardContent>
+          <Box sx={{ display: "flex", justifyContent: "center", my: 1.5 }}>
+            <BrandLogo size={40} />
+          </Box>
           <Typography variant="h5" align="center" gutterBottom>
             Create account
           </Typography>

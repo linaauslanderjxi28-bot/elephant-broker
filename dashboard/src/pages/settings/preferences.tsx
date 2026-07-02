@@ -1,8 +1,9 @@
 // Preferences settings page.
 //
 // Reads/writes GET/PUT /dashboard/preferences (theme, items per page, default
-// page, selected gateway). The selected gateway is mirrored to localStorage so
-// the shared api helper scopes requests consistently.
+// page, selected gateway). The selected gateway is mirrored to the shared
+// gateway store (providers/apiClient + providers/gatewayKey) so every request
+// helper scopes requests consistently.
 
 import React, { useCallback, useEffect, useState } from "react";
 import {
@@ -17,7 +18,8 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { apiGet, apiSend, GATEWAY_STORAGE_KEY } from "../home/dashboardApi";
+import { apiGet, apiSend } from "../home/dashboardApi";
+import { setSelectedGateway } from "../../providers/apiClient";
 
 interface Prefs {
   theme?: string;
@@ -64,14 +66,9 @@ export const PreferencesPage: React.FC = () => {
     setError(null);
     try {
       await apiSend("PUT", "/dashboard/preferences", prefs);
-      try {
-        window.localStorage.setItem(
-          GATEWAY_STORAGE_KEY,
-          prefs.selected_gateway ?? "",
-        );
-      } catch {
-        /* ignore */
-      }
+      // Update the shared gateway store (persists to the canonical
+      // localStorage key and broadcasts the change so open views refetch).
+      setSelectedGateway(prefs.selected_gateway ?? "");
       setSaved(true);
     } catch (e) {
       setError((e as Error).message);

@@ -22,6 +22,7 @@ const AUTHORITY_RULES: Record<string, number> = {
   "memory:promote-scope": 50,
   "memory:promote-class": 50,
   "memory:delete": 70, // GDPR delete
+  "memory-graph:list": 70, // graph explorer view (backend READ = authority>=70)
   // --- Knowledge ---
   "goals:create": 50,
   "goals:edit": 50,
@@ -37,6 +38,13 @@ const AUTHORITY_RULES: Record<string, number> = {
   "guards:edit": 70, // edit rule / per-profile config
   "guards:delete": 70,
   "guards:approvals": 50, // approval-queue tab
+  // --- Runtime / consolidation ---
+  // consolidation:list is deliberately unregistered (any authenticated caller
+  // may view reports/suggestions — backend routes carry no require_authority).
+  "consolidation:run": 90, // trigger a consolidation ("sleep") run
+  "consolidation:edit": 70, // approve / reject procedure suggestions
+  // --- Runtime / trace ---
+  "trace:list": 70, // trace explorer view (mirrors memory-graph:list)
   // --- Settings ---
   "api-keys:list": 0, // any authenticated caller manages their own keys
   "api-keys:create": 0,

@@ -182,6 +182,42 @@ class MemoryStatsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Memory — knowledge-graph explorer (Obsidian-style)
+# ---------------------------------------------------------------------------
+
+
+class GraphNode(BaseModel):
+    """A single knowledge-graph node projected from a gateway-scoped Cypher row."""
+
+    id: str  # eb_id
+    type: str  # labels(n)[0], e.g. "FactDataPoint"
+    label: str = ""  # coalesce(display_name, title, name, left(text,80), eb_id)
+    properties: dict = Field(default_factory=dict)  # curated scalars: scope,
+    # memory_class, category, confidence, status, actor_type, authority_level,
+    # source_actor_id, archived, created_at_ms (int epoch-ms). Never blanket
+    # properties(n).
+
+
+class GraphEdge(BaseModel):
+    """A directed typed edge between two in-gateway nodes."""
+
+    source: str  # startNode.eb_id
+    target: str  # endNode.eb_id
+    relation_type: str  # type(r): ABOUT_ACTOR|CREATED_BY|SERVES_GOAL|CHILD_OF|
+    # SUPPORTS|MEMBER_OF|OWNED_BY|BELONGS_TO|SUPERSEDES
+
+
+class KnowledgeGraphResponse(BaseModel):
+    """Gateway-scoped subgraph for the Obsidian-style memory graph explorer."""
+
+    nodes: list[GraphNode] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)
+    truncated: bool = False  # len(nodes) >= max_nodes
+    node_count: int = 0
+    edge_count: int = 0
+
+
+# ---------------------------------------------------------------------------
 # Actors / organizations / goals / procedures / sessions / profiles
 # ---------------------------------------------------------------------------
 
