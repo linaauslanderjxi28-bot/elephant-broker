@@ -324,6 +324,60 @@ class TestMemoryDetailStats:
         r = await admin_client.get("/dashboard/memory/not-a-uuid/detail")
         assert r.status_code == 422
 
+    async def test_memory_detail_evidence_count_excludes_fact_link_edge(
+        self, admin_client, container
+    ):
+        """A claim with 1 real EvidenceDataPoint edge AND 1 FactDataPoint LINK
+        edge must report ``evidence_count == 1``, not 2.
+
+        The claim is attached to the fact by a ``(:FactDataPoint)-[:SUPPORTS]->
+        (:ClaimDataPoint)`` link edge; its actual evidence is a separate
+        ``(:EvidenceDataPoint)-[:SUPPORTS]->(:ClaimDataPoint)`` edge. The
+        evidence-count Cypher MUST label the source node so the fact link edge
+        is not miscounted as evidence. Modelled with a simulated graph so a
+        revert of the ``(e:EvidenceDataPoint)`` label fails this test: the
+        unlabelled query would count both incoming SUPPORTS edges (→2).
+        """
+        fact_id = uuid.uuid4()
+        claim_id = "claim-eb-1"
+        fact_props = {"eb_id": str(fact_id), "text": "the sky is blue"}
+        edges = [
+            {
+                "relation_type": "SUPPORTS",
+                "direction": "outgoing",
+                "target_id": claim_id,
+                "target_type": "ClaimDataPoint",
+                "target_label": "the sky is blue",
+                # No denormalized evidence_count on the claim node — it must be
+                # derived purely from the (labelled) edge-count query.
+                "target_properties": {
+                    "claim_text": "the sky is blue",
+                    "status": "verified",
+                },
+            }
+        ]
+        # Two incoming SUPPORTS edges on the claim: one real EvidenceDataPoint,
+        # one FactDataPoint LINK edge. A correctly labelled count query sees only
+        # the EvidenceDataPoint (→1); the buggy unlabelled query counts both.
+        supports_sources = ["EvidenceDataPoint", "FactDataPoint"]
+
+        def _fake_cypher(query, params):
+            if "ClaimDataPoint" in query and "count(e)" in query:
+                if "(e:EvidenceDataPoint)" in query:
+                    n = supports_sources.count("EvidenceDataPoint")
+                else:
+                    n = len(supports_sources)
+                return [{"cid": claim_id, "n": n}]
+            return [{"fact": fact_props, "edges": edges}]
+
+        container.graph.query_cypher.side_effect = _fake_cypher
+
+        r = await admin_client.get(f"/dashboard/memory/{fact_id}/detail")
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body["claims"]) == 1
+        assert body["claims"][0]["evidence_count"] == 1
+
     async def test_memory_stats_shape(self, admin_client):
         r = await admin_client.get("/dashboard/memory/stats")
         assert r.status_code == 200

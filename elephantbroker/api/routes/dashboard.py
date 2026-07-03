@@ -710,7 +710,7 @@ async def memory_detail(fact_id: uuid.UUID, request: Request):
         if cids:
             ev_rows = await _cypher(
                 container,
-                "MATCH (e)-[:SUPPORTS]->(c:ClaimDataPoint) "
+                "MATCH (e:EvidenceDataPoint)-[:SUPPORTS]->(c:ClaimDataPoint) "
                 "WHERE c.gateway_id = $gw AND c.eb_id IN $cids "
                 "RETURN c.eb_id AS cid, count(e) AS n",
                 {"gw": gw, "cids": cids},

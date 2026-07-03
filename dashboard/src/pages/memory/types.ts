@@ -106,6 +106,31 @@ export interface LinkedClaim {
   evidence_count: number;
 }
 
+// A single evidence receipt attached to a claim, as returned by the runtime
+// `GET /claims/{claim_id}` endpoint (elephantbroker/schemas/evidence.py
+// EvidenceRef). Surfaced in the Fact Detail claims panel so reviewers can
+// inspect the receipts *before* deciding to verify/reject.
+export interface EvidenceRef {
+  id: string;
+  type: string;
+  ref_value: string;
+  content_hash?: string | null;
+  created_at?: string | null;
+  created_by_actor_id?: string | null;
+}
+
+// `GET /claims/{claim_id}` — full claim record (evidence + review verdict).
+// `rejection_reason` is the durable field written by EvidenceEngine.reject();
+// reviewers must be able to read *why* a claim was rejected.
+export interface ClaimDetailResponse {
+  claim_id: string;
+  status: string;
+  evidence_refs: EvidenceRef[];
+  verifier_actor_id?: string | null;
+  verified_at?: string | null;
+  rejection_reason?: string | null;
+}
+
 export interface FactUsageSummary {
   use_count: number;
   successful_use_count: number;

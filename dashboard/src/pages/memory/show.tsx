@@ -6,7 +6,7 @@
 //
 // Implements plan Section 2 "Fact Detail" + SOW page 5.
 
-import { useEffect, useMemo, useState, type FC } from "react";
+import { useEffect, useMemo, useState, type FC, type SyntheticEvent } from "react";
 import { useNavigate, useParams } from "react-router";
 import {
   useApiUrl,
@@ -45,7 +45,7 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { formatDistanceToNow } from "date-fns";
 
 import { errorMessage } from "../../lib/errors";
-import { humanizeEnum } from "../../lib/format";
+import { formatRelativeTime, humanizeEnum } from "../../lib/format";
 import { actorDisplayName } from "../../lib/labels";
 import {
   AUTH_DELETE,
@@ -56,8 +56,10 @@ import {
   MEMORY_CLASS_LABELS,
   SCOPE_LABELS,
   type ChipColor,
+  type ClaimDetailResponse,
   type FactDetailResponse,
   type FactEdge,
+  type LinkedClaim,
   type MemoryClass,
   type Scope,
 } from "./types";
@@ -69,6 +71,14 @@ const CLAIM_STATUS_COLORS: Record<string, ChipColor> = {
   tool_supported: "success",
   supervisor_verified: "success",
   rejected: "error",
+};
+
+// EvidenceType (elephantbroker/schemas/evidence.py) -> chip color.
+const EVIDENCE_TYPE_COLORS: Record<string, ChipColor> = {
+  tool_output: "success",
+  chunk_ref: "info",
+  supervisor_sign_off: "secondary",
+  external_link: "default",
 };
 
 function relativeAge(iso?: string | null): string {
@@ -134,6 +144,182 @@ function edgeSentence(edge: FactEdge): { text: string; nav?: string } {
     }
   }
 }
+
+// One linked-claim row in the Fact Detail claims panel. The collapsed summary
+// keeps the review affordance (claim text + status chip + evidence count +
+// Verify/Reject) exactly as before; expanding lazily pulls the full claim record
+// (`GET /claims/{id}`) so a reviewer can read the actual evidence receipts and,
+// for a rejected claim, WHY it was rejected — BEFORE acting. The GET is cached
+// per claim (react-query, staleTime Infinity) so re-expanding never refetches.
+const ClaimRow: FC<{
+  claim: LinkedClaim;
+  status: string;
+  busy: boolean;
+  canReview: boolean;
+  onVerify: () => void;
+  onReject: () => void;
+}> = ({ claim, status, busy, canReview, onVerify, onReject }) => {
+  const apiUrl = useApiUrl();
+  const [expanded, setExpanded] = useState(false);
+
+  // Lazy fetch: `enabled` only flips true once the row is first expanded.
+  const { data, isLoading, isError } = useCustom<ClaimDetailResponse>({
+    url: `${apiUrl}/claims/${claim.claim_id}`,
+    method: "get",
+    queryOptions: {
+      enabled: expanded,
+      // Evidence for a claim is effectively immutable within a review session;
+      // hold it forever so collapsing/re-expanding is instant and never refetches.
+      staleTime: Infinity,
+    },
+  });
+  const detail = data?.data;
+
+  // Verify/Reject live inside the AccordionSummary (a button region), so their
+  // clicks must NOT bubble up and toggle the accordion.
+  const stopToggle = (e: SyntheticEvent) => e.stopPropagation();
+
+  return (
+    <Accordion
+      expanded={expanded}
+      onChange={(_e, isExpanded) => setExpanded(isExpanded)}
+      disableGutters
+    >
+      <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+        <Stack
+          direction="row"
+          spacing={1}
+          alignItems="center"
+          flexWrap="wrap"
+          useFlexGap
+          sx={{ width: "100%", pr: 1 }}
+        >
+          <Typography variant="body2">{claim.claim_text}</Typography>
+          <Chip
+            size="small"
+            label={humanizeEnum(status)}
+            color={CLAIM_STATUS_COLORS[status] ?? "default"}
+          />
+          <Typography variant="caption" color="text.secondary">
+            {claim.evidence_count} evidence
+          </Typography>
+          {/* REJECTED is terminal on the backend (EvidenceEngine.verify refuses
+              the transition), so hide review actions then. */}
+          {canReview && status !== "rejected" && (
+            <>
+              <Button
+                size="small"
+                variant="outlined"
+                color="success"
+                disabled={busy}
+                onMouseDown={stopToggle}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onVerify();
+                }}
+              >
+                Verify
+              </Button>
+              <Button
+                size="small"
+                variant="outlined"
+                color="error"
+                disabled={busy}
+                onMouseDown={stopToggle}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onReject();
+                }}
+              >
+                Reject
+              </Button>
+            </>
+          )}
+        </Stack>
+      </AccordionSummary>
+      <AccordionDetails>
+        {isLoading ? (
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ py: 1 }}>
+            <CircularProgress size={16} />
+            <Typography variant="caption" color="text.secondary">
+              Loading evidence…
+            </Typography>
+          </Stack>
+        ) : isError ? (
+          <Alert severity="warning" variant="outlined">
+            Could not load evidence for this claim.
+          </Alert>
+        ) : (
+          <Stack spacing={2}>
+            {/* Why it was rejected — the durable rejection_reason. */}
+            {detail?.rejection_reason && (
+              <Alert severity="error">
+                <Typography variant="caption" sx={{ fontWeight: 600, display: "block" }}>
+                  Rejection reason
+                </Typography>
+                {detail.rejection_reason}
+              </Alert>
+            )}
+            <Box>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ fontWeight: 600 }}
+              >
+                Evidence
+              </Typography>
+              {(detail?.evidence_refs?.length ?? 0) === 0 ? (
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                  No evidence attached to this claim.
+                </Typography>
+              ) : (
+                <Stack spacing={1} sx={{ mt: 0.5 }}>
+                  {detail!.evidence_refs.map((ev) => {
+                    const when = formatRelativeTime(ev.created_at);
+                    return (
+                      <Stack
+                        key={ev.id}
+                        direction="row"
+                        spacing={1}
+                        alignItems="flex-start"
+                        flexWrap="wrap"
+                        useFlexGap
+                      >
+                        <Chip
+                          size="small"
+                          label={humanizeEnum(ev.type)}
+                          color={EVIDENCE_TYPE_COLORS[ev.type] ?? "default"}
+                        />
+                        <Typography
+                          variant="body2"
+                          sx={{
+                            fontFamily: "monospace",
+                            wordBreak: "break-all",
+                            flex: 1,
+                            minWidth: 0,
+                          }}
+                        >
+                          {ev.ref_value}
+                        </Typography>
+                        {ev.created_at && (
+                          <Tooltip title={when.title}>
+                            <Typography variant="caption" color="text.secondary">
+                              {when.text}
+                            </Typography>
+                          </Tooltip>
+                        )}
+                      </Stack>
+                    );
+                  })}
+                </Stack>
+              )}
+            </Box>
+          </Stack>
+        )}
+      </AccordionDetails>
+    </Accordion>
+  );
+};
 
 export const MemoryShow: FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -565,51 +751,18 @@ export const MemoryShow: FC = () => {
                 const status = claimStatusOverrides[c.claim_id] ?? c.status;
                 const busy = claimBusyId === c.claim_id;
                 return (
-                  <Stack
+                  <ClaimRow
                     key={c.claim_id}
-                    direction="row"
-                    spacing={1}
-                    alignItems="center"
-                    flexWrap="wrap"
-                    useFlexGap
-                  >
-                    <Typography variant="body2">{c.claim_text}</Typography>
-                    <Chip
-                      size="small"
-                      label={humanizeEnum(status)}
-                      color={CLAIM_STATUS_COLORS[status] ?? "default"}
-                    />
-                    <Typography variant="caption" color="text.secondary">
-                      {c.evidence_count} evidence
-                    </Typography>
-                    {/* REJECTED is terminal on the backend (EvidenceEngine.verify
-                        refuses the transition), so hide review actions then. */}
-                    {canReviewClaims && status !== "rejected" && (
-                      <>
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          color="success"
-                          disabled={busy}
-                          onClick={() => verifyClaim(c.claim_id, status)}
-                        >
-                          Verify
-                        </Button>
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          color="error"
-                          disabled={busy}
-                          onClick={() => {
-                            setRejectReason("");
-                            setRejectTargetId(c.claim_id);
-                          }}
-                        >
-                          Reject
-                        </Button>
-                      </>
-                    )}
-                  </Stack>
+                    claim={c}
+                    status={status}
+                    busy={busy}
+                    canReview={canReviewClaims}
+                    onVerify={() => verifyClaim(c.claim_id, status)}
+                    onReject={() => {
+                      setRejectReason("");
+                      setRejectTargetId(c.claim_id);
+                    }}
+                  />
                 );
               })}
             </Stack>
