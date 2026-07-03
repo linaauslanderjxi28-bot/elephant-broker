@@ -22,3 +22,23 @@ eagerly loading the runtime bundle.
 
 The old `openclaw-plugins/elephantbroker-memory/` copy has been merged here.
 Future OpenClaw memory-plugin changes belong in this package.
+
+## Troubleshooting: Tools not showing up in OpenClaw
+
+If you have configured `tools.profile: "full"` in `openclaw.json` but the agent claims it does not have tools like `memory_store` or `memory_search`:
+
+**Root Cause:**
+OpenClaw enforces a `sandbox` tool policy filter before passing tools to the LLM. If `tools.alsoAllow` or `tools.allow` is omitted in your `openclaw.json`, it falls back to a restrictive hardcoded list (`DEFAULT_TOOL_ALLOW` in OpenClaw core), which only includes basic system tools like `exec`, `read`, `write`, `process`. As a result, all plugin-registered tools are quietly intercepted and removed by the sandbox policy, even if the profile is set to `full`. (Check `journalctl --user -u openclaw-gateway` for logs like `tool policy removed ... via sandbox tools.allow`).
+
+**Solution:**
+You must explicitly configure a wildcard pass (or list the specific tools) under the `"tools"` block in `~/.openclaw/openclaw.json`:
+```json
+  "tools": {
+    "profile": "full",
+    "alsoAllow": ["*"],
+    "elevated": {
+      "enabled": true
+    }
+  }
+```
+This instructs the OpenClaw tool policy sandbox to stop filtering out unregistered custom tools.
