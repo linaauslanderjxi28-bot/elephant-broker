@@ -145,6 +145,28 @@ class ConsolidationReportStore:
         cols = [d[0] for d in cursor.description]
         return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
+    async def get_suggestion(
+        self, suggestion_id: str, gateway_id: str,
+    ) -> dict | None:
+        """Fetch a single procedure suggestion by id, scoped to gateway.
+
+        Returns the stored row as a dict (including ``draft_procedure_json`` and
+        ``tool_sequence_json``) — the exact shape ``promote_suggestion_to_procedure``
+        consumes on approval (gap-5-4). Gateway scoping is enforced here so the
+        approval route cannot fetch/promote a suggestion from another gateway.
+        """
+        if not self._conn:
+            return None
+        cursor = self._conn.execute(
+            "SELECT * FROM procedure_suggestions WHERE id = ? AND gateway_id = ?",
+            (suggestion_id, gateway_id),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cursor.description]
+        return dict(zip(cols, row))
+
     async def update_suggestion_status(self, suggestion_id: str, status: str) -> bool:
         if not self._conn:
             return False

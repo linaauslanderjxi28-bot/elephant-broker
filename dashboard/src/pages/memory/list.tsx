@@ -56,8 +56,9 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import VerifiedIcon from "@mui/icons-material/VerifiedUser";
 import BookmarkIcon from "@mui/icons-material/BookmarkBorder";
-import { formatDistanceToNow } from "date-fns";
 
+import { errorMessage } from "../../lib/errors";
+import { formatRelativeTime, humanizeEnum, pluralize } from "../../lib/format";
 import {
   AUTH_DELETE,
   AUTH_EDIT,
@@ -129,8 +130,13 @@ function parseFiltersFromSearch(params: URLSearchParams): Partial<FilterState> {
   const memoryClass = params.get("memory_class");
   if (memoryClass && (MEMORY_CLASS_OPTIONS as string[]).includes(memoryClass))
     out.memoryClass = memoryClass as MemoryClass;
+  // Accept ANY category string, not just the built-in enum: facts carry a free
+  // `category` (elephantbroker/schemas/fact.py) so real data has categories
+  // outside the 12 built-ins. Silently dropping them here was part of
+  // memory-browse-8 ("can't select existing categories") and memory-browse-2
+  // (deep-link filters silently wiped).
   const category = params.get("category");
-  if (category && CATEGORY_OPTIONS.includes(category)) out.category = category;
+  if (category) out.category = category;
   const minConfidence = params.get("min_confidence");
   if (minConfidence !== null) {
     const v = Number(minConfidence);
@@ -145,21 +151,27 @@ function parseFiltersFromSearch(params: URLSearchParams): Partial<FilterState> {
   return out;
 }
 
+// Inverse of parseFiltersFromSearch: serialize a FilterState into URL search
+// params (only non-empty fields). The URL is the single source of truth for the
+// browse filters (memory-browse-2), so every filter mutation goes through here.
+function filtersToParams(f: FilterState): URLSearchParams {
+  const p = new URLSearchParams();
+  if (f.scope) p.set("scope", f.scope);
+  if (f.memoryClass) p.set("memory_class", f.memoryClass);
+  if (f.category) p.set("category", f.category);
+  if (f.minConfidence > 0) p.set("min_confidence", String(f.minConfidence));
+  if (f.text.trim()) p.set("text", f.text.trim());
+  if (f.goalId) p.set("goal_id", f.goalId);
+  if (f.sourceActorId) p.set("source_actor_id", f.sourceActorId);
+  return p;
+}
+
 interface SavedView {
   id: string;
   name: string;
   resource: string;
   filters: FilterState;
   sort?: { field: string; order: "asc" | "desc" };
-}
-
-function relativeAge(iso?: string | null): string {
-  if (!iso) return "—";
-  try {
-    return formatDistanceToNow(new Date(iso), { addSuffix: true });
-  } catch {
-    return iso;
-  }
 }
 
 function ClassChip({ value }: { value: string }) {
@@ -202,26 +214,32 @@ export const MemoryList: FC = () => {
   const canEdit = authorityLevel >= AUTH_EDIT;
   const canDelete = authorityLevel >= AUTH_DELETE;
 
-  // Deep links (e.g. `/memory?goal_id=…`, `/memory?source_actor_id=…`) seed
-  // the initial filter state; afterwards filtering stays purely local.
-  const [searchParams] = useSearchParams();
-  const initialFilters = useMemo<FilterState>(
+  // --- Filters: the URL is the single source of truth --------------------
+  // Deep links (`/memory?goal_id=…`, `?source_actor_id=…`, `?category=…`) AND
+  // every in-page filter change flow through the URL; useDataGrid consumes the
+  // derived filters as `permanent`. That guarantees exactly ONE fetch per filter
+  // state and eliminates the deep-link-wipe + unfiltered-race double fetch that
+  // used to show all facts under an active filter chip (memory-browse-2).
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const filters = useMemo<FilterState>(
     () => ({ ...EMPTY_FILTERS, ...parseFiltersFromSearch(searchParams) }),
-    // Parse once on mount — later param changes are handled by the effect below.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+    [searchParams],
+  );
+  const crudFilters = useMemo<CrudFilters>(
+    () => buildCrudFilters(filters),
+    [filters],
   );
 
-  const { dataGridProps, setFilters, setSorters, tableQueryResult } =
+  const { dataGridProps, setSorters, setCurrent, tableQueryResult } =
     useDataGrid<FactAssertion>({
       resource: "memory",
       pagination: { pageSize: 50, mode: "server" },
       sorters: { mode: "server", initial: [{ field: "created_at", order: "desc" }] },
-      filters: { mode: "server", initial: buildCrudFilters(initialFilters) },
+      filters: { mode: "server", permanent: crudFilters },
       syncWithLocation: false,
     });
 
-  const [filters, setLocalFilters] = useState<FilterState>(initialFilters);
   const [selection, setSelection] = useState<GridRowSelectionModel>([]);
 
   // x-data-grid changed the selection model shape across major versions
@@ -235,45 +253,83 @@ export const MemoryList: FC = () => {
     return [];
   }, [selection]);
 
-  // --- Filter application ------------------------------------------------
-  const applyFilters = useCallback(
-    (next: FilterState) => {
-      setFilters(buildCrudFilters(next), "replace");
-    },
-    [setFilters],
-  );
-
-  // If the URL search params change while this page is already mounted
-  // (e.g. an in-app navigation to `/memory?goal_id=…`), merge them in.
-  const appliedSearchRef = useRef(searchParams.toString());
-  useEffect(() => {
-    const search = searchParams.toString();
-    if (search === appliedSearchRef.current) return;
-    appliedSearchRef.current = search;
-    const parsed = parseFiltersFromSearch(searchParams);
-    if (Object.keys(parsed).length === 0) return;
-    setLocalFilters((prev) => {
-      const next = { ...prev, ...parsed };
-      applyFilters(next);
-      return next;
-    });
-  }, [searchParams, applyFilters]);
-
+  // --- Filter application (URL writes) -----------------------------------
+  // Reset to page 1 on any filter change so a narrower filter can never strand
+  // the operator on a now-empty page.
   const updateFilter = useCallback(
     (patch: Partial<FilterState>) => {
-      setLocalFilters((prev) => {
-        const next = { ...prev, ...patch };
-        applyFilters(next);
-        return next;
-      });
+      setSearchParams(
+        (prev) => {
+          const current = { ...EMPTY_FILTERS, ...parseFiltersFromSearch(prev) };
+          return filtersToParams({ ...current, ...patch });
+        },
+        { replace: true },
+      );
+      setCurrent?.(1);
     },
-    [applyFilters],
+    [setSearchParams, setCurrent],
   );
 
   const clearFilters = useCallback(() => {
-    setLocalFilters(EMPTY_FILTERS);
-    setFilters([], "replace");
-  }, [setFilters]);
+    setSearchParams(new URLSearchParams(), { replace: true });
+    setCurrent?.(1);
+  }, [setSearchParams, setCurrent]);
+
+  // memory-browse-11: debounced free-text filter. `textInput` gives the box an
+  // immediate value; the URL is written after a pause. `committedTextRef` lets
+  // external changes (chip clear, saved-view load, deep-link) re-sync the box
+  // without clobbering in-progress typing.
+  const [textInput, setTextInput] = useState(filters.text);
+  const committedTextRef = useRef(filters.text);
+  const textTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (filters.text !== committedTextRef.current) {
+      committedTextRef.current = filters.text;
+      setTextInput(filters.text);
+    }
+  }, [filters.text]);
+  useEffect(
+    () => () => {
+      if (textTimerRef.current) clearTimeout(textTimerRef.current);
+    },
+    [],
+  );
+  const onTextChange = useCallback(
+    (value: string) => {
+      setTextInput(value);
+      if (textTimerRef.current) clearTimeout(textTimerRef.current);
+      textTimerRef.current = setTimeout(() => {
+        committedTextRef.current = value;
+        updateFilter({ text: value });
+      }, 350);
+    },
+    [updateFilter],
+  );
+
+  // Min-confidence slider keeps a smooth local value while dragging; commits on
+  // release. Same external-resync guard as the text box.
+  const [confSlider, setConfSlider] = useState(filters.minConfidence);
+  const committedConfRef = useRef(filters.minConfidence);
+  useEffect(() => {
+    if (filters.minConfidence !== committedConfRef.current) {
+      committedConfRef.current = filters.minConfidence;
+      setConfSlider(filters.minConfidence);
+    }
+  }, [filters.minConfidence]);
+
+  // memory-browse-8: category options = built-ins ∪ categories present in the
+  // loaded page ∪ the active filter, so real (non-built-in) categories in the
+  // data become selectable rather than being hidden behind a hardcoded list.
+  const loadedRows = tableQueryResult?.data?.data as FactAssertion[] | undefined;
+  const categoryOptions = useMemo(() => {
+    const set = new Set<string>(CATEGORY_OPTIONS);
+    for (const r of loadedRows ?? []) {
+      const c = (r.category ?? "").trim();
+      if (c) set.add(c);
+    }
+    if (filters.category) set.add(filters.category);
+    return [...set].sort();
+  }, [loadedRows, filters.category]);
 
   const activeFilterChips = useMemo(() => {
     const chips: { key: string; label: string; clear: () => void }[] = [];
@@ -327,11 +383,13 @@ export const MemoryList: FC = () => {
   const refetch = useCallback(() => tableQueryResult?.refetch?.(), [tableQueryResult]);
 
   const [deleteTarget, setDeleteTarget] = useState<string[] | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [promoteState, setPromoteState] = useState<{
     ids: string[];
     kind: "scope" | "class";
     value: string;
   } | null>(null);
+  const [promoteBusy, setPromoteBusy] = useState(false);
 
   const notifyOk = (message: string) =>
     open?.({ type: "success", message, key: `mem-${Date.now()}` });
@@ -351,59 +409,104 @@ export const MemoryList: FC = () => {
             notifyOk("Fact marked verified");
             refetch();
           },
-          onError: () => notifyErr("Verify failed"),
+          onError: (err) => notifyErr(errorMessage(err)),
         },
       );
     },
     [apiUrl, customMutate, refetch],
   );
 
+  // Run a per-fact mutation over a batch, tracking a busy flag so the dialog can
+  // show progress and disable its action (memory-browse-10 — no more silent
+  // multi-second deletes) and surfacing the real backend error (memory-browse-7).
   const doDelete = useCallback(
     (ids: string[]) => {
-      let remaining = ids.length;
+      if (ids.length === 0) return;
+      setDeleteBusy(true);
+      let settled = 0;
+      let failed = 0;
+      let firstErr: unknown = null;
+      const finish = () => {
+        if (settled < ids.length) return;
+        setDeleteBusy(false);
+        setDeleteTarget(null);
+        setSelection([]);
+        if (failed === 0) {
+          notifyOk(`Deleted ${ids.length} ${pluralize(ids.length, "fact")}`);
+        } else {
+          notifyErr(
+            `${errorMessage(firstErr)} (${failed} of ${ids.length} failed)`,
+          );
+        }
+        refetch();
+      };
       ids.forEach((id) => {
         customMutate(
           { url: `${apiUrl}/memory/${id}`, method: "delete", values: {} },
           {
             onSuccess: () => {
-              remaining -= 1;
-              if (remaining <= 0) {
-                notifyOk(`Deleted ${ids.length} fact(s)`);
-                setSelection([]);
-                refetch();
-              }
+              settled += 1;
+              finish();
             },
-            onError: () => notifyErr("Delete failed"),
+            onError: (err) => {
+              settled += 1;
+              failed += 1;
+              firstErr = firstErr ?? err;
+              finish();
+            },
           },
         );
       });
-      setDeleteTarget(null);
     },
     [apiUrl, customMutate, refetch],
   );
 
+  // memory-browse-1: the promote endpoints are POST /memory/promote-scope and
+  // /memory/promote-class (NOT /memory/{id}/promote-*), and the body carries
+  // `fact_id` + `to_scope` / `to_class` (PromoteRequest / PromoteClassRequest).
   const doPromote = useCallback(
     (ids: string[], kind: "scope" | "class", value: string) => {
+      if (ids.length === 0) return;
+      setPromoteBusy(true);
       const path = kind === "scope" ? "promote-scope" : "promote-class";
-      const body = kind === "scope" ? { target_scope: value } : { target_class: value };
-      let remaining = ids.length;
+      let settled = 0;
+      let failed = 0;
+      let firstErr: unknown = null;
+      const finish = () => {
+        if (settled < ids.length) return;
+        setPromoteBusy(false);
+        setPromoteState(null);
+        setSelection([]);
+        if (failed === 0) {
+          notifyOk(`Promoted ${ids.length} ${pluralize(ids.length, "fact")}`);
+        } else {
+          notifyErr(
+            `${errorMessage(firstErr)} (${failed} of ${ids.length} failed)`,
+          );
+        }
+        refetch();
+      };
       ids.forEach((id) => {
+        const body =
+          kind === "scope"
+            ? { fact_id: id, to_scope: value }
+            : { fact_id: id, to_class: value };
         customMutate(
-          { url: `${apiUrl}/memory/${id}/${path}`, method: "post", values: body },
+          { url: `${apiUrl}/memory/${path}`, method: "post", values: body },
           {
             onSuccess: () => {
-              remaining -= 1;
-              if (remaining <= 0) {
-                notifyOk(`Promoted ${ids.length} fact(s)`);
-                setSelection([]);
-                refetch();
-              }
+              settled += 1;
+              finish();
             },
-            onError: () => notifyErr("Promote failed"),
+            onError: (err) => {
+              settled += 1;
+              failed += 1;
+              firstErr = firstErr ?? err;
+              finish();
+            },
           },
         );
       });
-      setPromoteState(null);
     },
     [apiUrl, customMutate, refetch],
   );
@@ -446,7 +549,7 @@ export const MemoryList: FC = () => {
           setSaveName("");
           refetchViews();
         },
-        onError: () => notifyErr("Save view failed"),
+        onError: (err) => notifyErr(errorMessage(err)),
       },
     );
   }, [apiUrl, filters, saveName, saveViewMutate, refetchViews]);
@@ -456,11 +559,13 @@ export const MemoryList: FC = () => {
       const view = savedViews.find((v) => v.id === viewId);
       if (!view) return;
       const merged = { ...EMPTY_FILTERS, ...view.filters };
-      setLocalFilters(merged);
-      applyFilters(merged);
+      // Push the view's filters into the URL (single source of truth) — the
+      // grid refetches once off the derived permanent filters.
+      setSearchParams(filtersToParams(merged), { replace: true });
+      setCurrent?.(1);
       if (view.sort) setSorters([{ field: view.sort.field, order: view.sort.order }]);
     },
-    [savedViews, applyFilters, setSorters],
+    [savedViews, setSearchParams, setCurrent, setSorters],
   );
 
   // DELETE /dashboard/saved-views/{view_id} — with confirmation dialog.
@@ -478,7 +583,7 @@ export const MemoryList: FC = () => {
             notifyOk(`Deleted view "${view.name}"`);
             refetchViews();
           },
-          onError: () => notifyErr("Delete view failed"),
+          onError: (err) => notifyErr(errorMessage(err)),
         },
       );
       setDeleteViewTarget(null);
@@ -540,8 +645,15 @@ export const MemoryList: FC = () => {
       {
         field: "created_at",
         headerName: "Age",
-        width: 150,
-        renderCell: (params) => <span>{relativeAge(params.value as string)}</span>,
+        width: 160,
+        renderCell: (params) => {
+          const { text, title } = formatRelativeTime(params.value as string);
+          return (
+            <Tooltip title={title}>
+              <span>{text}</span>
+            </Tooltip>
+          );
+        },
       },
       { field: "category", headerName: "Category", width: 130 },
       { field: "session_key", headerName: "Session Key", width: 180 },
@@ -696,16 +808,16 @@ export const MemoryList: FC = () => {
   );
 
   return (
-    <List title="Memory Browse">
+    <List title="Memory Browse" breadcrumb={false}>
       {/* Filter bar */}
       <Stack spacing={2} sx={{ mb: 2 }}>
         <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap alignItems="center">
           <TextField
             label="Search text"
             size="small"
-            value={filters.text}
+            value={textInput}
             placeholder="Substring filter…"
-            onChange={(e) => updateFilter({ text: e.target.value })}
+            onChange={(e) => onTextChange(e.target.value)}
             sx={{ minWidth: 240 }}
           />
           <FormControl size="small" sx={{ minWidth: 160 }}>
@@ -749,25 +861,28 @@ export const MemoryList: FC = () => {
               onChange={(e) => updateFilter({ category: String(e.target.value) })}
             >
               <MenuItem value="">All</MenuItem>
-              {CATEGORY_OPTIONS.map((c) => (
+              {categoryOptions.map((c) => (
                 <MenuItem key={c} value={c}>
-                  {CATEGORY_LABELS[c] ?? c}
+                  {CATEGORY_LABELS[c] ?? humanizeEnum(c)}
                 </MenuItem>
               ))}
             </Select>
           </FormControl>
           <Box sx={{ width: 220 }}>
             <Typography variant="caption">
-              Minimum confidence: {filters.minConfidence.toFixed(2)}
+              Minimum confidence: {confSlider.toFixed(2)}
             </Typography>
             <Slider
               size="small"
-              value={filters.minConfidence}
+              value={confSlider}
               min={0}
               max={1}
               step={0.05}
-              onChange={(_, v) => setLocalFilters((p) => ({ ...p, minConfidence: v as number }))}
-              onChangeCommitted={(_, v) => updateFilter({ minConfidence: v as number })}
+              onChange={(_, v) => setConfSlider(v as number)}
+              onChangeCommitted={(_, v) => {
+                committedConfRef.current = v as number;
+                updateFilter({ minConfidence: v as number });
+              }}
             />
           </Box>
         </Stack>
@@ -802,27 +917,45 @@ export const MemoryList: FC = () => {
       />
 
       {/* Delete confirmation */}
-      <Dialog open={deleteTarget !== null} onClose={() => setDeleteTarget(null)}>
-        <DialogTitle>Delete {deleteTarget?.length ?? 0} fact(s)?</DialogTitle>
+      <Dialog
+        open={deleteTarget !== null}
+        onClose={() => !deleteBusy && setDeleteTarget(null)}
+      >
+        <DialogTitle>
+          Delete {deleteTarget?.length ?? 0}{" "}
+          {pluralize(deleteTarget?.length ?? 0, "fact")}?
+        </DialogTitle>
         <DialogContent>
           <DialogContentText>
-            This permanently deletes {deleteTarget?.length ?? 0} fact(s) from all stores
-            (Neo4j, Qdrant, Cognee). This cannot be undone.
+            This permanently deletes {deleteTarget?.length ?? 0}{" "}
+            {pluralize(deleteTarget?.length ?? 0, "fact")} from all stores (Neo4j, Qdrant,
+            Cognee). This cannot be undone.
           </DialogContentText>
+          {deleteBusy && <LinearProgress sx={{ mt: 2 }} />}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDeleteTarget(null)}>Cancel</Button>
-          <Button color="error" onClick={() => deleteTarget && doDelete(deleteTarget)}>
-            Delete
+          <Button disabled={deleteBusy} onClick={() => setDeleteTarget(null)}>
+            Cancel
+          </Button>
+          <Button
+            color="error"
+            disabled={deleteBusy}
+            onClick={() => deleteTarget && doDelete(deleteTarget)}
+          >
+            {deleteBusy ? "Deleting…" : "Delete"}
           </Button>
         </DialogActions>
       </Dialog>
 
       {/* Promote dialog */}
-      <Dialog open={promoteState !== null} onClose={() => setPromoteState(null)}>
+      <Dialog
+        open={promoteState !== null}
+        onClose={() => !promoteBusy && setPromoteState(null)}
+      >
         <DialogTitle>
-          Promote {promoteState?.kind === "scope" ? "Scope" : "Type"} ({promoteState?.ids.length}{" "}
-          fact(s))
+          Promote {promoteState?.kind === "scope" ? "Scope" : "Type"} (
+          {promoteState?.ids.length ?? 0}{" "}
+          {pluralize(promoteState?.ids.length ?? 0, "fact")})
         </DialogTitle>
         <DialogContent sx={{ minWidth: 320 }}>
           <FormControl fullWidth size="small" sx={{ mt: 1 }}>
@@ -846,17 +979,21 @@ export const MemoryList: FC = () => {
               ))}
             </Select>
           </FormControl>
+          {promoteBusy && <LinearProgress sx={{ mt: 2 }} />}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setPromoteState(null)}>Cancel</Button>
+          <Button disabled={promoteBusy} onClick={() => setPromoteState(null)}>
+            Cancel
+          </Button>
           <Button
             variant="contained"
+            disabled={promoteBusy}
             onClick={() =>
               promoteState &&
               doPromote(promoteState.ids, promoteState.kind, promoteState.value)
             }
           >
-            Promote
+            {promoteBusy ? "Promoting…" : "Promote"}
           </Button>
         </DialogActions>
       </Dialog>

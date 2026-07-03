@@ -205,6 +205,13 @@ class RuntimeContainer:
         # provider so close() can call provider.shutdown() and flush the
         # BatchLogRecordProcessor buffer before SIGTERM drops the pod.
         self.otel_logger_provider = None
+        # Durable trace-analytics query client (ClickHouse via clickhouse_connect).
+        # Shared by the Stage-7 consolidation analytics AND the dashboard
+        # stats/activity endpoints (memory-stats-1) — the durable, cross-session
+        # history store behind the bounded in-memory TraceLedger. Stays
+        # ``available == False`` (or None) when ClickHouse is not configured /
+        # unreachable, in which case every consumer falls back to the ledger.
+        self.trace_query_client = None
 
         # Runtime modules (17)
         self.trace_ledger: TraceLedger | None = None
@@ -400,6 +407,24 @@ class RuntimeContainer:
             config=getattr(config.infra, "trace", None),
         )
 
+        # Durable trace-analytics query client (ClickHouse). Built here —
+        # independent of the IConsolidationEngine tier gate — because BOTH the
+        # Stage-7 consolidation analytics AND the dashboard stats/activity
+        # endpoints read durable, cross-session trace history from it
+        # (memory-stats-1). Reads durable OTEL log records that outlive the
+        # bounded in-memory ledger buffer. When ClickHouse is not configured or
+        # unreachable the client is ``available == False`` and consumers fall
+        # back to the ledger (graceful degradation, honest source label).
+        try:
+            from elephantbroker.runtime.consolidation.otel_trace_query_client import OtelTraceQueryClient
+            c.trace_query_client = OtelTraceQueryClient(
+                getattr(config.infra, "clickhouse", None),
+                trace_ledger=c.trace_ledger,
+                metrics=c.metrics_ctx,
+            )
+        except Exception:
+            c.trace_query_client = None
+
         if _enabled(tier, "IProfileRegistry"):
             c.profile_registry = ProfileRegistry(
                 c.trace_ledger,
@@ -556,24 +581,16 @@ class RuntimeContainer:
             )
 
         if _enabled(tier, "IConsolidationEngine"):
-            # Phase 9: Full ConsolidationEngine with all dependencies
+            # Phase 9: Full ConsolidationEngine with all dependencies.
+            # ``trace_query_client`` is built above (tier-independent) so both
+            # this engine and the dashboard share one durable-query client.
             c.consolidation_report_store = None
-            c.trace_query_client = None
             try:
                 from elephantbroker.runtime.consolidation.report_store import ConsolidationReportStore
                 c.consolidation_report_store = ConsolidationReportStore(
                     db_path=config.audit.consolidation_reports_db_path,
                 )
                 await c.consolidation_report_store.init_db()
-            except Exception:
-                pass
-            try:
-                from elephantbroker.runtime.consolidation.otel_trace_query_client import OtelTraceQueryClient
-                c.trace_query_client = OtelTraceQueryClient(
-                    getattr(config.infra, "clickhouse", None),
-                    trace_ledger=c.trace_ledger,
-                    metrics=c.metrics_ctx,
-                )
             except Exception:
                 pass
 
@@ -779,6 +796,13 @@ class RuntimeContainer:
             from elephantbroker.runtime.guards.custom_rule_store import CustomRuleStore
             c.custom_rule_store = CustomRuleStore(db_path=config.audit.custom_guard_rules_db_path)
             await c.custom_rule_store.init_db()
+            # gap-3-1 (RC-7): the guard engine is constructed above (before the
+            # store exists) with custom_rule_store=None. Late-bind the store now —
+            # mirroring the _llm / _goals late-binds — so the engine's
+            # _load_custom_rules / _maybe_refresh_custom_rules actually see it and
+            # dashboard-created rules are ENFORCED, not silently skipped.
+            if c.guard_engine is not None:
+                c.guard_engine._custom_rule_store = c.custom_rule_store
         except Exception as exc:
             logger.warning("CustomRuleStore wiring failed, continuing without: %s", exc)
             c.custom_rule_store = None

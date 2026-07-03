@@ -15,32 +15,46 @@ import type { AccessControlProvider } from "@refinedev/core";
 
 import { authProvider } from "./providers/authProvider";
 
-/** Authority thresholds keyed by `"resource:action"`, most specific first. */
+/**
+ * Authority thresholds keyed by `"resource:action"`, most specific first.
+ *
+ * Aligned to the backend enforcement matrix (RC-11): dashboard READ routes
+ * require authority >= 70 (`READ = require_authority(70)`), and dashboard WRITE
+ * routes (guard-rule CRUD, effective-config) require >= 90
+ * (`WRITE = require_authority(90)`). Goal/procedure/actor creation flows POST to
+ * `/admin/*`, whose authority is scope-dependent (backend AUTHORITY_DEFAULTS:
+ * team goal 50, org goal 70, global goal 90); the single frontend threshold
+ * mirrors the lowest meaningful band (50) and the per-scope UI restriction is
+ * handled by `scopesForAuthority`. This gate is UX-only — the server
+ * `require_authority` dependency is the enforcement boundary.
+ */
 const AUTHORITY_RULES: Record<string, number> = {
   // --- Memory ---
   "memory:edit": 50, // inline fact edit / promote
   "memory:promote-scope": 50,
   "memory:promote-class": 50,
-  "memory:delete": 70, // GDPR delete
+  "memory:delete": 90, // GDPR delete (dashboard WRITE)
   "memory-graph:list": 70, // graph explorer view (backend READ = authority>=70)
-  // --- Knowledge ---
+  // --- Knowledge (create/edit POST to /admin/* with scope-based authority) ---
   "goals:create": 50,
   "goals:edit": 50,
   "procedures:create": 50,
   "procedures:edit": 50,
   // --- Actors & organizations ---
-  "actors:list": 50,
-  "actors:edit": 70, // deactivate / mutate actor
+  "actors:list": 70, // backend READ
+  "actors:edit": 70, // deactivate / mutate actor (admin authority)
   "organizations:list": 70,
   "organizations:edit": 70,
   // --- Runtime / guards ---
-  "guards:create": 70, // create custom rule
-  "guards:edit": 70, // edit rule / per-profile config
-  "guards:delete": 70,
-  "guards:approvals": 50, // approval-queue tab
+  "guards:create": 90, // create custom rule (dashboard WRITE)
+  "guards:edit": 90, // edit rule / per-profile config (dashboard WRITE)
+  "guards:delete": 90, // dashboard WRITE
+  "guards:approvals": 70, // approval-queue tab (backend READ)
   // --- Runtime / consolidation ---
-  // consolidation:list is deliberately unregistered (any authenticated caller
-  // may view reports/suggestions — backend routes carry no require_authority).
+  // Consolidation reads carry no backend require_authority (any authenticated
+  // caller may view reports/suggestions), so they are explicitly pinned to 0
+  // to opt out of the list/show read default below.
+  "consolidation:list": 0,
   "consolidation:run": 90, // trigger a consolidation ("sleep") run
   "consolidation:edit": 70, // approve / reject procedure suggestions
   // --- Runtime / trace ---
@@ -52,14 +66,22 @@ const AUTHORITY_RULES: Record<string, number> = {
   "authority-rules:list": 90,
   "authority-rules:edit": 90,
   "authority-rules:delete": 90,
-  "effective-config:list": 70,
+  "effective-config:list": 90, // backend WRITE (settings-7)
+  "fact-indexes:list": 90, // /admin/indexes read is also "manage_indexes" (90)
+  "fact-indexes:edit": 90, // create / drop / rebuild an index
   // --- Cross-cutting UI affordances ---
   "gateway:select-all": 90, // GatewaySelector "all gateways" option
 };
 
-/** Fallback thresholds by action when no `resource:action` rule matches. */
+/**
+ * Fallback thresholds by action when no `resource:action` rule matches.
+ * Reads (`list`/`show`) require 70 to mirror the backend READ dependency, so
+ * read pages hide for under-authority operators instead of 403-walling them.
+ */
 const ACTION_DEFAULTS: Record<string, number> = {
-  delete: 70,
+  list: 70,
+  show: 70,
+  delete: 90,
   create: 50,
   edit: 50,
 };
@@ -109,11 +131,39 @@ function requiredLevel(resource: string | undefined, action: string): number {
   return 0; // read/list/show of unrestricted resources
 }
 
+/**
+ * Resolve the resource NAME from Refine's `can({ resource, params })` call.
+ *
+ * Refine passes `params.resource` as the resolved resource OBJECT (an
+ * `IResourceItem` with a `.name`) for every menu item / `<CanAccess>` gate; the
+ * top-level `resource` argument is the name string. The previous code read
+ * `params.resource` as a string, so the object stringified to "[object Object]",
+ * never matched a rule, and `can()` fell through to allow-everything (auth-1).
+ * We now read `.name` off the object, then fall back to the string forms.
+ */
+function resolveResourceName(
+  resource: unknown,
+  params: { resource?: unknown } | undefined,
+): string | undefined {
+  const fromParams = params?.resource;
+  if (fromParams && typeof fromParams === "object") {
+    const name = (fromParams as { name?: unknown }).name;
+    if (typeof name === "string" && name) return name;
+  }
+  if (typeof fromParams === "string" && fromParams) return fromParams;
+  if (typeof resource === "string" && resource) return resource;
+  if (resource && typeof resource === "object") {
+    const name = (resource as { name?: unknown }).name;
+    if (typeof name === "string" && name) return name;
+  }
+  return undefined;
+}
+
 export const accessControlProvider: AccessControlProvider = {
   can: async ({ resource, action, params }) => {
-    // Allow callers to override the resource name via params.resource
-    // (used by <CanAccess resource="gateway" action="select-all">).
-    const resourceName = (params?.resource as string | undefined) ?? resource;
+    // Resolve the resource name from Refine's resource object (params.resource)
+    // or the string forms — never stringify the object into the rule key.
+    const resourceName = resolveResourceName(resource, params);
     const min = requiredLevel(resourceName, action);
     if (min <= 0) {
       return { can: true };

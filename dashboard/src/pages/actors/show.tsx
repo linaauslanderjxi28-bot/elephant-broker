@@ -3,7 +3,7 @@
 // Identity, org/teams, activity stats, handles, plus advanced accordions for
 // relationships and authority chain. Edit / deactivate gated at authority >= 70.
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigation, useParsed } from "@refinedev/core";
 import {
   Accordion,
@@ -16,7 +16,16 @@ import {
   CardContent,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Divider,
+  FormControl,
+  IconButton,
+  InputLabel,
+  MenuItem,
+  Select,
   Stack,
   Typography,
 } from "@mui/material";
@@ -31,6 +40,9 @@ import {
   useAuthority,
 } from "../home/dashboardApi";
 import { EditActorDialog } from "./list";
+import { humanizeEnum } from "../../lib/format";
+import { actorDisplayName, shortId } from "../../lib/labels";
+import { errorMessage } from "../../lib/errors";
 
 interface ActorDetail {
   actor_id?: string;
@@ -129,13 +141,23 @@ export const ActorShowPage: React.FC = () => {
   const [authChain, setAuthChain] = useState<ChainActor[] | null>(null);
   const [chainError, setChainError] = useState<string | null>(null);
 
+  // Org membership editing (actors-orgs-10). The org list is loaded once so the
+  // card can resolve org_id -> a readable name AND feed the change dialog.
+  const [orgOptions, setOrgOptions] = useState<
+    Array<{ org_id?: string; name?: string; display_label?: string }>
+  >([]);
+  const [orgEditOpen, setOrgEditOpen] = useState(false);
+  const [orgSelection, setOrgSelection] = useState("");
+  const [orgSaving, setOrgSaving] = useState(false);
+  const [orgError, setOrgError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       setData(normalizeDetail(await apiGet(`/dashboard/actors/${actorId}/detail`)));
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -158,7 +180,7 @@ export const ActorShowPage: React.FC = () => {
       );
       setRelationships(Array.isArray(res) ? res : []);
     } catch (e) {
-      setRelError((e as Error).message);
+      setRelError(errorMessage(e));
       setRelationships([]);
     }
     // Best-effort id -> display name map for readable relationship rows.
@@ -183,7 +205,7 @@ export const ActorShowPage: React.FC = () => {
       );
       setAuthChain(Array.isArray(res) ? res : []);
     } catch (e) {
-      setChainError((e as Error).message);
+      setChainError(errorMessage(e));
       setAuthChain([]);
     }
   }, [actorId]);
@@ -199,7 +221,57 @@ export const ActorShowPage: React.FC = () => {
       await apiSend("PUT", `/admin/actors/${actorId}/status`, { active });
       void load();
     } catch (e) {
-      setActionError((e as Error).message);
+      setActionError(errorMessage(e));
+    }
+  };
+
+  // Load the gateway's org list once so the card shows a name (not a raw UUID)
+  // and the change dialog has options. READ-gated, same as the actor detail.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiGet<{ organizations?: any[] }>(
+          "/dashboard/organizations",
+        );
+        if (!cancelled) setOrgOptions(res.organizations ?? []);
+      } catch {
+        /* org selector degrades to raw ids; non-fatal */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const orgDisplay = useMemo(() => {
+    if (data?.organization_name) return data.organization_name;
+    const oid = data?.org_id ? String(data.org_id) : "";
+    if (!oid) return "—";
+    const match = orgOptions.find((o) => String(o.org_id) === oid);
+    return match ? match.name || oid : oid;
+  }, [data, orgOptions]);
+
+  const openOrgEdit = () => {
+    setOrgError(null);
+    setOrgSelection(data?.org_id ? String(data.org_id) : "");
+    setOrgEditOpen(true);
+  };
+
+  const saveOrg = async () => {
+    setOrgSaving(true);
+    setOrgError(null);
+    try {
+      // PUT /admin/actors/{id}/organization — org_id: null clears membership.
+      await apiSend("PUT", `/admin/actors/${actorId}/organization`, {
+        org_id: orgSelection || null,
+      });
+      setOrgEditOpen(false);
+      void load();
+    } catch (e) {
+      setOrgError(errorMessage(e));
+    } finally {
+      setOrgSaving(false);
     }
   };
 
@@ -208,8 +280,11 @@ export const ActorShowPage: React.FC = () => {
   if (!data) return null;
 
   const type = data.actor_type ?? data.type;
-  const nameOf = (aid: string) =>
-    actorNames[aid] ?? (aid ? `${aid.slice(0, 8)}…` : "unknown");
+  const nameOf = (aid: string) => {
+    const raw = actorNames[aid];
+    if (raw) return actorDisplayName(raw);
+    return aid ? `${shortId(aid)}…` : "unknown";
+  };
 
   const outgoing = (relationships ?? []).filter(
     (r) => String(r.source_actor_id) === actorId,
@@ -229,20 +304,43 @@ export const ActorShowPage: React.FC = () => {
       direction === "outgoing"
         ? String(r.target_actor_id)
         : String(r.source_actor_id);
+    // Not every relationship's other end is an actor: OWNS_GOAL points at a
+    // goal node and OWNS_ARTIFACT at an artifact node. Linking those to
+    // /actors/{id} dead-ends on a 404 (actors-orgs-6), so route goals to the
+    // goal's facts and render artifacts as a non-navigable chip.
+    const rt = (r.relationship_type || "").toLowerCase();
+    const isGoal = rt === "owns_goal";
+    const isArtifact = rt === "owns_artifact";
+    const target = isGoal
+      ? {
+          label: `goal ${shortId(otherId)}`,
+          onClick: () =>
+            push(`/memory?goal_id=${encodeURIComponent(otherId)}`),
+        }
+      : isArtifact
+        ? { label: `artifact ${shortId(otherId)}`, onClick: undefined }
+        : {
+            label: nameOf(otherId),
+            onClick: () => push(`/actors/${otherId}`),
+          };
     return (
       <Stack key={key} direction="row" spacing={1} alignItems="center">
         <Chip
           size="small"
           variant="outlined"
           color={relationshipColor(r.relationship_type)}
-          label={(r.relationship_type || "").replace(/_/g, " ")}
+          label={humanizeEnum(r.relationship_type)}
         />
         <Typography variant="body2" color="text.secondary">
           {direction === "outgoing" ? "→" : "←"}
         </Typography>
-        <Button size="small" onClick={() => push(`/actors/${otherId}`)}>
-          {nameOf(otherId)}
-        </Button>
+        {target.onClick ? (
+          <Button size="small" onClick={target.onClick}>
+            {target.label}
+          </Button>
+        ) : (
+          <Chip size="small" label={target.label} />
+        )}
       </Stack>
     );
   };
@@ -256,8 +354,14 @@ export const ActorShowPage: React.FC = () => {
         sx={{ mb: 2 }}
       >
         <Stack direction="row" spacing={2} alignItems="center">
-          <Typography variant="h5">{data.display_name}</Typography>
-          <Chip label={type} color={actorTypeColor(type)} size="small" />
+          <Typography variant="h5" title={data.display_name}>
+            {actorDisplayName(data.display_name)}
+          </Typography>
+          <Chip
+            label={humanizeEnum(type) || "—"}
+            color={actorTypeColor(type)}
+            size="small"
+          />
           <Chip
             label={authorityLabel(data.authority_level ?? 0)}
             variant="outlined"
@@ -310,12 +414,26 @@ export const ActorShowPage: React.FC = () => {
       >
         <Card variant="outlined">
           <CardContent>
-            <Typography variant="subtitle2" gutterBottom>
-              Organization & Teams
-            </Typography>
-            <Typography variant="body2">
-              {data.organization_name ?? data.org_id ?? "—"}
-            </Typography>
+            <Stack
+              direction="row"
+              justifyContent="space-between"
+              alignItems="flex-start"
+            >
+              <Typography variant="subtitle2" gutterBottom>
+                Organization & Teams
+              </Typography>
+              {authority >= 70 && (
+                <IconButton
+                  size="small"
+                  aria-label="Change organization"
+                  sx={{ my: -0.5 }}
+                  onClick={openOrgEdit}
+                >
+                  <EditIcon fontSize="small" />
+                </IconButton>
+              )}
+            </Stack>
+            <Typography variant="body2">{orgDisplay}</Typography>
             <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
               {(data.team_names ?? data.team_ids ?? []).map((t) => (
                 <Chip key={t} size="small" label={t} />
@@ -441,7 +559,7 @@ export const ActorShowPage: React.FC = () => {
                     <Chip
                       size="small"
                       color="primary"
-                      label={data.display_name}
+                      label={actorDisplayName(data.display_name)}
                     />
                     <Typography variant="caption" color="text.secondary">
                       this actor
@@ -460,7 +578,10 @@ export const ActorShowPage: React.FC = () => {
                       </Typography>
                       <Chip
                         size="small"
-                        label={a.display_name || nameOf(String(a.id ?? ""))}
+                        label={
+                          actorDisplayName(a.display_name) ||
+                          nameOf(String(a.id ?? ""))
+                        }
                         onClick={() => a.id && push(`/actors/${a.id}`)}
                       />
                       <Chip
@@ -505,6 +626,44 @@ export const ActorShowPage: React.FC = () => {
         onClose={() => setEditOpen(false)}
         onSaved={load}
       />
+
+      <Dialog
+        open={orgEditOpen}
+        onClose={() => setOrgEditOpen(false)}
+        fullWidth
+      >
+        <DialogTitle>Set organization</DialogTitle>
+        <DialogContent>
+          {orgError && (
+            <Alert severity="error" sx={{ mb: 1 }}>
+              {orgError}
+            </Alert>
+          )}
+          <FormControl fullWidth size="small" sx={{ mt: 1 }}>
+            <InputLabel id="actor-org-label">Organization</InputLabel>
+            <Select
+              labelId="actor-org-label"
+              label="Organization"
+              value={orgSelection}
+              onChange={(e) => setOrgSelection(String(e.target.value))}
+            >
+              <MenuItem value="">None (no organization)</MenuItem>
+              {orgOptions.map((o) => (
+                <MenuItem key={String(o.org_id)} value={String(o.org_id)}>
+                  {o.name}
+                  {o.display_label ? ` — ${o.display_label}` : ""}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOrgEditOpen(false)}>Cancel</Button>
+          <Button variant="contained" disabled={orgSaving} onClick={saveOrg}>
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

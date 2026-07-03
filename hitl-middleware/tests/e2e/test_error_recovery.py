@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
+from hitl_middleware.security import compute_hmac_token
 from tests.e2e.conftest import make_approval_payload, make_notify_payload
 
 
@@ -45,9 +47,16 @@ async def test_webhook_down_still_returns_200(e2e_client, e2e_app):
 # ---------------------------------------------------------------------------
 
 
-async def test_runtime_down_callback_returns_502(e2e_client):
-    """When the runtime is unreachable, /callbacks/approve returns 502."""
+async def test_runtime_down_callback_returns_502(e2e_client, e2e_config):
+    """When the runtime is unreachable, /callbacks/approve returns 502.
+
+    The callback must first pass HMAC validation before the runtime PATCH is
+    attempted, so send a valid signature over (request_id, created_at); the
+    502 then comes from the runtime being unreachable, not auth rejection.
+    """
     request_id = str(uuid.uuid4())
+    created_at = datetime.now(UTC)
+    signature = compute_hmac_token(request_id, created_at, e2e_config.callback_secret)
 
     with patch(
         "httpx.AsyncClient.patch",
@@ -56,8 +65,13 @@ async def test_runtime_down_callback_returns_502(e2e_client):
     ):
         resp = await e2e_client.post(
             "/callbacks/approve",
-            json={"request_id": request_id, "message": "ok", "approved_by": "alice"},
-            headers={"X-HITL-Signature": "some-sig"},
+            json={
+                "request_id": request_id,
+                "created_at": created_at.isoformat(),
+                "message": "ok",
+                "approved_by": "alice",
+            },
+            headers={"X-HITL-Signature": signature},
         )
 
     assert resp.status_code == 502

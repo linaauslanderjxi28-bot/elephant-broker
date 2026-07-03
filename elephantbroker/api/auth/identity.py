@@ -93,40 +93,194 @@ async def _authority_for_actor(container: Any, actor_id: str | None) -> int:
         return 0
     if actor is None:
         return 0
+    # Soft-deactivated actors (merged duplicates, offboarded operators) never
+    # authorize: degrade to 0 so ``require_authority()`` thresholds reject
+    # them — defense-in-depth alongside the SuperTokens session revocation in
+    # ``set_actor_status`` and the hard 403 in ``check_authority``.
+    if getattr(actor, "active", True) is False:
+        return 0
     return int(getattr(actor, "authority_level", 0) or 0)
 
 
-async def resolve_actor_from_st_user(container: Any, st_user_id: str) -> str | None:
-    """Map a SuperTokens user id to an EB actor id.
+def _dashboard_handle(st_user_id: str) -> str:
+    """The stable, per-user handle that anchors a dashboard actor to its ST id."""
+    return f"dashboard:{st_user_id}"
 
-    On first login an ``ActorRef`` is created with handle ``dashboard:{st_user_id}``
-    and its id is persisted into SuperTokens user metadata under ``eb_actor_id``.
-    Subsequent logins resolve the mapping straight from metadata (no graph
-    lookup). Degrades gracefully when SuperTokens or the registry is unavailable
-    — returns ``None`` so the caller falls through to anonymous.
+
+async def _fetch_st_user_display_name(st_user_id: str) -> str | None:
+    """Best-effort human display name for a SuperTokens user.
+
+    Preference order: an explicit name in user metadata → first/last name →
+    the account email (from metadata, then the emailpassword recipe, then the
+    generic user lookup). Returns ``None`` when nothing usable is found (or the
+    SDK is unavailable) so the caller keeps its placeholder fallback.
+
+    Every lookup is lazy-imported and guarded — ``supertokens_python`` is a
+    HEAVY, OPTIONAL dependency and may be any of several SDK generations, so we
+    probe multiple APIs and never let a failure propagate.
     """
-    # 1. Try the metadata mapping first (fast path, no graph).
+    # 1. usermetadata — apps commonly persist a name/email here.
     try:
-        from supertokens_python.recipe.usermetadata.asyncio import get_user_metadata
+        from supertokens_python.recipe.usermetadata.asyncio import (
+            get_user_metadata,
+        )
+
+        meta = (await get_user_metadata(st_user_id)).metadata or {}
+        for key in ("display_name", "name", "full_name"):
+            val = meta.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        first = str(meta.get("first_name", "") or "").strip()
+        last = str(meta.get("last_name", "") or "").strip()
+        if first or last:
+            return f"{first} {last}".strip()
+        email = meta.get("email")
+        if isinstance(email, str) and email.strip():
+            return email.strip()
+    except Exception as exc:  # noqa: BLE001 - ST unavailable / no metadata
+        logger.debug("usermetadata name lookup unavailable for %s: %s", st_user_id, exc)
+
+    # 2. emailpassword recipe user record (older SDK generations).
+    try:
+        from supertokens_python.recipe.emailpassword.asyncio import (
+            get_user_by_id,
+        )
+
+        user = await get_user_by_id(st_user_id)
+        email = getattr(user, "email", None)
+        if isinstance(email, str) and email.strip():
+            return email.strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("emailpassword get_user_by_id unavailable for %s: %s", st_user_id, exc)
+
+    # 3. Generic user lookup (newer SDK generations expose `.emails`).
+    try:
+        from supertokens_python.asyncio import get_user
+
+        user = await get_user(st_user_id)
+        emails = getattr(user, "emails", None)
+        if emails:
+            first_email = emails[0]
+            if isinstance(first_email, str) and first_email.strip():
+                return first_email.strip()
+        email = getattr(user, "email", None)
+        if isinstance(email, str) and email.strip():
+            return email.strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("generic get_user unavailable for %s: %s", st_user_id, exc)
+
+    return None
+
+
+async def _persist_actor_mapping(st_user_id: str, actor_id: str) -> None:
+    """Persist ``eb_actor_id`` into SuperTokens user metadata (best-effort)."""
+    try:
+        from supertokens_python.recipe.usermetadata.asyncio import (
+            update_user_metadata,
+        )
+
+        await update_user_metadata(st_user_id, {"eb_actor_id": actor_id})
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("could not persist eb_actor_id metadata for %s: %s", st_user_id, exc)
+
+
+async def _maybe_backfill_display_name(
+    registry: Any, actor_id: str, st_user_id: str
+) -> None:
+    """RC-9 backfill: upgrade a placeholder ``dashboard:<uuid>`` display name.
+
+    Existing dashboard actors were created with ``display_name`` set to the raw
+    ``dashboard:{st_user_id}`` handle. On any subsequent login we self-heal that
+    row from the SuperTokens email/name. Cheap and idempotent — once a real name
+    is set the prefix guard short-circuits before any write.
+    """
+    if registry is None:
+        return
+    try:
+        actor = await registry.resolve_actor(uuid.UUID(str(actor_id)))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("backfill resolve failed for actor %s: %s", actor_id, exc)
+        return
+    if actor is None:
+        return
+    current = (getattr(actor, "display_name", "") or "").strip()
+    if current and not current.startswith("dashboard:"):
+        return  # already has a real display name
+    real = await _fetch_st_user_display_name(st_user_id)
+    if not real or real == current:
+        return
+    try:
+        actor.display_name = real
+        await registry.register_actor(actor)
+        logger.info("Backfilled display_name for actor %s -> %r", actor_id, real)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("display_name backfill failed for %s: %s", actor_id, exc)
+
+
+async def resolve_actor_from_st_user(container: Any, st_user_id: str) -> str | None:
+    """Map a SuperTokens user id to an EB actor id — idempotently.
+
+    Resolution order (actors-orgs-2 fix — a dashboard user maps to EXACTLY ONE
+    actor, no matter how many times the metadata write has previously failed):
+
+    1. SuperTokens user metadata ``eb_actor_id`` (fast path, no graph).
+    2. An existing actor whose stable handle is ``dashboard:{st_user_id}``
+       (authoritative fallback: even when the metadata write failed on a prior
+       login, we find and reuse that actor instead of creating a duplicate, and
+       repair the missing metadata mapping).
+    3. Only when neither exists: create a NEW actor with a real ``display_name``
+       resolved from the SuperTokens email/name (actors-orgs-15 / auth-5 /
+       cross-cutting-4), and persist the mapping.
+
+    Degrades gracefully when SuperTokens or the registry is unavailable —
+    returns ``None`` so the caller falls through to anonymous.
+    """
+    handle = _dashboard_handle(st_user_id)
+    registry = getattr(container, "actor_registry", None)
+
+    # 1. Metadata mapping (fast path, no graph).
+    mapped_id: str | None = None
+    try:
+        from supertokens_python.recipe.usermetadata.asyncio import (
+            get_user_metadata,
+        )
 
         meta = await get_user_metadata(st_user_id)
         existing = (meta.metadata or {}).get("eb_actor_id")
         if existing:
-            return str(existing)
+            mapped_id = str(existing)
     except Exception as exc:  # ST not installed / not configured / no metadata
         logger.debug("usermetadata lookup unavailable for %s: %s", st_user_id, exc)
 
-    # 2. First login: create an actor and remember the mapping.
-    registry = getattr(container, "actor_registry", None)
+    # 2. Fall back to the stable handle so a failed metadata write never
+    #    produces a second actor on the next login. Reuse the existing node and
+    #    repair the mapping we were missing.
+    if mapped_id is None and registry is not None and hasattr(registry, "resolve_by_handle"):
+        try:
+            existing_actor = await registry.resolve_by_handle(handle)
+        except Exception as exc:  # noqa: BLE001
+            existing_actor = None
+            logger.debug("resolve_by_handle failed for %s: %s", handle, exc)
+        if existing_actor is not None:
+            mapped_id = str(existing_actor.id)
+            await _persist_actor_mapping(st_user_id, mapped_id)
+
+    # If we already have an actor, self-heal a placeholder display name and return.
+    if mapped_id is not None:
+        await _maybe_backfill_display_name(registry, mapped_id, st_user_id)
+        return mapped_id
+
+    # 3. First login: create an actor with a real display name and remember it.
     if registry is None:
         return None
+    display_name = await _fetch_st_user_display_name(st_user_id) or handle
     try:
         from elephantbroker.schemas.actor import ActorRef, ActorType
 
         actor = ActorRef(
-            type=ActorType.HUMAN_OPERATOR,
-            display_name=f"dashboard:{st_user_id}",
-            handles=[f"dashboard:{st_user_id}"],
+            type=ActorType.HUMAN_COORDINATOR,
+            display_name=display_name,
+            handles=[handle],
             authority_level=0,
             gateway_id=getattr(container, "gateway_id", "") or "",
         )
@@ -136,14 +290,7 @@ async def resolve_actor_from_st_user(container: Any, st_user_id: str) -> str | N
         logger.warning("Failed to create actor for ST user %s: %s", st_user_id, exc)
         return None
 
-    # 3. Persist the mapping into user metadata (best-effort).
-    try:
-        from supertokens_python.recipe.usermetadata.asyncio import update_user_metadata
-
-        await update_user_metadata(st_user_id, {"eb_actor_id": actor_id})
-    except Exception as exc:
-        logger.debug("could not persist eb_actor_id metadata for %s: %s", st_user_id, exc)
-
+    await _persist_actor_mapping(st_user_id, actor_id)
     return actor_id
 
 

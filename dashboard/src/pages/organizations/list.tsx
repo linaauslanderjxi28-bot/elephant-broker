@@ -30,6 +30,7 @@ import {
 import AddIcon from "@mui/icons-material/Add";
 import EditIcon from "@mui/icons-material/Edit";
 import { apiGet, apiSend, useAuthority } from "../home/dashboardApi";
+import { errorMessage } from "../../lib/errors";
 
 interface Org {
   org_id?: string;
@@ -55,6 +56,8 @@ export const OrganizationsPage: React.FC = () => {
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
   const [label, setLabel] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editLabel, setEditLabel] = useState("");
@@ -68,7 +71,7 @@ export const OrganizationsPage: React.FC = () => {
       const res = await apiGet<any>("/dashboard/organizations");
       setRows(Array.isArray(res) ? res : (res.items ?? res.organizations ?? []));
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -79,14 +82,22 @@ export const OrganizationsPage: React.FC = () => {
   }, [load]);
 
   const create = async () => {
-    await apiSend("POST", "/admin/organizations", {
-      name,
-      display_label: label,
-    });
-    setCreateOpen(false);
-    setName("");
-    setLabel("");
-    void load();
+    setCreating(true);
+    setCreateError(null);
+    try {
+      await apiSend("POST", "/admin/organizations", {
+        name,
+        display_label: label,
+      });
+      setCreateOpen(false);
+      setName("");
+      setLabel("");
+      void load();
+    } catch (e) {
+      setCreateError(errorMessage(e));
+    } finally {
+      setCreating(false);
+    }
   };
 
   const saveEdit = async () => {
@@ -101,7 +112,7 @@ export const OrganizationsPage: React.FC = () => {
       setEditId(null);
       void load();
     } catch (e) {
-      setEditError((e as Error).message);
+      setEditError(errorMessage(e));
     } finally {
       setSaving(false);
     }
@@ -120,7 +131,12 @@ export const OrganizationsPage: React.FC = () => {
           <Button
             variant="contained"
             startIcon={<AddIcon />}
-            onClick={() => setCreateOpen(true)}
+            onClick={() => {
+              setName("");
+              setLabel("");
+              setCreateError(null);
+              setCreateOpen(true);
+            }}
           >
             Create Organization
           </Button>
@@ -193,6 +209,11 @@ export const OrganizationsPage: React.FC = () => {
       <Dialog open={createOpen} onClose={() => setCreateOpen(false)} fullWidth>
         <DialogTitle>Create organization</DialogTitle>
         <DialogContent>
+          {createError && (
+            <Alert severity="error" sx={{ mb: 1 }}>
+              {createError}
+            </Alert>
+          )}
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField
               label="Name"
@@ -209,7 +230,11 @@ export const OrganizationsPage: React.FC = () => {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setCreateOpen(false)}>Cancel</Button>
-          <Button variant="contained" disabled={!name} onClick={create}>
+          <Button
+            variant="contained"
+            disabled={!name.trim() || creating}
+            onClick={create}
+          >
             Create
           </Button>
         </DialogActions>

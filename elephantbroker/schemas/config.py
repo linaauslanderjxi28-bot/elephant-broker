@@ -458,6 +458,11 @@ class GuardConfig(_StrictBase):
     llm_escalation_max_tokens: int = Field(default=500, ge=50)
     llm_escalation_timeout_seconds: float = Field(default=10.0, ge=1.0)
     max_pattern_length: int = Field(default=500, ge=10)
+    # FIX-4: max staleness before loaded sessions re-probe the CustomRuleStore
+    # version for operator rule changes (single-row SQLite read, shared across
+    # sessions). Same-process dashboard writes invalidate the probe immediately;
+    # this interval only bounds cross-process staleness.
+    custom_rule_refresh_seconds: int = Field(default=15, ge=1)
     strictness_presets: dict[str, StrictnessPreset] = Field(default_factory=lambda: {
         "loose": StrictnessPreset(
             bm25_threshold_multiplier=1.5,

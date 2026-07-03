@@ -147,6 +147,32 @@ function resolveGateway(meta?: MetaQuery): string {
   return (fromMeta as string) || getSelectedGateway() || "";
 }
 
+/**
+ * Canonical localStorage key for the operator's "items per page" preference
+ * (mirrors PREF_KEYS.itemsPerPage in pages/settings/preferences.tsx — kept as a
+ * literal here to avoid a provider → page import, matching authProvider's
+ * default-page mirror). The Preferences page writes it; the data provider reads
+ * it as the default page size so the preference actually takes effect
+ * (settings-3).
+ */
+const ITEMS_PER_PAGE_KEY = "eb:pref:items_per_page";
+const FALLBACK_PAGE_SIZE = 50;
+
+/** Saved default page size ("items per page" preference), else the fallback. */
+function savedPageSize(): number {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return FALLBACK_PAGE_SIZE;
+  }
+  try {
+    const raw = window.localStorage.getItem(ITEMS_PER_PAGE_KEY);
+    const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+    if (Number.isFinite(n) && n > 0) return n;
+  } catch {
+    /* ignore storage failures */
+  }
+  return FALLBACK_PAGE_SIZE;
+}
+
 /** Refine pagination → 1-indexed page + page size (server defaults applied). */
 function resolvePagination(pagination?: Pagination): {
   page: number;
@@ -154,7 +180,9 @@ function resolvePagination(pagination?: Pagination): {
 } {
   const current =
     (pagination as any)?.current ?? (pagination as any)?.currentPage ?? 1;
-  const perPage = pagination?.pageSize ?? 50;
+  // Honour an explicit caller page size; otherwise fall back to the saved
+  // "items per page" preference (settings-3) rather than a hardcoded constant.
+  const perPage = pagination?.pageSize ?? savedPageSize();
   return { page: Math.max(1, current), perPage: Math.max(1, perPage) };
 }
 

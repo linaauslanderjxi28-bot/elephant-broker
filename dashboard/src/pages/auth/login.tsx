@@ -1,12 +1,15 @@
 // Login page (SuperTokens EmailPassword via the Refine auth provider).
 //
 // Uses Refine's useLogin, which delegates to authProvider.login (SuperTokens
-// signIn under the hood). Degrades gracefully with an inline error message.
+// signIn under the hood). Errors are surfaced ONCE, via Refine's notification
+// provider — the auth provider returns a friendly title + a normalized message
+// (see providers/authProvider + lib/errors). The page no longer keeps its own
+// inline error Alert, which previously double-surfaced the same failure
+// (auth-4).
 
 import React, { useState } from "react";
 import { useLogin, useNavigation } from "@refinedev/core";
 import {
-  Alert,
   Box,
   Button,
   Card,
@@ -24,23 +27,12 @@ export const LoginPage: React.FC = () => {
   const { push } = useNavigation();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
-    login(
-      { email, password },
-      {
-        onError: (err: any) =>
-          setError(err?.message ?? "Sign-in failed"),
-        onSuccess: (data: any) => {
-          if (data && data.success === false) {
-            setError(data.error?.message ?? "Sign-in failed");
-          }
-        },
-      },
-    );
+    // The auth provider resolves failures into a single, clean Refine
+    // notification; no page-level error state to avoid double-surfacing.
+    login({ email, password });
   };
 
   return (
@@ -67,7 +59,6 @@ export const LoginPage: React.FC = () => {
           </Typography>
           <form onSubmit={submit}>
             <Stack spacing={2}>
-              {error && <Alert severity="error">{error}</Alert>}
               <TextField
                 label="Email"
                 type="email"

@@ -29,6 +29,7 @@ import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { apiGet, apiSend, relativeTime } from "../home/dashboardApi";
+import { errorMessage } from "../../lib/errors";
 
 interface KeyRecord {
   key_id?: string;
@@ -51,6 +52,7 @@ export const ApiKeysPage: React.FC = () => {
   const [createOpen, setCreateOpen] = useState(false);
   const [label, setLabel] = useState("");
   const [plaintext, setPlaintext] = useState<string | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<KeyRecord | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -69,17 +71,30 @@ export const ApiKeysPage: React.FC = () => {
   }, [load]);
 
   const create = async () => {
-    const res = await apiSend<any>("POST", "/auth/api-keys", { label });
-    setPlaintext(res.key ?? res.plaintext ?? null);
-    setCreateOpen(false);
-    setLabel("");
-    void load();
+    setError(null);
+    try {
+      const res = await apiSend<any>("POST", "/auth/api-keys", { label });
+      setPlaintext(res.key ?? res.plaintext ?? null);
+      setCreateOpen(false);
+      setLabel("");
+      void load();
+    } catch (e) {
+      setCreateOpen(false);
+      setError(errorMessage(e));
+    }
   };
 
-  const revoke = async (id: string) => {
-    if (!window.confirm("Revoke this key?")) return;
-    await apiSend("DELETE", `/auth/api-keys/${id}`);
-    void load();
+  const confirmRevoke = async () => {
+    if (!revokeTarget) return;
+    const id = keyId(revokeTarget);
+    setRevokeTarget(null);
+    setError(null);
+    try {
+      await apiSend("DELETE", `/auth/api-keys/${id}`);
+      void load();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
   };
 
   return (
@@ -130,9 +145,14 @@ export const ApiKeysPage: React.FC = () => {
                   <TableCell>{k.revoked_at ? "revoked" : "active"}</TableCell>
                   <TableCell align="right">
                     {!k.revoked_at && (
-                      <IconButton onClick={() => revoke(keyId(k))}>
-                        <DeleteIcon />
-                      </IconButton>
+                      <Tooltip title="Revoke key">
+                        <IconButton
+                          aria-label={`Revoke API key ${k.label ?? keyId(k)}`}
+                          onClick={() => setRevokeTarget(k)}
+                        >
+                          <DeleteIcon />
+                        </IconButton>
+                      </Tooltip>
                     )}
                   </TableCell>
                 </TableRow>
@@ -192,6 +212,24 @@ export const ApiKeysPage: React.FC = () => {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setPlaintext(null)}>Done</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={!!revokeTarget} onClose={() => setRevokeTarget(null)}>
+        <DialogTitle>Revoke API key?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Revoke{" "}
+            <strong>{revokeTarget?.label || keyId(revokeTarget ?? {})}</strong>?
+            Any integration using this key will immediately lose access. This
+            cannot be undone.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRevokeTarget(null)}>Cancel</Button>
+          <Button color="error" variant="contained" onClick={confirmRevoke}>
+            Revoke
+          </Button>
         </DialogActions>
       </Dialog>
     </Box>

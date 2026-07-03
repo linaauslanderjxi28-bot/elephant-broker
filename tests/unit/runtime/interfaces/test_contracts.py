@@ -47,7 +47,7 @@ ALL_INTERFACE_MODULES = [
 ]
 
 EXPECTED_METHODS = {
-    "IActorRegistry": ["resolve_actor", "register_actor", "get_authority_chain", "get_relationships"],
+    "IActorRegistry": ["resolve_actor", "register_actor", "get_authority_chain", "get_relationships", "merge_actors"],
     "IGoalManager": ["set_goal", "resolve_active_goals", "get_goal_hierarchy", "update_goal_status"],
     "IMemoryStoreFacade": ["store", "search", "promote_scope", "promote_class", "decay", "get_by_id", "update", "delete", "get_by_scope"],
     "IWorkingSetManager": ["build_working_set", "get_working_set"],

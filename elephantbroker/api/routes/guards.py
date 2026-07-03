@@ -7,6 +7,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from elephantbroker.api.auth.identity import get_identity
 from elephantbroker.api.deps import get_container, get_guard_engine
 from elephantbroker.runtime.guards.engine import GuardRulesNotLoadedError
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
@@ -251,6 +252,19 @@ async def update_approval(request_id: uuid.UUID, request: Request):
 
     gw_id = _gateway_id(request)
 
+    # gap-3-5: the audit record must capture WHO actually resolved the approval.
+    # Prefer the authenticated operator (dashboard SuperTokens session / API key),
+    # resolved server-side, over any client-supplied ``resolved_by`` in the body
+    # (which the dashboard never sends -> was recorded as null). Fall back to the
+    # body value for the HITL-middleware path, which forwards the human approver.
+    resolved_by = body.get("resolved_by")
+    try:
+        _ident = get_identity(request)
+        if _ident is not None and getattr(_ident, "actor_id", None):
+            resolved_by = str(_ident.actor_id)
+    except Exception:  # noqa: BLE001 — identity is best-effort here
+        pass
+
     # Resolve session_key from guard state for goal resolution
     session_key = ""
     session_goal_store = None
@@ -265,16 +279,16 @@ async def update_approval(request_id: uuid.UUID, request: Request):
         result = await engine._approvals.approve(
             request_id, agent_id,
             message=body.get("message"),
-            approved_by=body.get("resolved_by"),
+            approved_by=resolved_by,
             session_goal_store=session_goal_store,
             session_key=session_key,
         )
-        logger.info("Approval approved (gw=%s, request=%s, by=%s)", gw_id, request_id, body.get("resolved_by", "external"))
+        logger.info("Approval approved (gw=%s, request=%s, by=%s)", gw_id, request_id, resolved_by or "external")
     elif status == "rejected":
         result = await engine._approvals.reject(
             request_id, agent_id,
             reason=body.get("reason", ""),
-            rejected_by=body.get("resolved_by"),
+            rejected_by=resolved_by,
             session_goal_store=session_goal_store,
             session_key=session_key,
         )

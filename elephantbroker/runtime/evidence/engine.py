@@ -57,8 +57,114 @@ class EvidenceAndVerificationEngine(IEvidenceAndVerificationEngine):
         )
         return claim
 
-    async def attach_evidence(self, claim_id: uuid.UUID, evidence: EvidenceRef) -> ClaimRecord:
+    # ------------------------------------------------------------------
+    # Durable claim hydration (gap-4-4)
+    # ------------------------------------------------------------------
+    # Claims are persisted as ClaimDataPoints via add_data_points() (Cognee-first
+    # per CLAUDE.md), but the engine previously read them only from a
+    # process-local dict — so verify/reject/GET returned 404 after a restart
+    # while the dashboard still rendered the rows. Reads and mutations now fall
+    # back to reconstructing the claim (and its evidence) from the graph.
+
+    async def _hydrate_claim(self, claim_id: uuid.UUID) -> ClaimRecord | None:
+        """Return the claim from the in-memory cache, reconstructing it from the
+        graph when the cache is cold (e.g. after a restart)."""
         claim = self._claims.get(claim_id)
+        if claim is not None:
+            return claim
+        claim = await self._load_claim_from_graph(claim_id)
+        if claim is not None:
+            self._claims[claim_id] = claim  # warm the cache
+        return claim
+
+    async def _load_claim_from_graph(self, claim_id: uuid.UUID) -> ClaimRecord | None:
+        """Reconstruct a ClaimRecord (with its supporting evidence) from the
+        Cognee-persisted graph nodes/edges."""
+        try:
+            rows = await self._graph.query_cypher(
+                "MATCH (c:ClaimDataPoint {eb_id: $cid, gateway_id: $gw}) "
+                "OPTIONAL MATCH (e:EvidenceDataPoint)-[:SUPPORTS]->(c) "
+                "RETURN properties(c) AS claim, collect(properties(e)) AS evidence",
+                {"cid": str(claim_id), "gw": self._gateway_id},
+            )
+        except Exception as exc:
+            self._log.warning("Failed to load claim %s from graph: %s", claim_id, exc)
+            return None
+        if not isinstance(rows, list) or not rows:
+            return None
+        first = rows[0]
+        if not isinstance(first, dict):
+            return None
+        cp = first.get("claim")
+        if not isinstance(cp, dict) or not cp:
+            return None
+        evidence_props = first.get("evidence")
+        return self._claim_from_props(cp, evidence_props if isinstance(evidence_props, list) else [])
+
+    def _claim_from_props(self, cp: dict, evidence_props: list) -> ClaimRecord:
+        """Best-effort reconstruction of a ClaimRecord from Neo4j node props."""
+        def _uuid_or_none(v):
+            try:
+                return uuid.UUID(v) if v else None
+            except (ValueError, TypeError):
+                return None
+
+        evidence_refs: list[EvidenceRef] = []
+        for ep in evidence_props:
+            if not ep:
+                continue
+            try:
+                evidence_refs.append(EvidenceRef(
+                    id=_uuid_or_none(ep.get("eb_id")) or uuid.uuid4(),
+                    type=ep.get("evidence_type") or "unknown",
+                    ref_value=ep.get("ref_value") or "",
+                    content_hash=ep.get("content_hash"),
+                    created_by_actor_id=_uuid_or_none(ep.get("created_by_actor_id")),
+                    gateway_id=ep.get("gateway_id") or "",
+                ))
+            except Exception:  # noqa: BLE001 — skip a corrupt evidence row
+                continue
+
+        try:
+            status = ClaimStatus(cp.get("status", "unverified"))
+        except ValueError:
+            status = ClaimStatus.UNVERIFIED
+
+        return ClaimRecord(
+            id=_uuid_or_none(cp.get("eb_id")) or uuid.uuid4(),
+            # ClaimDataPoint stores the text under `claim_text`; tolerate `text`.
+            claim_text=cp.get("claim_text") or cp.get("text") or "(recovered claim)",
+            claim_type=cp.get("claim_type") or "",
+            status=status,
+            evidence_refs=evidence_refs,
+            procedure_id=_uuid_or_none(cp.get("procedure_id")),
+            step_id=_uuid_or_none(cp.get("step_id")),
+            goal_id=_uuid_or_none(cp.get("goal_id")),
+            actor_id=_uuid_or_none(cp.get("actor_id")),
+            # gap-4-9: first-class persisted field; None for legacy nodes written
+            # before the field existed (trace-ledger fallback covers those).
+            rejection_reason=cp.get("rejection_reason") or None,
+            gateway_id=cp.get("gateway_id") or "",
+        )
+
+    async def _recover_rejection_reason(self, claim_id: uuid.UUID) -> str | None:
+        """Recover a rejection reason from the trace ledger (gap-4-9 fallback).
+
+        Used for claims rejected before ``rejection_reason`` became a first-class
+        persisted field. Returns the most recent rejection reason, or ``None``.
+        """
+        try:
+            events = await self._trace.get_evidence_chain(claim_id)
+        except Exception:  # noqa: BLE001
+            return None
+        for ev in reversed(events or []):
+            payload = getattr(ev, "payload", None) or {}
+            if payload.get("action") == "rejected" and payload.get("reason"):
+                return payload["reason"]
+        return None
+
+    async def attach_evidence(self, claim_id: uuid.UUID, evidence: EvidenceRef) -> ClaimRecord:
+        claim = await self._hydrate_claim(claim_id)
         if claim is None:
             raise KeyError(f"Claim not found: {claim_id}")
 
@@ -67,7 +173,23 @@ class EvidenceAndVerificationEngine(IEvidenceAndVerificationEngine):
         await add_data_points([ev_dp])  # CREATE — evidence
         await cognee.add(evidence.ref_value, dataset_name=self._dataset_name)
 
+        # (evidence)-[:SUPPORTS]->(claim) — the evidence node backs the claim.
         await self._graph.add_relation(str(evidence.id), str(claim_id), "SUPPORTS")
+
+        # gap-4-1 / gap-4-4: when the evidence references a durable fact
+        # (chunk_ref → FactDataPoint.eb_id), also link (fact)-[:SUPPORTS]->(claim)
+        # so the dashboard Fact Detail "linked claims" panel — which reads
+        # (fact)-[:SUPPORTS]->(claim) — populates. add_relation MERGEs by eb_id
+        # and no-ops when the referenced node is not a stored FactDataPoint, so a
+        # non-fact chunk_ref cannot create a spurious edge.
+        if evidence.type == "chunk_ref" and evidence.ref_value:
+            try:
+                node = await self._graph.get_entity(evidence.ref_value, gateway_id=self._gateway_id)
+                labels = node.get("_labels") if isinstance(node, dict) else None
+                if labels and "FactDataPoint" in labels:
+                    await self._graph.add_relation(evidence.ref_value, str(claim_id), "SUPPORTS")
+            except Exception as exc:
+                self._log.debug("Fact→claim SUPPORTS link skipped for %s: %s", evidence.ref_value, exc)
 
         claim.evidence_refs.append(evidence)
         claim.updated_at = datetime.now(UTC)
@@ -95,7 +217,7 @@ class EvidenceAndVerificationEngine(IEvidenceAndVerificationEngine):
         return claim
 
     async def verify(self, claim_id: uuid.UUID) -> ClaimRecord:
-        claim = self._claims.get(claim_id)
+        claim = await self._hydrate_claim(claim_id)
         if claim is None:
             raise KeyError(f"Claim not found: {claim_id}")
 
@@ -168,18 +290,56 @@ class EvidenceAndVerificationEngine(IEvidenceAndVerificationEngine):
         )
 
     async def get_claim_verification(self, claim_id: uuid.UUID) -> VerificationState:
-        claim = self._claims.get(claim_id)
+        claim = await self._hydrate_claim(claim_id)
         if claim is None:
             raise KeyError(f"Claim not found: {claim_id}")
+        # gap-4-9: surface the rejection reason via the API. The durable
+        # first-class field wins; fall back to recovering it from the trace
+        # ledger only for claims rejected before the field existed.
+        rejection_reason = claim.rejection_reason
+        if not rejection_reason and claim.status == ClaimStatus.REJECTED:
+            rejection_reason = await self._recover_rejection_reason(claim_id)
         return VerificationState(
             claim_id=claim.id,
             status=claim.status,
             evidence_refs=list(claim.evidence_refs),
+            rejection_reason=rejection_reason,
         )
 
     async def get_claims_for_procedure(self, procedure_id: uuid.UUID) -> list[ClaimRecord]:
-        """Return all claims for a given procedure."""
-        results = [c for c in self._claims.values() if c.procedure_id == procedure_id]
+        """Return all claims for a given procedure.
+
+        Merges the in-memory cache with claims persisted in the graph so
+        procedure-completion checks survive a restart (gap-4-4). The in-memory
+        copy wins on id collision because _claim_from_props is a best-effort
+        reconstruction — it does not round-trip claim/evidence timestamps —
+        while the in-memory record is exact. (step_id and rejection_reason are
+        now durably persisted on ClaimDataPoint, so they survive either way.)
+        """
+        by_id: dict[uuid.UUID, ClaimRecord] = {}
+        try:
+            rows = await self._graph.query_cypher(
+                "MATCH (c:ClaimDataPoint {gateway_id: $gw}) WHERE c.procedure_id = $pid "
+                "OPTIONAL MATCH (e:EvidenceDataPoint)-[:SUPPORTS]->(c) "
+                "RETURN properties(c) AS claim, collect(properties(e)) AS evidence",
+                {"pid": str(procedure_id), "gw": self._gateway_id},
+            )
+            for row in (rows if isinstance(rows, list) else []):
+                if not isinstance(row, dict):
+                    continue
+                cp = row.get("claim")
+                if not isinstance(cp, dict) or not cp:
+                    continue
+                evidence_props = row.get("evidence")
+                rec = self._claim_from_props(cp, evidence_props if isinstance(evidence_props, list) else [])
+                by_id[rec.id] = rec
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning("get_claims_for_procedure(%s): graph load failed: %s", procedure_id, exc)
+        # In-memory copies override graph reconstructions.
+        for c in self._claims.values():
+            if c.procedure_id == procedure_id:
+                by_id[c.id] = c
+        results = list(by_id.values())
         self._log.debug("get_claims_for_procedure(%s): found %d claims", procedure_id, len(results))
         return results
 
@@ -189,12 +349,19 @@ class EvidenceAndVerificationEngine(IEvidenceAndVerificationEngine):
         if not reason or not reason.strip():
             raise ValueError("Rejection reason is required")
 
-        claim = self._claims.get(claim_id)
+        claim = await self._hydrate_claim(claim_id)
         if claim is None:
             raise KeyError(f"Claim {claim_id} not found")
 
         claim.status = ClaimStatus.REJECTED
         claim.updated_at = datetime.now(UTC)
+
+        # gap-4-9: rejection_reason is a first-class ClaimRecord/ClaimDataPoint
+        # field, so the add_data_points() below persists it durably and
+        # get_claim_verification can read it back after a restart. The trace
+        # event below remains a secondary audit record and the legacy fallback
+        # source for claims rejected before the field existed.
+        claim.rejection_reason = reason
 
         dp = ClaimDataPoint.from_schema(claim)
         await add_data_points([dp])
@@ -217,7 +384,9 @@ class EvidenceAndVerificationEngine(IEvidenceAndVerificationEngine):
         """Check if all ProofRequirements for a procedure are satisfied by verified claims."""
         from elephantbroker.schemas.guards import CompletionCheckResult
 
-        proc_claims = [c for c in self._claims.values() if c.procedure_id == procedure_id]
+        # gap-4-4: pull persisted claims from the graph too, so completion checks
+        # work after a restart, not only within the process that recorded them.
+        proc_claims = await self.get_claims_for_procedure(procedure_id)
 
         # Try to load procedure definition from graph
         proc_dict = None

@@ -94,6 +94,17 @@ class TestGuardConfig:
         config = GuardConfig()
         assert config.max_history_events == 50
 
+    def test_guard_config_custom_rule_refresh_seconds_default_15(self):
+        """FIX-4: custom_rule_refresh_seconds is a real config field."""
+        config = GuardConfig()
+        assert config.custom_rule_refresh_seconds == 15
+
+    def test_guard_config_custom_rule_refresh_seconds_ge_1(self):
+        """FIX-4: the refresh interval must be at least 1 second."""
+        assert GuardConfig(custom_rule_refresh_seconds=1).custom_rule_refresh_seconds == 1
+        with pytest.raises(ValueError):
+            GuardConfig(custom_rule_refresh_seconds=0)
+
 
 class TestHitlConfig:
     def test_hitl_config_defaults_disabled(self):

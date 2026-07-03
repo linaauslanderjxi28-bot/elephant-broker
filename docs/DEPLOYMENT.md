@@ -413,6 +413,32 @@ curl http://localhost:8421/health
 journalctl -u elephantbroker -f       # follow runtime logs
 ```
 
+### 8. Optional: enable Neo4j fact indexes
+
+Five `FactDataPoint` property indexes (`eb_fact_gateway_id`, `eb_fact_created_at`,
+`eb_fact_confidence`, `eb_fact_scope`, `eb_fact_memory_class`) speed up the
+dashboard memory browser. They are **opt-in and default OFF** — nothing creates
+them at bootstrap or startup. Enable them per index via the admin API (also
+available through `ebrun` and the dashboard), gated behind the `manage_indexes`
+authority action (level 90 by default — config-class, like `create_org`):
+
+```bash
+# Live status — Neo4j SHOW INDEXES is the source of truth (no config flag)
+curl -H "X-EB-API-Key: $KEY" http://localhost:8420/admin/indexes
+
+# Enable / drop / rebuild one index
+curl -X POST   -H "X-EB-API-Key: $KEY" http://localhost:8420/admin/indexes/eb_fact_gateway_id
+curl -X DELETE -H "X-EB-API-Key: $KEY" http://localhost:8420/admin/indexes/eb_fact_gateway_id
+curl -X POST   -H "X-EB-API-Key: $KEY" http://localhost:8420/admin/indexes/eb_fact_gateway_id/rebuild
+```
+
+What enabling costs: each enabled index adds per-write maintenance inside Neo4j
+on every fact create/update (write amplification), plus a one-time background
+back-fill after creation (`state: POPULATING` until `ONLINE`). **Multi-tenant
+note:** Neo4j indexes are database-global — one index covers the FactDataPoint
+nodes of ALL gateways sharing this Neo4j database, so enabling/dropping affects
+every tenant on the host.
+
 ## OpenClaw VM Setup
 
 ### 1. Install Plugins

@@ -21,6 +21,7 @@ import Session from "supertokens-auth-react/recipe/session";
 import EmailPassword from "supertokens-auth-react/recipe/emailpassword";
 
 import { apiClient, HttpError } from "./apiClient";
+import { errorMessage } from "../lib/errors";
 
 /** Shape returned by `GET /auth/identity`. */
 export interface EbIdentity {
@@ -32,6 +33,57 @@ export interface EbIdentity {
 }
 
 let _identityCache: EbIdentity | null = null;
+
+/**
+ * Canonical localStorage key for the operator's default landing page
+ * (mirrors PREF_KEYS.defaultPage in pages/settings/preferences.tsx — kept as a
+ * literal here to avoid a provider → page import). The Preferences page writes
+ * it; login/register read it so the "default page" preference actually takes
+ * effect (settings-3).
+ */
+const DEFAULT_PAGE_KEY = "eb:pref:default_page";
+
+/** Resolve the post-auth landing page from the saved preference ("/" fallback). */
+function resolveDefaultPage(): string {
+  if (typeof window === "undefined" || !window.localStorage) return "/";
+  try {
+    const v = window.localStorage.getItem(DEFAULT_PAGE_KEY);
+    if (v && v.startsWith("/")) return v;
+  } catch {
+    /* ignore storage failures */
+  }
+  return "/";
+}
+
+/**
+ * Turn a SuperTokens FIELD_ERROR response into a clean, user-facing message.
+ * Strips the raw field-id prefix (e.g. "password: too weak" → "too weak",
+ * auth-6) and joins multiple field errors.
+ */
+function fieldErrorMessage(
+  formFields: Array<{ id: string; error: string }> | undefined,
+): string {
+  const msg = (formFields ?? [])
+    .map((f) => f.error)
+    .filter(Boolean)
+    .join("; ");
+  return msg || "Please check the highlighted fields.";
+}
+
+/** Friendly text for a non-OK SuperTokens auth status (never a raw enum). */
+function statusMessage(status: string, fallback: string): string {
+  switch (status) {
+    case "WRONG_CREDENTIALS_ERROR":
+      return "Incorrect email or password";
+    case "SIGN_IN_NOT_ALLOWED":
+    case "SIGN_UP_NOT_ALLOWED":
+      return "Sign-in is not allowed for this account. Contact an administrator.";
+    case "EMAIL_ALREADY_EXISTS_ERROR":
+      return "An account with this email already exists.";
+    default:
+      return fallback;
+  }
+}
 
 /** Fetch (and memoise) the current actor's EB identity. */
 async function fetchIdentity(force = false): Promise<EbIdentity | null> {
@@ -52,6 +104,9 @@ function clearIdentityCache(): void {
 
 export const authProvider: AuthProvider = {
   login: async ({ email, password }) => {
+    // Refine renders `error.name` as the notification TITLE and `error.message`
+    // as its body — so the title is a friendly headline (never an internal name
+    // like "LoginError", auth-4) and the body is a clean message.
     try {
       const response = await EmailPassword.signIn({
         formFields: [
@@ -62,37 +117,21 @@ export const authProvider: AuthProvider = {
 
       if (response.status === "OK") {
         clearIdentityCache();
-        return { success: true, redirectTo: "/" };
+        return { success: true, redirectTo: resolveDefaultPage() };
       }
 
-      if (response.status === "FIELD_ERROR") {
-        const message = response.formFields
-          .map((f) => `${f.id}: ${f.error}`)
-          .join("; ");
-        return {
-          success: false,
-          error: { name: "LoginError", message: message || "Invalid input" },
-        };
-      }
-
-      // WRONG_CREDENTIALS_ERROR / SIGN_IN_NOT_ALLOWED / etc.
+      const message =
+        response.status === "FIELD_ERROR"
+          ? fieldErrorMessage(response.formFields)
+          : statusMessage(response.status, "Sign-in failed. Please try again.");
       return {
         success: false,
-        error: {
-          name: "LoginError",
-          message:
-            response.status === "WRONG_CREDENTIALS_ERROR"
-              ? "Incorrect email or password"
-              : String(response.status),
-        },
+        error: { name: "Sign-in failed", message },
       };
     } catch (err) {
       return {
         success: false,
-        error: {
-          name: "LoginError",
-          message: err instanceof Error ? err.message : "Login failed",
-        },
+        error: { name: "Sign-in failed", message: errorMessage(err) },
       };
     }
   },
@@ -107,28 +146,20 @@ export const authProvider: AuthProvider = {
       });
       if (response.status === "OK") {
         clearIdentityCache();
-        return { success: true, redirectTo: "/" };
+        return { success: true, redirectTo: resolveDefaultPage() };
       }
-      if (response.status === "FIELD_ERROR") {
-        const message = response.formFields
-          .map((f) => `${f.id}: ${f.error}`)
-          .join("; ");
-        return {
-          success: false,
-          error: { name: "RegisterError", message: message || "Invalid input" },
-        };
-      }
+      const message =
+        response.status === "FIELD_ERROR"
+          ? fieldErrorMessage(response.formFields)
+          : statusMessage(response.status, "Sign-up failed. Please try again.");
       return {
         success: false,
-        error: { name: "RegisterError", message: String(response.status) },
+        error: { name: "Sign-up failed", message },
       };
     } catch (err) {
       return {
         success: false,
-        error: {
-          name: "RegisterError",
-          message: err instanceof Error ? err.message : "Registration failed",
-        },
+        error: { name: "Sign-up failed", message: errorMessage(err) },
       };
     }
   },

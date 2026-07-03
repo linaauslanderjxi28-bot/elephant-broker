@@ -168,6 +168,110 @@ class OtelTraceQueryClient:
                     pass
             return []
 
+    async def get_activity_stats(
+        self,
+        gateway_id: str,
+        since: datetime,
+    ) -> dict | None:
+        """Gateway-scoped memory-activity aggregates + hourly creation series.
+
+        Reads the durable ``otel_logs`` store (populated by the OTEL Collector's
+        clickhouse exporter from ``TraceLedger`` LogRecords) so dashboard
+        activity over wide ranges (6h/24h/7d) reflects real history instead of
+        only the bounded in-memory trace buffer (memory-stats-1).
+
+        Mirrors the in-memory ledger aggregation the dashboard falls back to:
+
+        * ``extractions`` — sum of ``payload.facts_count`` (default 1) over
+          ``fact_extracted`` events.
+        * ``dedups`` — count of ``dedup_triggered`` events.
+        * ``supersessions`` — count of ``fact_superseded`` events.
+        * ``buckets`` — hourly ``fact_extracted`` totals (UTC) for the
+          sparkline, oldest→newest to match the chronological x-axis.
+
+        Returns ``None`` when the durable store is unavailable (not configured,
+        connection lost, or query error) so the caller falls back to the
+        in-memory ledger with an honest source label. Never raises.
+        """
+        if not self._client:
+            await self._emit_init_failure_event(gateway_id)
+            return None
+
+        cutoff = since.isoformat()
+        # ``facts_count`` defaults to 1 when absent OR 0 — identical semantics to
+        # the ledger path's ``int(payload.get("facts_count", 1) or 1)``.
+        _facts_count = "if(JSONExtractInt(Body, 'payload', 'facts_count') > 0, JSONExtractInt(Body, 'payload', 'facts_count'), 1)"
+
+        try:
+            agg = self._client.query(
+                f"""
+                SELECT
+                    sumIf({_facts_count}, LogAttributes['event_type'] = 'fact_extracted') AS extractions,
+                    countIf(LogAttributes['event_type'] = 'dedup_triggered') AS dedups,
+                    countIf(LogAttributes['event_type'] = 'fact_superseded') AS supersessions
+                FROM {self._table}
+                WHERE LogAttributes['gateway_id'] = %(gw)s
+                  AND Timestamp >= %(cutoff)s
+                  AND LogAttributes['event_type'] IN ('fact_extracted', 'dedup_triggered', 'fact_superseded')
+                """,
+                parameters={"gw": gateway_id, "cutoff": cutoff},
+            )
+            extractions = dedups = supersessions = 0
+            if agg.result_rows:
+                row = agg.result_rows[0]
+                extractions = int(row[0] or 0)
+                dedups = int(row[1] or 0)
+                supersessions = int(row[2] or 0)
+
+            bres = self._client.query(
+                f"""
+                SELECT toStartOfHour(Timestamp, 'UTC') AS bucket, sum({_facts_count}) AS cnt
+                FROM {self._table}
+                WHERE LogAttributes['gateway_id'] = %(gw)s
+                  AND Timestamp >= %(cutoff)s
+                  AND LogAttributes['event_type'] = 'fact_extracted'
+                GROUP BY bucket
+                ORDER BY bucket ASC
+                """,
+                parameters={"gw": gateway_id, "cutoff": cutoff},
+            )
+            buckets: list[dict] = []
+            for r in bres.result_rows:
+                ts = r[0]
+                if ts is None:
+                    continue
+                if isinstance(ts, datetime) and ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                buckets.append({"timestamp": ts, "count": int(r[1] or 0)})
+
+            return {
+                "extractions": extractions,
+                "dedups": dedups,
+                "supersessions": supersessions,
+                "buckets": buckets,
+            }
+        except Exception as exc:
+            logger.warning("ClickHouse activity stats query failed", exc_info=True)
+            if self._metrics is not None:
+                try:
+                    self._metrics.inc_degraded_op(component=_COMPONENT, operation="activity_stats_query")
+                except Exception:
+                    pass
+            if self._trace is not None:
+                try:
+                    await self._trace.append_event(TraceEvent(
+                        event_type=TraceEventType.DEGRADED_OPERATION,
+                        payload={
+                            "component": _COMPONENT,
+                            "operation": "activity_stats_query",
+                            "reason": f"query_failed: {str(exc)[:120]}",
+                            "gateway_id": gateway_id,
+                        },
+                    ))
+                except Exception:
+                    pass
+            return None
+
     def close(self) -> None:
         """Close ClickHouse connection."""
         if self._client:

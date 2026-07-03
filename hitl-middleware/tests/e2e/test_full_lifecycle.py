@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
+from hitl_middleware.security import compute_hmac_token
 from tests.e2e.conftest import make_approval_payload, make_notify_payload
 
 
@@ -62,11 +64,20 @@ async def test_approval_lifecycle(e2e_client, e2e_app):
         assert resp.json()["request_id"] == request_id
 
     # Step 2: approve callback -> runtime PATCH
+    # The router enforces HMAC validation, so compute a real signature over
+    # (request_id, created_at) using the configured callback secret.
+    created_at = datetime.now(UTC)
+    sig = compute_hmac_token(request_id, created_at, e2e_app.state.config.callback_secret)
     with patch("httpx.AsyncClient.patch", new_callable=AsyncMock, return_value=mock_runtime_resp) as mock_patch:
         resp = await e2e_client.post(
             "/callbacks/approve",
-            json={"request_id": request_id, "message": "Ship it", "approved_by": "lead"},
-            headers={"X-HITL-Signature": "e2e-sig"},
+            json={
+                "request_id": request_id,
+                "created_at": created_at.isoformat(),
+                "message": "Ship it",
+                "approved_by": "lead",
+            },
+            headers={"X-HITL-Signature": sig},
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "approved"
@@ -100,11 +111,20 @@ async def test_rejection_lifecycle(e2e_client, e2e_app):
         assert resp.status_code == 200
 
     # Step 2: reject callback -> runtime PATCH
+    # The router enforces HMAC validation, so compute a real signature over
+    # (request_id, created_at) using the configured callback secret.
+    created_at = datetime.now(UTC)
+    sig = compute_hmac_token(request_id, created_at, e2e_app.state.config.callback_secret)
     with patch("httpx.AsyncClient.patch", new_callable=AsyncMock, return_value=mock_runtime_resp) as mock_patch:
         resp = await e2e_client.post(
             "/callbacks/reject",
-            json={"request_id": request_id, "reason": "Policy violation", "rejected_by": "security"},
-            headers={"X-HITL-Signature": "e2e-sig"},
+            json={
+                "request_id": request_id,
+                "created_at": created_at.isoformat(),
+                "reason": "Policy violation",
+                "rejected_by": "security",
+            },
+            headers={"X-HITL-Signature": sig},
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "rejected"

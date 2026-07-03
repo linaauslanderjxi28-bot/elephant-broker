@@ -20,14 +20,26 @@ class GuardCheckScenario(Scenario):
         await self.sim.simulate_tool_memory_store(
             "User wants to execute shell commands on the server", "technical")
 
-        r = await self.sim.client.get("/guards/status", params={
+        session_id = str(self.sim.session_id)
+
+        # Guard state is keyed by session_id and must be bootstrapped before the
+        # read endpoints return 200. /sessions/start does NOT load guard rules;
+        # POST /guards/refresh/{session_id} does (otherwise 404 SESSION_NOT_FOUND).
+        refresh = await self.sim.client.post(f"/guards/refresh/{session_id}", json={
+            "profile_name": "coding",
             "session_key": self.sim.session_key,
-            "session_id": str(self.sim.session_id),
         })
+        self.step("guard_session_bootstrapped", passed=refresh.status_code == 200,
+                  message=f"refresh -> {refresh.status_code}")
+
+        # Real route is GET /guards/active/{session_id} (session_id is a PATH
+        # param). The old GET /guards/status never existed and correctly 404s.
+        r = await self.sim.client.get(f"/guards/active/{session_id}")
         self.step("guard_status_accessible", passed=r.status_code == 200)
 
-        r = await self.sim.client.get("/guards/list", params={
-            "session_key": self.sim.session_key,
-        })
+        # Real route is GET /guards/rules/{session_id}; it returns an object
+        # {rules_count, rules:[...]}, NOT a bare list — read ['rules_count'].
+        r = await self.sim.client.get(f"/guards/rules/{session_id}")
+        rules_count = r.json().get("rules_count") if r.status_code == 200 else None
         self.step("constraints_listed", passed=r.status_code == 200,
-                  message=f"Constraints: {len(r.json()) if r.status_code == 200 else 'N/A'}")
+                  message=f"Rules loaded: {rules_count if rules_count is not None else 'N/A'}")

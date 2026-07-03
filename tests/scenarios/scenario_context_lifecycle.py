@@ -27,7 +27,10 @@ class ContextLifecycleScenario(Scenario):
                 user_msg=f"Turn {i}: explain the architecture of component {i}",
                 assistant_msg=f"Component {i} uses a layered architecture with...",
                 token_budget=4000)
-            self.step(f"turn_{i}", passed="assembly" in result,
+            # simulate_full_lifecycle_turn returns the /context/assemble result,
+            # which carries total_tokens/messages (not an "assembly" key).
+            self.step(f"turn_{i}", passed=isinstance(result, dict)
+                      and ("total_tokens" in result or "messages" in result),
                       message=f"Turn {i} completed")
 
         assembly = await self.sim.simulate_context_assemble(token_budget=4000)

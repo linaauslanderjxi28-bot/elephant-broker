@@ -318,9 +318,10 @@ class TestProcedureEngineMetrics:
     async def test_activate_trace_carries_gateway_session_identity(self):
         """TODO-8-R1-004 / TODO-8-R1-008 — activate() trace stamps gateway+session.
 
-        PROCEDURE_STEP_PASSED is reused for the activation event (no
-        PROCEDURE_ACTIVATED enum value exists; B2.5 wired
-        inc_procedure_activated() beside it for distinct counting). The
+        activate() now emits the dedicated PROCEDURE_ACTIVATED event type
+        (Phase 11 — previously PROCEDURE_STEP_PASSED was reused with
+        payload.action == "activate"; B2.5 wired inc_procedure_activated()
+        beside it for distinct counting). The
         identity fields (gateway_id, session_key, session_id) must reach
         the trace so /trace/session timeline filters do not silently drop
         activation events. Pre-fix, activate() emitted the trace without
@@ -338,7 +339,7 @@ class TestProcedureEngineMetrics:
         events = await engine._trace.query_trace(TraceQuery())
         activate_events = [
             e for e in events
-            if e.event_type == TraceEventType.PROCEDURE_STEP_PASSED
+            if e.event_type == TraceEventType.PROCEDURE_ACTIVATED
             and e.payload.get("action") == "activate"
         ]
         assert len(activate_events) == 1

@@ -3,12 +3,28 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
+from hitl_middleware.security import compute_hmac_token
 from tests.integration.conftest import make_approval_payload
+
+
+def _signed_callback(request_id: str, secret: str, **fields) -> tuple[dict, dict]:
+    """Build a callback JSON body (with created_at) and its valid HMAC headers.
+
+    The router validates the X-HITL-Signature against
+    HMAC-SHA256(secret, "{request_id}:{created_at_unix}"), so the signature must
+    be computed over the exact created_at that is sent in the body.
+    """
+    created_at = datetime.now(UTC)
+    body: dict = {"request_id": request_id, "created_at": created_at.isoformat()}
+    body.update(fields)
+    sig = compute_hmac_token(request_id, created_at, secret)
+    return body, {"X-HITL-Signature": sig}
 
 
 def _patch_webhook_post(app, *, return_value=None, side_effect=None):
@@ -78,13 +94,12 @@ async def test_approval_approve_callback_flow(client, app, config):
         assert resp.status_code == 200
 
     # Step 2: approve callback -- mock the runtime PATCH
+    callback_body, headers = _signed_callback(
+        request_id, config.callback_secret, message="Looks good", approved_by="alice"
+    )
     mock_runtime_resp = httpx.Response(200, json={"status": "approved"})
     with patch("httpx.AsyncClient.patch", new_callable=AsyncMock, return_value=mock_runtime_resp):
-        resp = await client.post(
-            "/callbacks/approve",
-            json={"request_id": request_id, "message": "Looks good", "approved_by": "alice"},
-            headers={"X-HITL-Signature": "valid-sig"},
-        )
+        resp = await client.post("/callbacks/approve", json=callback_body, headers=headers)
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "approved"
@@ -107,13 +122,12 @@ async def test_approval_reject_callback_flow(client, app, config):
         assert resp.status_code == 200
 
     # Step 2: reject callback
+    callback_body, headers = _signed_callback(
+        request_id, config.callback_secret, reason="Too risky", rejected_by="bob"
+    )
     mock_runtime_resp = httpx.Response(200, json={"status": "rejected"})
     with patch("httpx.AsyncClient.patch", new_callable=AsyncMock, return_value=mock_runtime_resp):
-        resp = await client.post(
-            "/callbacks/reject",
-            json={"request_id": request_id, "reason": "Too risky", "rejected_by": "bob"},
-            headers={"X-HITL-Signature": "valid-sig"},
-        )
+        resp = await client.post("/callbacks/reject", json=callback_body, headers=headers)
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "rejected"
@@ -181,7 +195,7 @@ async def test_approval_with_gateway_id(client, app):
 # ---------------------------------------------------------------------------
 
 
-async def test_approval_concurrent_approve_reject(client, app):
+async def test_approval_concurrent_approve_reject(client, app, config):
     """Approve and reject callbacks sent concurrently -- both return a result."""
     request_id = str(uuid.uuid4())
 
@@ -191,17 +205,19 @@ async def test_approval_concurrent_approve_reject(client, app):
         await client.post("/intents/approval", json=make_approval_payload(request_id=request_id))
 
     # Fire approve and reject concurrently
+    approve_body, approve_headers = _signed_callback(
+        request_id, config.callback_secret, message="Yes", approved_by="alice"
+    )
+    reject_body, reject_headers = _signed_callback(
+        request_id, config.callback_secret, reason="No", rejected_by="bob"
+    )
     mock_runtime_resp = httpx.Response(200, json={"status": "ok"})
     with patch("httpx.AsyncClient.patch", new_callable=AsyncMock, return_value=mock_runtime_resp):
         approve_task = client.post(
-            "/callbacks/approve",
-            json={"request_id": request_id, "message": "Yes", "approved_by": "alice"},
-            headers={"X-HITL-Signature": "sig-a"},
+            "/callbacks/approve", json=approve_body, headers=approve_headers
         )
         reject_task = client.post(
-            "/callbacks/reject",
-            json={"request_id": request_id, "reason": "No", "rejected_by": "bob"},
-            headers={"X-HITL-Signature": "sig-b"},
+            "/callbacks/reject", json=reject_body, headers=reject_headers
         )
         approve_resp, reject_resp = await asyncio.gather(approve_task, reject_task)
 

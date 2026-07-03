@@ -18,6 +18,7 @@
  */
 
 import { getStoredGateway, setStoredGateway } from "./gatewayKey";
+import { errorMessage } from "../lib/errors";
 
 // --- Base URL resolution --------------------------------------------------
 
@@ -136,13 +137,19 @@ export async function request<T = unknown>(
   }
 
   if (!response.ok) {
-    const detail =
-      (parsed &&
-        typeof parsed === "object" &&
-        ((parsed as any).detail || (parsed as any).error || (parsed as any).message)) ||
-      response.statusText ||
-      `Request failed (${response.status})`;
-    throw new HttpError(String(detail), response.status, parsed);
+    // Derive a human message via the single error normalizer (lib/errors), which
+    // understands FastAPI's `{ detail }` as BOTH a string and a 422 validation
+    // array — so we never stringify an object into "[object Object]" (RC-4 /
+    // memory-browse-7). The FULL parsed body is still attached on `.body` so
+    // `normalizeApiError` can extract field-level errors at the call site.
+    const hasBody =
+      parsed !== undefined &&
+      parsed !== null &&
+      !(typeof parsed === "string" && parsed.trim() === "");
+    const message = hasBody
+      ? errorMessage(parsed)
+      : response.statusText || `Request failed (${response.status})`;
+    throw new HttpError(message, response.status, parsed);
   }
 
   return parsed as T;

@@ -344,6 +344,7 @@ guards:
   llm_escalation_max_tokens: 500        # max tokens for the (optional) Layer-5 LLM escalation call
   llm_escalation_timeout_seconds: 10.0  # timeout for the LLM escalation call
   max_pattern_length: 500               # safety cap on user-supplied rule patterns (regex DoS prevention)
+  custom_rule_refresh_seconds: 15       # max staleness before loaded sessions re-probe the custom-rule store version for operator rule changes; same-process dashboard writes enforce on the next guard check regardless
   # strictness_presets: see GuardsConfig.strictness_presets in elephantbroker/schemas/config.py
   # (search for `strictness_presets: dict[str, StrictnessPreset]`) — 3 builtin presets
   # (loose / medium / strict) with 5 fields each. Override individual preset fields here

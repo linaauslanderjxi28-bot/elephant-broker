@@ -113,6 +113,26 @@ class TestIdentityStamping:
         assert body["method"] == "actor_header"
         assert body["authority_level"] == 60
 
+    async def test_inactive_actor_resolves_to_zero_authority(self):
+        """A soft-deactivated actor (merged duplicate / offboarded operator)
+        never authorizes: its effective authority degrades to 0 so every
+        ``require_authority()`` threshold rejects it, regardless of the stored
+        level."""
+        import uuid
+        from elephantbroker.schemas.actor import ActorRef, ActorType
+
+        actor = ActorRef(
+            type=ActorType.HUMAN_COORDINATOR, display_name="gone",
+            authority_level=90, active=False,
+        )
+        reg = AsyncMock()
+        reg.resolve_actor = AsyncMock(return_value=actor)
+        app = _make_app(_container(actor_registry=reg))
+        resp = await _get(app, "/admin/ping", {"X-EB-Actor-Id": str(uuid.uuid4())})
+        body = resp.json()
+        assert body["method"] == "actor_header"
+        assert body["authority_level"] == 0
+
 
 class TestRouteClassEnforcement:
     async def test_disabled_never_blocks(self):

@@ -220,6 +220,80 @@ class TestAuthorityEnforcement:
 
 
 # ---------------------------------------------------------------------------
+# Actor listing — GET /admin/actors + GET /admin/teams/{id}/members
+# (soft-deactivated actors hidden by default, include_inactive opt-in)
+# ---------------------------------------------------------------------------
+
+_ACTIVE_CLAUSE = "(a.active = true OR a.active IS NULL)"
+
+
+class TestListActorsActiveFilter:
+    async def test_list_actors_hides_inactive_by_default(
+        self, client, container, mock_graph
+    ):
+        _enable_bootstrap(container)
+        mock_graph.query_cypher.return_value = []
+        r = await client.get("/admin/actors", headers=_admin_headers())
+        assert r.status_code == 200
+        cypher = mock_graph.query_cypher.call_args[0][0]
+        assert _ACTIVE_CLAUSE in cypher
+
+    async def test_list_actors_include_inactive_returns_everything(
+        self, client, container, mock_graph
+    ):
+        _enable_bootstrap(container)
+        mock_graph.query_cypher.return_value = [
+            {"props": {"eb_id": "a1", "display_name": "Dead", "actor_type": "worker_agent",
+                       "authority_level": 0, "active": False}},
+        ]
+        r = await client.get(
+            "/admin/actors?include_inactive=true", headers=_admin_headers()
+        )
+        assert r.status_code == 200
+        assert len(r.json()) == 1
+        cypher = mock_graph.query_cypher.call_args[0][0]
+        assert _ACTIVE_CLAUSE not in cypher
+
+    async def test_list_actors_org_filter_keeps_active_default(
+        self, client, container, mock_graph
+    ):
+        _enable_bootstrap(container)
+        mock_graph.query_cypher.return_value = []
+        r = await client.get(
+            "/admin/actors?org_id=o1", headers=_admin_headers()
+        )
+        assert r.status_code == 200
+        cypher = mock_graph.query_cypher.call_args[0][0]
+        assert "a.org_id = $org" in cypher
+        assert _ACTIVE_CLAUSE in cypher
+
+    async def test_list_team_members_hides_inactive_by_default(
+        self, client, container, mock_graph
+    ):
+        _enable_bootstrap(container)
+        mock_graph.query_cypher.return_value = []
+        r = await client.get(
+            f"/admin/teams/{uuid.uuid4()}/members", headers=_admin_headers()
+        )
+        assert r.status_code == 200
+        cypher = mock_graph.query_cypher.call_args[0][0]
+        assert _ACTIVE_CLAUSE in cypher
+
+    async def test_list_team_members_include_inactive_returns_everything(
+        self, client, container, mock_graph
+    ):
+        _enable_bootstrap(container)
+        mock_graph.query_cypher.return_value = []
+        r = await client.get(
+            f"/admin/teams/{uuid.uuid4()}/members?include_inactive=true",
+            headers=_admin_headers(),
+        )
+        assert r.status_code == 200
+        cypher = mock_graph.query_cypher.call_args[0][0]
+        assert _ACTIVE_CLAUSE not in cypher
+
+
+# ---------------------------------------------------------------------------
 # Actor handle resolution — GET /admin/actors/resolve (TF-08-007)
 # ---------------------------------------------------------------------------
 
@@ -376,3 +450,149 @@ class TestTeamMemberDualWrite:
         dp = recorded[0]
         assert team_id not in dp.team_ids
         assert other_team in dp.team_ids
+
+
+# ---------------------------------------------------------------------------
+# Fact indexes (Fix 5) — /admin/indexes: opt-in, per-index, authority-gated
+# ---------------------------------------------------------------------------
+
+def _grant_manage_indexes(container, authority_level: int = 90):
+    """Authorize the test admin for the manage_indexes action (level 90)."""
+    _disable_bootstrap(container)
+    admin = _make_admin_actor(authority_level=authority_level)
+    container.actor_registry.resolve_actor = AsyncMock(return_value=admin)
+    container.authority_store.get_rule = AsyncMock(
+        return_value={"min_authority_level": 90},
+    )
+
+
+class TestFactIndexAuthority:
+    def test_manage_indexes_default_rule_is_config_class(self):
+        """Indexes are database-global config — level 90, same as create_org."""
+        from elephantbroker.runtime.profiles.authority_store import AUTHORITY_DEFAULTS
+        assert AUTHORITY_DEFAULTS["manage_indexes"] == {"min_authority_level": 90}
+
+    def test_manage_indexes_not_a_bootstrap_action(self):
+        """Bootstrap mode must NOT bypass the index-management gate."""
+        from elephantbroker.api.routes._authority import BOOTSTRAP_ACTIONS
+        assert "manage_indexes" not in BOOTSTRAP_ACTIONS
+
+    async def test_list_indexes_without_actor_401(self, client, container):
+        _disable_bootstrap(container)
+        r = await client.get("/admin/indexes")
+        assert r.status_code == 401
+
+    async def test_create_index_without_actor_401(self, client, container):
+        _disable_bootstrap(container)
+        r = await client.post("/admin/indexes/eb_fact_gateway_id")
+        assert r.status_code == 401
+
+    async def test_low_authority_actor_denied_403(self, client, container):
+        _disable_bootstrap(container)
+        low_actor = _make_admin_actor(authority_level=70)
+        container.actor_registry.resolve_actor = AsyncMock(return_value=low_actor)
+        container.authority_store.get_rule = AsyncMock(
+            return_value={"min_authority_level": 90},
+        )
+        for method, path in (
+            ("GET", "/admin/indexes"),
+            ("POST", "/admin/indexes/eb_fact_gateway_id"),
+            ("DELETE", "/admin/indexes/eb_fact_gateway_id"),
+            ("POST", "/admin/indexes/eb_fact_gateway_id/rebuild"),
+        ):
+            r = await client.request(method, path, headers=_admin_headers())
+            assert r.status_code == 403, f"{method} {path} should 403"
+
+
+class TestFactIndexRoutes:
+    async def test_list_indexes_returns_catalog_with_live_status(
+        self, client, container, mock_graph,
+    ):
+        _grant_manage_indexes(container)
+        mock_graph.query_cypher.return_value = [
+            {"name": "eb_fact_gateway_id", "state": "ONLINE", "populationPercent": 100.0},
+        ]
+        r = await client.get("/admin/indexes", headers=_admin_headers())
+        assert r.status_code == 200
+        indexes = r.json()["indexes"]
+        assert len(indexes) == 5  # full catalog, existing or not
+        by_name = {i["name"]: i for i in indexes}
+        assert by_name["eb_fact_gateway_id"]["exists"] is True
+        assert by_name["eb_fact_gateway_id"]["state"] == "ONLINE"
+        assert by_name["eb_fact_gateway_id"]["population_percent"] == 100.0
+        assert by_name["eb_fact_created_at"]["exists"] is False
+        assert by_name["eb_fact_created_at"]["state"] is None
+
+    async def test_create_index_happy_path(self, client, container, mock_graph):
+        _grant_manage_indexes(container)
+        r = await client.post(
+            "/admin/indexes/eb_fact_created_at", headers=_admin_headers(),
+        )
+        assert r.status_code == 200
+        assert r.json() == {"index": "eb_fact_created_at", "status": "created"}
+        mock_graph.query_cypher.assert_awaited_once_with(
+            "CREATE INDEX eb_fact_created_at IF NOT EXISTS "
+            "FOR (f:FactDataPoint) ON (f.created_at)"
+        )
+
+    async def test_drop_index_happy_path(self, client, container, mock_graph):
+        _grant_manage_indexes(container)
+        r = await client.delete(
+            "/admin/indexes/eb_fact_scope", headers=_admin_headers(),
+        )
+        assert r.status_code == 200
+        assert r.json() == {"index": "eb_fact_scope", "status": "dropped"}
+        mock_graph.query_cypher.assert_awaited_once_with(
+            "DROP INDEX eb_fact_scope IF EXISTS"
+        )
+
+    async def test_rebuild_index_drops_then_creates(self, client, container, mock_graph):
+        _grant_manage_indexes(container)
+        r = await client.post(
+            "/admin/indexes/eb_fact_confidence/rebuild", headers=_admin_headers(),
+        )
+        assert r.status_code == 200
+        assert r.json() == {"index": "eb_fact_confidence", "status": "rebuilt"}
+        issued = [c.args[0] for c in mock_graph.query_cypher.await_args_list]
+        assert issued == [
+            "DROP INDEX eb_fact_confidence IF EXISTS",
+            "CREATE INDEX eb_fact_confidence IF NOT EXISTS "
+            "FOR (f:FactDataPoint) ON (f.confidence)",
+        ]
+
+    async def test_unknown_index_name_404(self, client, container, mock_graph):
+        _grant_manage_indexes(container)
+        for method, path in (
+            ("POST", "/admin/indexes/eb_fact_bogus"),
+            ("DELETE", "/admin/indexes/eb_fact_bogus"),
+            ("POST", "/admin/indexes/eb_fact_bogus/rebuild"),
+        ):
+            r = await client.request(method, path, headers=_admin_headers())
+            assert r.status_code == 404, f"{method} {path} should 404"
+            assert "Unknown fact index" in r.json()["detail"]
+        mock_graph.query_cypher.assert_not_awaited()  # whitelist blocks before DDL
+
+    async def test_memory_store_unavailable_503(self, client, container):
+        """Context-only deployments have no memory facade — clean 503."""
+        _grant_manage_indexes(container)
+        container.memory_store = None
+        r = await client.get("/admin/indexes", headers=_admin_headers())
+        assert r.status_code == 503
+
+
+class TestFactIndexesOptInInvariant:
+    def test_container_and_lifespan_never_create_indexes(self):
+        """FEATURE INVARIANT: indexes are opt-in, DEFAULT OFF. The DI
+        container and the FastAPI app/lifespan must not reference the
+        fact-index creation helpers — creation happens ONLY through the
+        explicit /admin/indexes surface."""
+        import inspect
+
+        from elephantbroker.api import app as app_module
+        from elephantbroker.runtime import container as container_module
+
+        for mod in (container_module, app_module):
+            src = inspect.getsource(mod)
+            assert "ensure_fact_index" not in src, (
+                f"{mod.__name__} must not create fact indexes at startup"
+            )

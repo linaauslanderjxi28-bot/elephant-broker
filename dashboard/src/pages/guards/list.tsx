@@ -44,17 +44,23 @@ import IconButton from "@mui/material/IconButton";
 import {
   apiGet,
   apiSend,
-  DECISION_DOMAINS,
   guardOutcomeColor,
   relativeTime,
   TIME_RANGES,
   type TimeRange,
   useAuthority,
 } from "../home/dashboardApi";
+import { errorMessage } from "../../lib/errors";
+import { formatRelativeTime, humanizeEnum } from "../../lib/format";
+import { shortId } from "../../lib/labels";
 
+// StaticRule.pattern_type (schemas/guards.py::StaticRulePatternType).
 const PATTERN_TYPES = ["keyword", "phrase", "regex", "tool_target"];
-const OUTCOMES = ["block", "require_approval", "warn", "log_only"];
-const SEVERITIES = ["critical", "high", "medium", "low"];
+// StaticRule.outcome (schemas/guards.py::GuardOutcome). "log_only" is NOT a
+// valid outcome — the earlier list (with log_only, no require_evidence/inform)
+// produced 422s / wrong colours. These are the real enum values, most-severe
+// first; "pass" is omitted (a rule whose action is to pass is meaningless).
+const OUTCOMES = ["block", "require_approval", "require_evidence", "warn", "inform"];
 const PROFILES = ["coding", "research", "managerial", "worker", "personal_assistant"];
 
 // --- Tab 1: Activity ---------------------------------------------------------
@@ -62,22 +68,42 @@ const PROFILES = ["coding", "research", "managerial", "worker", "personal_assist
 function ActivityTab() {
   const [range, setRange] = useState<TimeRange>("24h");
   const [data, setData] = useState<any>(null);
+  const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
+    // GET /dashboard/guards/activity -> GuardActivityResponse:
+    //   { time_range, triggers, near_misses, by_outcome, recent_events }.
+    // The page previously read `events`/`items` + `total_checks`/`pending_approvals`
+    // — none of which the endpoint returns — so the table and cards were always
+    // empty/zero (guards-profiles-4, gap-3-3/3-4).
     apiGet<any>("/dashboard/guards/activity", { time_range: range })
       .then(setData)
-      .catch(() => setData({ events: [] }))
+      .catch(() => setData({ recent_events: [] }))
       .finally(() => setLoading(false));
   }, [range]);
 
-  const events = data?.events ?? data?.items ?? [];
-  const cards = [
-    ["Checks", data?.total_checks],
-    ["Triggers", data?.triggers],
-    ["Near-misses", data?.near_misses],
-    ["Pending approvals", data?.pending_approvals],
+  // "Pending approvals" is not in the activity aggregate; it lives in the
+  // dedicated pending-approvals endpoint. Fetch its real count instead of the
+  // hardwired 0 the card showed before.
+  useEffect(() => {
+    apiGet<any>("/dashboard/guards/approvals/pending")
+      .then((r) =>
+        setPendingCount(
+          Array.isArray(r) ? r.length : (r?.pending ?? r?.items ?? []).length,
+        ),
+      )
+      .catch(() => setPendingCount(null));
+  }, [range]);
+
+  const events: any[] = data?.recent_events ?? [];
+  const byOutcome: Record<string, number> = data?.by_outcome ?? {};
+  const cards: Array<[string, number | string]> = [
+    ["Triggers", data?.triggers ?? 0],
+    ["Near-misses", data?.near_misses ?? 0],
+    ["Blocked", byOutcome.block ?? 0],
+    ["Pending approvals", pendingCount ?? "—"],
   ];
 
   return (
@@ -105,12 +131,12 @@ function ActivityTab() {
         }}
       >
         {cards.map(([label, value]) => (
-          <Card variant="outlined" key={String(label)}>
+          <Card variant="outlined" key={label}>
             <CardContent>
               <Typography variant="caption" color="text.secondary">
                 {label}
               </Typography>
-              <Typography variant="h5">{value ?? 0}</Typography>
+              <Typography variant="h5">{value}</Typography>
             </CardContent>
           </Card>
         ))}
@@ -127,28 +153,44 @@ function ActivityTab() {
                 <TableCell>Action</TableCell>
                 <TableCell>Domain</TableCell>
                 <TableCell>Outcome</TableCell>
-                <TableCell>Rule</TableCell>
+                <TableCell>Rules</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {events.map((e: any, i: number) => (
-                <TableRow key={i}>
-                  <TableCell>{relativeTime(e.timestamp)}</TableCell>
-                  <TableCell>{e.session_key ?? ""}</TableCell>
-                  <TableCell>{e.action ?? ""}</TableCell>
-                  <TableCell>
-                    {e.domain && <Chip size="small" label={e.domain} />}
-                  </TableCell>
-                  <TableCell>
-                    <Chip
-                      size="small"
-                      label={e.outcome ?? ""}
-                      color={guardOutcomeColor(e.outcome)}
-                    />
-                  </TableCell>
-                  <TableCell>{e.rule_id ?? ""}</TableCell>
-                </TableRow>
-              ))}
+              {events.map((e: any, i: number) => {
+                // Guard trace payload (engine.py): { outcome, layer, rules[],
+                // decision_domain, action_target }. The fields the table needs
+                // live under `payload`, not on the event root.
+                const p = e.payload ?? {};
+                const rules: string[] = Array.isArray(p.rules) ? p.rules : [];
+                return (
+                  <TableRow key={e.id ?? i}>
+                    <TableCell>{relativeTime(e.timestamp)}</TableCell>
+                    <TableCell>{e.session_key ?? "—"}</TableCell>
+                    <TableCell>{p.action_target ?? "—"}</TableCell>
+                    <TableCell>
+                      {p.decision_domain && (
+                        <Chip
+                          size="small"
+                          label={humanizeEnum(p.decision_domain)}
+                        />
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        size="small"
+                        label={humanizeEnum(p.outcome) || "—"}
+                        color={guardOutcomeColor(p.outcome)}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      {rules.length > 0
+                        ? rules.map((r) => humanizeEnum(r)).join(", ")
+                        : "—"}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
               {events.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={6}>No guard events.</TableCell>
@@ -164,6 +206,20 @@ function ActivityTab() {
 
 // --- Tab 2: Rules ------------------------------------------------------------
 
+// StaticRule (schemas/guards.py): the create body. `id` is REQUIRED (no default)
+// and there is NO `name` / `decision_domain` / `severity` field — those were
+// phantom form fields silently dropped by Pydantic (guards-profiles-6) while the
+// missing `id` 422'd every create (guards-profiles-2). `source`/`org_id` are set
+// server-side.
+const EMPTY_RULE = {
+  id: "",
+  description: "",
+  pattern_type: "keyword",
+  pattern: "",
+  outcome: "require_approval",
+  enabled: true,
+};
+
 function RuleForm(props: {
   open: boolean;
   onClose: () => void;
@@ -171,68 +227,83 @@ function RuleForm(props: {
   initial?: any;
 }) {
   const editing = !!props.initial?.id;
-  const [form, setForm] = useState<any>(
-    props.initial ?? {
-      name: "",
-      description: "",
-      pattern_type: "keyword",
-      pattern: "",
-      outcome: "require_approval",
-      decision_domain: DECISION_DOMAINS[0],
-      severity: "medium",
-      enabled: true,
-    },
-  );
+  const [form, setForm] = useState<any>(props.initial ?? EMPTY_RULE);
   const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
-    if (props.open)
-      setForm(
-        props.initial ?? {
-          name: "",
-          description: "",
-          pattern_type: "keyword",
-          pattern: "",
-          outcome: "require_approval",
-          decision_domain: DECISION_DOMAINS[0],
-          severity: "medium",
-          enabled: true,
-        },
-      );
+    if (props.open) {
+      setForm(props.initial ?? EMPTY_RULE);
+      setErr(null);
+    }
   }, [props.open, props.initial]);
 
   const set = (k: string, v: any) => setForm((f: any) => ({ ...f, [k]: v }));
 
   const submit = async () => {
     setErr(null);
+    setBusy(true);
     try {
       if (editing) {
-        await apiSend("PUT", `/dashboard/guards/rules/${form.id}`, form);
+        // GuardRuleUpdate is `extra="forbid"` — send ONLY its whitelisted
+        // fields, never the whole rule object (guards-profiles-3). `id` /
+        // `source` / `org_id` are immutable and would 422.
+        await apiSend("PUT", `/dashboard/guards/rules/${form.id}`, {
+          pattern: form.pattern,
+          pattern_type: form.pattern_type,
+          outcome: form.outcome,
+          description: form.description,
+          enabled: form.enabled,
+        });
       } else {
-        await apiSend("POST", "/dashboard/guards/rules", form);
+        // StaticRule create — include the required `id`.
+        await apiSend("POST", "/dashboard/guards/rules", {
+          id: form.id,
+          pattern_type: form.pattern_type,
+          pattern: form.pattern,
+          outcome: form.outcome,
+          description: form.description,
+          enabled: form.enabled,
+        });
       }
       props.onSaved();
       props.onClose();
     } catch (e) {
-      setErr((e as Error).message);
+      setErr(errorMessage(e));
+    } finally {
+      setBusy(false);
     }
   };
+
+  const idValid = editing || /^[a-z0-9][a-z0-9_-]*$/i.test((form.id ?? "").trim());
 
   return (
     <Dialog open={props.open} onClose={props.onClose} fullWidth maxWidth="sm">
       <DialogTitle>{editing ? "Edit" : "Create"} custom rule</DialogTitle>
       <DialogContent>
-        {err && <Alert severity="error">{err}</Alert>}
+        {err && (
+          <Alert severity="error" sx={{ mb: 1 }} onClose={() => setErr(null)}>
+            {err}
+          </Alert>
+        )}
         <Stack spacing={2} sx={{ mt: 1 }}>
           <TextField
-            label="Name"
-            value={form.name ?? ""}
-            onChange={(e) => set("name", e.target.value)}
+            label="Rule ID"
+            value={form.id ?? ""}
+            disabled={editing}
+            onChange={(e) => set("id", e.target.value)}
+            helperText={
+              editing
+                ? "The rule identifier is immutable."
+                : "Unique identifier, e.g. no_force_push (letters, digits, _ and -)."
+            }
+            error={!editing && !!form.id && !idValid}
           />
           <TextField
             label="Description"
             multiline
             value={form.description ?? ""}
             onChange={(e) => set("description", e.target.value)}
+            helperText="Human-readable explanation shown to operators."
           />
           <TextField
             select
@@ -242,7 +313,7 @@ function RuleForm(props: {
           >
             {PATTERN_TYPES.map((p) => (
               <MenuItem key={p} value={p}>
-                {p}
+                {humanizeEnum(p)}
               </MenuItem>
             ))}
           </TextField>
@@ -253,37 +324,13 @@ function RuleForm(props: {
           />
           <TextField
             select
-            label="Domain"
-            value={form.decision_domain}
-            onChange={(e) => set("decision_domain", e.target.value)}
-          >
-            {DECISION_DOMAINS.map((d) => (
-              <MenuItem key={d} value={d}>
-                {d}
-              </MenuItem>
-            ))}
-          </TextField>
-          <TextField
-            select
             label="Outcome"
             value={form.outcome}
             onChange={(e) => set("outcome", e.target.value)}
           >
             {OUTCOMES.map((o) => (
               <MenuItem key={o} value={o}>
-                {o}
-              </MenuItem>
-            ))}
-          </TextField>
-          <TextField
-            select
-            label="Severity"
-            value={form.severity}
-            onChange={(e) => set("severity", e.target.value)}
-          >
-            {SEVERITIES.map((s) => (
-              <MenuItem key={s} value={s}>
-                {s}
+                {humanizeEnum(o)}
               </MenuItem>
             ))}
           </TextField>
@@ -297,8 +344,14 @@ function RuleForm(props: {
         </Stack>
       </DialogContent>
       <DialogActions>
-        <Button onClick={props.onClose}>Cancel</Button>
-        <Button variant="contained" disabled={!form.pattern} onClick={submit}>
+        <Button onClick={props.onClose} disabled={busy}>
+          Cancel
+        </Button>
+        <Button
+          variant="contained"
+          disabled={busy || !form.pattern || !idValid}
+          onClick={submit}
+        >
           Save
         </Button>
       </DialogActions>
@@ -312,6 +365,7 @@ function RulesTab() {
   const [loading, setLoading] = useState(true);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<any>(undefined);
+  const [err, setErr] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -347,6 +401,11 @@ function RulesTab() {
           </Button>
         )}
       </Stack>
+      {err && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setErr(null)}>
+          {err}
+        </Alert>
+      )}
       {loading ? (
         <CircularProgress />
       ) : (
@@ -355,7 +414,7 @@ function RulesTab() {
             <TableHead>
               <TableRow>
                 <TableCell>Source</TableCell>
-                <TableCell>Name / Pattern</TableCell>
+                <TableCell>Rule</TableCell>
                 <TableCell>Type</TableCell>
                 <TableCell>Outcome</TableCell>
                 <TableCell>Enabled</TableCell>
@@ -369,21 +428,39 @@ function RulesTab() {
                 return (
                   <TableRow key={r.id ?? i}>
                     <TableCell>
-                      <Chip size="small" label={src} color={sourceColor(src)} />
+                      <Chip
+                        size="small"
+                        label={humanizeEnum(src)}
+                        color={sourceColor(src)}
+                      />
                     </TableCell>
                     <TableCell>
+                      {/* Rule ids are snake_case identifiers, not display names
+                          (guards-profiles-7): humanize the id, show the human
+                          description, and keep the pattern as monospace detail. */}
                       <Typography variant="body2">
-                        {r.name ?? r.id}
+                        {humanizeEnum(r.id) || r.id}
                       </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        {r.pattern}
-                      </Typography>
+                      {r.description && (
+                        <Typography variant="caption" color="text.secondary" display="block">
+                          {r.description}
+                        </Typography>
+                      )}
+                      {r.pattern && (
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ fontFamily: "monospace" }}
+                        >
+                          {r.pattern}
+                        </Typography>
+                      )}
                     </TableCell>
-                    <TableCell>{r.pattern_type}</TableCell>
+                    <TableCell>{humanizeEnum(r.pattern_type)}</TableCell>
                     <TableCell>
                       <Chip
                         size="small"
-                        label={r.outcome}
+                        label={humanizeEnum(r.outcome)}
                         color={guardOutcomeColor(r.outcome)}
                       />
                     </TableCell>
@@ -393,12 +470,17 @@ function RulesTab() {
                         checked={r.enabled !== false}
                         disabled={!editable}
                         onChange={async () => {
-                          await apiSend(
-                            "PUT",
-                            `/dashboard/guards/rules/${r.id}`,
-                            { enabled: r.enabled === false },
-                          );
-                          load();
+                          setErr(null);
+                          try {
+                            await apiSend(
+                              "PUT",
+                              `/dashboard/guards/rules/${r.id}`,
+                              { enabled: r.enabled === false },
+                            );
+                            load();
+                          } catch (e) {
+                            setErr(errorMessage(e));
+                          }
                         }}
                       />
                     </TableCell>
@@ -418,11 +500,16 @@ function RulesTab() {
                             size="small"
                             onClick={async () => {
                               if (!window.confirm("Delete rule?")) return;
-                              await apiSend(
-                                "DELETE",
-                                `/dashboard/guards/rules/${r.id}`,
-                              );
-                              load();
+                              setErr(null);
+                              try {
+                                await apiSend(
+                                  "DELETE",
+                                  `/dashboard/guards/rules/${r.id}`,
+                                );
+                                load();
+                              } catch (e) {
+                                setErr(errorMessage(e));
+                              }
                             }}
                           >
                             <DeleteIcon fontSize="small" />
@@ -487,7 +574,10 @@ const GUARD_FIELDS: Array<{
     path: "guards.preflight_check_strictness",
     label: "Preflight check strictness",
     kind: "select",
-    options: ["low", "medium", "high"],
+    // GuardPolicy.preflight_check_strictness values are loose/medium/strict
+    // (schemas/profile.py + profiles/presets.py) — NOT low/medium/high, which
+    // silently stored an invalid value the engine ignored (guards-profiles-5).
+    options: ["loose", "medium", "strict"],
     dflt: "medium",
   },
   {
@@ -649,7 +739,7 @@ function ConfigTab() {
     const overridesPromise: Promise<{ list: any[]; error: string | null }> = org
       ? apiGet<any>(`/admin/profiles/overrides/${org}`).then(
           (r) => ({ list: Array.isArray(r) ? r : [], error: null }),
-          (e) => ({ list: [], error: (e as Error).message }),
+          (e) => ({ list: [], error: errorMessage(e) }),
         )
       : Promise.resolve({ list: [], error: null });
     Promise.all([apiGet<any>(`/profiles/${profile}`), overridesPromise])
@@ -664,7 +754,7 @@ function ConfigTab() {
       })
       .catch((e) => {
         setBase(null);
-        setErr((e as Error).message);
+        setErr(errorMessage(e));
       })
       .finally(() => setLoading(false));
   }, [org, profile]);
@@ -697,7 +787,7 @@ function ConfigTab() {
       load();
       setNotice("Override saved.");
     } catch (e) {
-      setErr((e as Error).message);
+      setErr(errorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -717,7 +807,7 @@ function ConfigTab() {
       load();
       setNotice("Override removed — profile now uses base values.");
     } catch (e) {
-      setErr((e as Error).message);
+      setErr(errorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -821,7 +911,7 @@ function ConfigTab() {
             >
               {(f.options ?? []).map((o) => (
                 <MenuItem key={o} value={o}>
-                  {o}
+                  {humanizeEnum(o)}
                 </MenuItem>
               ))}
             </TextField>
@@ -984,12 +1074,31 @@ function ConfigTab() {
 
 // --- Tab 4: Approvals --------------------------------------------------------
 
+/** Remaining time until an approval's hard-stop timeout, for the live badge. */
+function timeoutRemaining(
+  timeoutAt: string | null | undefined,
+  nowMs: number,
+): { text: string; expired: boolean } {
+  if (!timeoutAt) return { text: "", expired: false };
+  const end = new Date(timeoutAt).getTime();
+  if (Number.isNaN(end)) return { text: "", expired: false };
+  const diff = end - nowMs;
+  if (diff <= 0) return { text: "expired", expired: true };
+  const totalSec = Math.floor(diff / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return { text: `${m}:${String(s).padStart(2, "0")} left`, expired: false };
+}
+
 function ApprovalsTab() {
   const [approvals, setApprovals] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
-  const load = useCallback(() => {
-    setLoading(true);
+  const load = useCallback((initial = false) => {
+    if (initial) setLoading(true);
     apiGet<any>("/dashboard/guards/approvals/pending")
       .then((r) =>
         setApprovals(Array.isArray(r) ? r : (r.pending ?? r.items ?? [])),
@@ -997,7 +1106,20 @@ function ApprovalsTab() {
       .catch(() => setApprovals([]))
       .finally(() => setLoading(false));
   }, []);
-  useEffect(() => load(), [load]);
+
+  // Initial load + auto-refresh (gap-3-6): approvals hard-stop at their timeout
+  // (ApprovalRouting.timeout_seconds, default 300s) and the backend self-heals
+  // expired ids out of the pending SET, so poll to drop stale cards. A 1s tick
+  // drives the live countdown badge.
+  useEffect(() => {
+    load(true);
+    const refresh = window.setInterval(() => load(false), 15000);
+    const tick = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      window.clearInterval(refresh);
+      window.clearInterval(tick);
+    };
+  }, [load]);
 
   const resolve = async (id: string, status: "approved" | "rejected") => {
     let reason: string | null = "";
@@ -1005,34 +1127,90 @@ function ApprovalsTab() {
       reason = window.prompt("Rejection reason");
       if (reason === null) return;
     }
-    await apiSend("PATCH", `/guards/approvals/${id}`, { status, reason });
-    load();
+    setError(null);
+    setBusyId(id);
+    try {
+      // Operator identity (resolved_by) is stamped server-side from the
+      // authenticated session — never sent from the browser (spoofable).
+      await apiSend("PATCH", `/guards/approvals/${id}`, { status, reason });
+      load(false);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusyId(null);
+    }
   };
 
   if (loading) return <CircularProgress />;
   return (
     <Stack spacing={2}>
+      {error && (
+        <Alert severity="error" onClose={() => setError(null)}>
+          {error}
+        </Alert>
+      )}
       {approvals.length === 0 && (
         <Typography color="text.secondary">No pending approvals.</Typography>
       )}
       {approvals.map((a) => {
-        const id = String(a.request_id ?? a.id ?? a);
+        // Records are ApprovalRequest (schemas/guards.py): the action lives in
+        // `action_summary`, not `action`/`summary`; there is no `session_key`
+        // (only `session_id`) or `domain` (it's `decision_domain`). Reading the
+        // wrong keys is why the card showed a raw UUID (gap-3-2).
+        const id = String(a.id ?? a.request_id ?? "");
+        const requested = formatRelativeTime(a.created_at ?? a.requested_at);
+        const countdown = timeoutRemaining(a.timeout_at, now);
+        const sessionLabel =
+          a.session_key || (a.session_id ? shortId(a.session_id) : "");
         return (
           <Card key={id} variant="outlined">
             <CardContent>
-              <Typography variant="subtitle2">
-                {a.action ?? a.summary ?? id}
+              <Stack
+                direction="row"
+                spacing={1}
+                alignItems="center"
+                flexWrap="wrap"
+                useFlexGap
+              >
+                <Typography variant="subtitle2">
+                  {a.action_summary || a.explanation || `Approval ${shortId(id)}`}
+                </Typography>
+                {a.decision_domain && (
+                  <Chip size="small" label={humanizeEnum(a.decision_domain)} />
+                )}
+                {countdown.text && (
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    color={countdown.expired ? "default" : "warning"}
+                    label={countdown.text}
+                  />
+                )}
+              </Stack>
+              <Typography
+                variant="body2"
+                color="text.secondary"
+                sx={{ mt: 0.5 }}
+              >
+                {sessionLabel ? `${sessionLabel} · ` : ""}requested{" "}
+                <span title={requested.title}>{requested.text}</span>
               </Typography>
-              <Typography variant="body2" color="text.secondary">
-                {a.session_key ?? ""} ·{" "}
-                {a.domain && <Chip size="small" label={a.domain} />} · requested{" "}
-                {relativeTime(a.requested_at ?? a.created_at)}
-              </Typography>
+              {a.explanation && a.explanation !== a.action_summary && (
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  display="block"
+                  sx={{ mt: 0.5 }}
+                >
+                  {a.explanation}
+                </Typography>
+              )}
               <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
                 <Button
                   size="small"
                   variant="contained"
                   color="success"
+                  disabled={busyId === id}
                   onClick={() => resolve(id, "approved")}
                 >
                   Approve
@@ -1041,6 +1219,7 @@ function ApprovalsTab() {
                   size="small"
                   variant="outlined"
                   color="error"
+                  disabled={busyId === id}
                   onClick={() => resolve(id, "rejected")}
                 >
                   Reject

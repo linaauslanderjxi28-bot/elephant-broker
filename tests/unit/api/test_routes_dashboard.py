@@ -661,6 +661,55 @@ class TestGuards:
         r = await admin_client.delete("/dashboard/guards/rules/r1")
         assert r.status_code == 404
 
+    async def test_guards_rule_mutations_invalidate_engine_probe(
+        self, admin_client, container
+    ):
+        """FIX-4: a successful create/update/delete nudges the in-process guard
+        engine to re-probe the CustomRuleStore version on its next preflight,
+        so same-process rule changes enforce immediately."""
+        from datetime import UTC, datetime
+
+        store = AsyncMock()
+        store.create_rule = AsyncMock(side_effect=lambda *, gateway_id, rule: rule)
+        store.update_rule = AsyncMock(
+            side_effect=lambda *, gateway_id, rule_id, updates: StaticRule(
+                id=rule_id, pattern="x", source="custom"
+            )
+        )
+        store.delete_rule = AsyncMock(return_value=True)
+        container.custom_rule_store = store
+
+        for mutate in (
+            lambda: admin_client.post(
+                "/dashboard/guards/rules",
+                json=StaticRule(id="r-new", pattern="danger").model_dump(mode="json"),
+            ),
+            lambda: admin_client.put(
+                "/dashboard/guards/rules/r-new", json={"enabled": False}
+            ),
+            lambda: admin_client.delete("/dashboard/guards/rules/r-new"),
+        ):
+            # Prime a fresh probe cache, then assert the mutation cleared it.
+            container.guard_engine._rules_version_probed_at = datetime.now(UTC)
+            r = await mutate()
+            assert r.status_code == 200
+            assert container.guard_engine._rules_version_probed_at is None
+
+    async def test_guards_rule_mutation_failure_keeps_probe_cache(
+        self, admin_client, container
+    ):
+        """FIX-4 counter-test: a failed mutation must NOT invalidate the probe."""
+        from datetime import UTC, datetime
+
+        store = AsyncMock()
+        store.delete_rule = AsyncMock(return_value=False)
+        container.custom_rule_store = store
+        primed = datetime.now(UTC)
+        container.guard_engine._rules_version_probed_at = primed
+        r = await admin_client.delete("/dashboard/guards/rules/missing")
+        assert r.status_code == 404
+        assert container.guard_engine._rules_version_probed_at == primed
+
 
 # ---------------------------------------------------------------------------
 # Goals / procedures / actors / organizations / profiles

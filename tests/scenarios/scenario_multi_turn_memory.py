@@ -36,7 +36,16 @@ class MultiTurnMemoryScenario(Scenario):
         ]
         fact_counts = []
         for i, (user_msg, assistant_msg) in enumerate(turns):
-            recalled = await self.sim.simulate_full_turn(user_msg, assistant_msg)
+            recalled = await self.sim.simulate_before_agent_start(user_msg)
+            # FULL-tier extraction: the memory-plugin ingest-messages path
+            # (simulate_full_turn's agent_end) short-circuits to 202 and never
+            # runs turn_ingest, so it cannot emit FACT_EXTRACTED. Drive
+            # /context/ingest-batch instead — that is the only call in this
+            # scenario that can satisfy the fact_extracted assertion.
+            await self.sim.simulate_context_ingest_batch([
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": assistant_msg},
+            ])
             results = await self.sim.simulate_tool_memory_search("auth JWT token")
             fact_counts.append(len(results))
             self.step(f"turn_{i}_facts", passed=True,

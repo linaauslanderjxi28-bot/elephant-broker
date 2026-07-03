@@ -17,6 +17,7 @@ class TraceEventType(StrEnum):
     ARTIFACT_CREATED = "artifact_created"
     CLAIM_MADE = "claim_made"
     CLAIM_VERIFIED = "claim_verified"
+    PROCEDURE_ACTIVATED = "procedure_activated"
     PROCEDURE_STEP_PASSED = "procedure_step_passed"
     PROCEDURE_STEP_FAILED = "procedure_step_failed"
     GUARD_TRIGGERED = "guard_triggered"

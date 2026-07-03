@@ -27,6 +27,7 @@ import {
   type ReactElement,
 } from "react";
 import { useNavigate } from "react-router";
+import { useSearchParams } from "react-router-dom";
 import { useApiUrl, useCustom } from "@refinedev/core";
 import {
   Alert,
@@ -65,6 +66,7 @@ import type {
 } from "react-force-graph-2d";
 
 import { palette } from "../../theme";
+import { formatRelativeTime, humanizeEnum, pluralize } from "../../lib/format";
 import {
   MEMORY_CLASS_LABELS,
   SCOPE_LABELS,
@@ -157,8 +159,11 @@ function routeForNode(node: GNode): string | undefined {
   if (t.startsWith("Fact")) return `/memory/${id}`;
   if (t.startsWith("Actor")) return `/actors/${id}`;
   if (t.startsWith("Organization")) return `/organizations/${id}`;
-  if (t.startsWith("Goal")) return `/goals`;
-  if (t.startsWith("Procedure")) return `/procedures`;
+  // Goals/Procedures have list-only surfaces — carry the node's eb_id as a
+  // `highlight` param so the target page can focus/scroll to it instead of
+  // dead-ending on the bare list (memory-graph-3).
+  if (t.startsWith("Goal")) return `/goals?highlight=${encodeURIComponent(id)}`;
+  if (t.startsWith("Procedure")) return `/procedures?highlight=${encodeURIComponent(id)}`;
   return undefined; // ArtifactDataPoint -> in-graph detail drawer
 }
 
@@ -265,6 +270,37 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+// --- Drawer property rendering (memory-graph-7) ----------------------------
+// The graph projection ships raw snake_case keys and integer epoch-ms values
+// (e.g. `created_at_ms`). Humanize the keys, render timestamps as relative
+// time (with an absolute tooltip), and humanize known enum values.
+
+const ENUM_VALUE_KEYS = new Set([
+  "scope",
+  "memory_class",
+  "category",
+  "status",
+  "actor_type",
+]);
+
+/** Keys whose value is an epoch/timestamp (…_ms, …_at, …timestamp). */
+function isTimestampKey(key: string): boolean {
+  return /(_ms|_at|timestamp)$/i.test(key);
+}
+
+function drawerValueNode(key: string, value: unknown): ReactElement {
+  if (isTimestampKey(key) && (typeof value === "number" || typeof value === "string")) {
+    const { text, title } = formatRelativeTime(String(value));
+    if (text !== "—") {
+      return <span title={title}>{text}</span>;
+    }
+  }
+  if (ENUM_VALUE_KEYS.has(key) && typeof value === "string") {
+    return <>{humanizeEnum(value)}</>;
+  }
+  return <>{String(value)}</>;
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -272,16 +308,52 @@ function truncate(text: string, max: number): string {
 export const MemoryGraph: FC = () => {
   const navigate = useNavigate();
   const apiUrl = useApiUrl();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   // --- Controls (query state) --------------------------------------------
-  const [centerId, setCenterId] = useState<string | null>(null);
-  const [depth, setDepth] = useState(1);
-  const [maxNodes, setMaxNodes] = useState(300);
-  const [selectedTypes, setSelectedTypes] = useState<Set<string>>(
-    new Set(NODE_TYPES),
+  // Seeded from the URL so a reload, deep-link, or Back navigation restores the
+  // exact view (memory-graph-6). After mount the effect below mirrors state back
+  // to the URL (one-way, replace) — only non-default values are encoded.
+  const [centerId, setCenterId] = useState<string | null>(
+    () => searchParams.get("center") || null,
   );
-  const [scopeFilter, setScopeFilter] = useState<string>(""); // client-side
+  const [depth, setDepth] = useState(() => {
+    const d = Number(searchParams.get("depth"));
+    return DEPTH_OPTIONS.includes(d) ? d : 1;
+  });
+  const [maxNodes, setMaxNodes] = useState(() => {
+    const m = Number(searchParams.get("max"));
+    return MAX_NODE_OPTIONS.includes(m) ? m : 300;
+  });
+  const [selectedTypes, setSelectedTypes] = useState<Set<string>>(() => {
+    const csv = searchParams.get("types");
+    if (csv) {
+      const arr = csv
+        .split(",")
+        .filter((t) => (NODE_TYPES as readonly string[]).includes(t));
+      if (arr.length > 0) return new Set(arr);
+    }
+    return new Set(NODE_TYPES);
+  });
+  const [scopeFilter, setScopeFilter] = useState<string>(() => {
+    const s = searchParams.get("scope") ?? "";
+    return (SCOPE_OPTIONS as readonly string[]).includes(s) ? s : "";
+  }); // client-side
   const [searchTerm, setSearchTerm] = useState("");
+
+  // Mirror the view state to the URL (only non-defaults, replace to avoid
+  // spamming history) so it survives reload / Back.
+  useEffect(() => {
+    const next = new URLSearchParams();
+    if (centerId) next.set("center", centerId);
+    if (centerId && depth !== 1) next.set("depth", String(depth));
+    if (maxNodes !== 300) next.set("max", String(maxNodes));
+    if (scopeFilter) next.set("scope", scopeFilter);
+    if (selectedTypes.size > 0 && selectedTypes.size < NODE_TYPES.length) {
+      next.set("types", [...selectedTypes].join(","));
+    }
+    setSearchParams(next, { replace: true });
+  }, [centerId, depth, maxNodes, scopeFilter, selectedTypes, setSearchParams]);
 
   // --- Interaction state --------------------------------------------------
   const [hoverId, setHoverId] = useState<string | null>(null);
@@ -314,13 +386,26 @@ export const MemoryGraph: FC = () => {
 
   const resp = data?.data;
 
-  // --- Build force-graph data (rename edges -> links) + apply scope filter -
+  // --- Build force-graph data (rename edges -> links) + apply client filters -
   const graphData = useMemo(() => {
     const rawNodes = resp?.nodes ?? [];
     const rawEdges = resp?.edges ?? [];
-    const keptNodes = scopeFilter
-      ? rawNodes.filter((n) => String(n.properties?.scope ?? "") === scopeFilter)
-      : rawNodes;
+    // memory-graph-5: apply the TYPE filter client-side (in addition to sending
+    // it to the server) so the rendered graph + counts always track the latest
+    // chip selection. The type filter was previously server-only, so a slow or
+    // out-of-order response for a now-superseded filter could momentarily paint
+    // node types that are no longer selected (chips said "Artifact-only" while
+    // the full graph stayed on screen). Deriving the render from `selectedTypes`
+    // — the same state that drives the chips — makes the two unable to disagree,
+    // exactly as `scopeFilter` already does below.
+    const typeFilterActive =
+      selectedTypes.size > 0 && selectedTypes.size < NODE_TYPES.length;
+    const keptNodes = rawNodes.filter((n) => {
+      if (typeFilterActive && !selectedTypes.has(n.type)) return false;
+      if (scopeFilter && String(n.properties?.scope ?? "") !== scopeFilter)
+        return false;
+      return true;
+    });
     const keep = new Set(keptNodes.map((n) => n.id));
     const nodes: GNode[] = keptNodes.map((n) => ({
       id: n.id,
@@ -336,7 +421,7 @@ export const MemoryGraph: FC = () => {
         relation_type: e.relation_type,
       }));
     return { nodes, links };
-  }, [resp, scopeFilter]);
+  }, [resp, scopeFilter, selectedTypes]);
 
   // Adjacency for hover highlighting.
   const adjacency = useMemo(() => {
@@ -393,11 +478,24 @@ export const MemoryGraph: FC = () => {
   useEffect(() => {
     didFitRef.current = false;
   }, [graphData]);
+  // memory-graph-1: a large, spread-out whole-gateway subgraph used to fit to
+  // sub-pixel dots with no legible labels. After the fit, enforce a minimum
+  // zoom so nodes render at a readable size on first paint; labels then appear
+  // for any node that is big enough on screen (see `showLabel` below).
+  const MIN_LEGIBLE_ZOOM = 1.1;
   const handleEngineStop = () => {
-    if (!didFitRef.current) {
-      fgRef.current?.zoomToFit(400, 60);
-      didFitRef.current = true;
-    }
+    const fg = fgRef.current;
+    if (!fg || didFitRef.current) return;
+    didFitRef.current = true;
+    fg.zoomToFit(500, 48);
+    window.setTimeout(() => {
+      const current = fgRef.current;
+      if (!current || typeof current.zoom !== "function") return;
+      const z = current.zoom();
+      if (typeof z === "number" && z < MIN_LEGIBLE_ZOOM) {
+        current.zoom(MIN_LEGIBLE_ZOOM, 400);
+      }
+    }, 560);
   };
 
   // --- Node/link paint ----------------------------------------------------
@@ -442,7 +540,10 @@ export const MemoryGraph: FC = () => {
       ctx.stroke();
     }
 
-    const showLabel = scale > 1.3 || isHover || isCenter || isMatch;
+    // Label when the node is physically large enough on screen (radius × zoom),
+    // so labels are legible at the initial legibility-floor zoom yet declutter
+    // when the operator zooms further out (memory-graph-1).
+    const showLabel = r * scale > 4.5 || isHover || isCenter || isMatch;
     if (showLabel) {
       const fontSize = Math.max(10 / scale, 2);
       ctx.font = `${fontSize}px Inter, sans-serif`;
@@ -552,8 +653,10 @@ export const MemoryGraph: FC = () => {
     return n?.label || centerId;
   }, [centerId, graphData]);
 
-  const nodeCount = resp?.node_count ?? graphData.nodes.length;
-  const edgeCount = resp?.edge_count ?? graphData.links.length;
+  // Header counts reflect what is actually rendered — including the client-side
+  // scope filter — so they can never disagree with the canvas (memory-graph-2).
+  const nodeCount = graphData.nodes.length;
+  const edgeCount = graphData.links.length;
   const truncated = resp?.truncated ?? false;
   const isEmpty = !isLoading && !isError && graphData.nodes.length === 0;
 
@@ -601,8 +704,8 @@ export const MemoryGraph: FC = () => {
             {centerId
               ? `Focused neighborhood · depth ${depth}`
               : "Whole-gateway subgraph"}{" "}
-            · {nodeCount.toLocaleString()} nodes · {edgeCount.toLocaleString()}{" "}
-            edges
+            · {nodeCount.toLocaleString()} {pluralize(nodeCount, "node")} ·{" "}
+            {edgeCount.toLocaleString()} {pluralize(edgeCount, "edge")}
           </Typography>
         </Box>
         <Button
@@ -738,7 +841,7 @@ export const MemoryGraph: FC = () => {
                   >
                     {DEPTH_OPTIONS.map((d) => (
                       <MenuItem key={d} value={d}>
-                        {d} hop{d > 1 ? "s" : ""}
+                        {d} {pluralize(d, "hop")}
                       </MenuItem>
                     ))}
                   </Select>
@@ -988,10 +1091,10 @@ export const MemoryGraph: FC = () => {
                     .map(([k, v]) => (
                       <TableRow key={k}>
                         <TableCell sx={{ color: "text.secondary", border: 0, py: 0.5 }}>
-                          {k}
+                          {humanizeEnum(k)}
                         </TableCell>
                         <TableCell sx={{ border: 0, py: 0.5, wordBreak: "break-word" }}>
-                          {String(v)}
+                          {drawerValueNode(k, v)}
                         </TableCell>
                       </TableRow>
                     ))}

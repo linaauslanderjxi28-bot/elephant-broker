@@ -1124,6 +1124,9 @@ class ContextLifecycle:
             await self._trace.append_event(TraceEvent(
                 event_type=TraceEventType.SUBAGENT_PARENT_MAPPED,
                 session_key=child_sk,
+                # Stamp session_id (parent's ephemeral id, supplied by caller)
+                # so session_id-scoped trace summaries can see the spawn.
+                session_id=params.session_id,
                 gateway_id=self._gateway_id,
                 payload={"parent_session_key": parent_sk, "child_session_key": child_sk},
             ))
@@ -1147,6 +1150,9 @@ class ContextLifecycle:
             await self._trace.append_event(TraceEvent(
                 event_type=TraceEventType.SUBAGENT_ENDED,
                 session_key=params.child_session_key,
+                # Stamp session_id (supplied by caller) so session_id-scoped
+                # trace summaries can see the subagent end.
+                session_id=params.session_id,
                 gateway_id=self._gateway_id,
                 payload={"reason": params.reason, "child_session_key": params.child_session_key},
             ))

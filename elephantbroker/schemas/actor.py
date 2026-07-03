@@ -10,8 +10,8 @@ from pydantic import BaseModel, Field
 
 class ActorType(StrEnum):
     """All recognized actor types in the system."""
-    HUMAN_COORDINATOR = "human_coordinator"
-    HUMAN_OPERATOR = "human_operator"
+    HUMAN_COORDINATOR = "human_coordinator"  # coordinating/admin human (dashboard user; bootstrap admin)
+    HUMAN_OPERATOR = "human_operator"  # generic named human team member
     MANAGER_AGENT = "manager_agent"
     WORKER_AGENT = "worker_agent"
     REVIEWER_AGENT = "reviewer_agent"

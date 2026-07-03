@@ -3,7 +3,7 @@
 // Lists procedure definitions with an expandable detail panel (steps, active
 // executions, recent completions) and a creation form with full step editor.
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Box,
@@ -17,7 +17,6 @@ import {
   DialogTitle,
   Divider,
   IconButton,
-  LinearProgress,
   MenuItem,
   Paper,
   Stack,
@@ -38,10 +37,11 @@ import {
   apiGet,
   apiSend,
   DECISION_DOMAINS,
-  relativeTime,
   scopesForAuthority,
   useAuthority,
 } from "../home/dashboardApi";
+import { errorMessage } from "../../lib/errors";
+import { humanizeEnum } from "../../lib/format";
 
 interface StepDraft {
   instruction: string;
@@ -56,19 +56,21 @@ interface Procedure {
   name: string;
   description?: string;
   scope?: string;
-  enabled?: boolean;
-  steps?: any[];
-  active_executions?: any[];
-  recent_completions?: any[];
-  total_completions?: number;
+  // /dashboard/procedures (ProcedureSummary) returns only the fields above plus
+  // execution_count (currently hardcoded 0 server-side). It does NOT return
+  // enabled / steps / active executions / completion counts — see the
+  // cross-file needs for goals-procedures-5 and -8.
+  execution_count?: number;
 }
 
+// ProofType enum values are lowercase (schemas/procedure.py ProofType); send
+// those, render humanized labels.
 const PROOF_TYPES = [
-  "DIFF_HASH",
-  "CHUNK_REF",
-  "RECEIPT",
-  "VERSION_RECORD",
-  "SUPERVISOR_SIGN_OFF",
+  "diff_hash",
+  "chunk_ref",
+  "receipt",
+  "version_record",
+  "supervisor_sign_off",
 ];
 
 function procId(p: Procedure): string {
@@ -91,33 +93,50 @@ function DetailPanel({ id }: { id: string }) {
   }, [id]);
 
   if (loading) return <CircularProgress size={20} sx={{ m: 2 }} />;
-  const steps = detail?.steps ?? detail?.definition?.steps ?? [];
-  const executions = detail?.active_executions ?? [];
-  const completions = detail?.recent_completions ?? [];
+  // GET /dashboard/procedures/{id}/detail returns a ProcedureDetailResponse:
+  // { procedure, steps: ProcedureStep[], active_execution_ids: string[],
+  //   audit_trail: dict[], note }. Steps are serialized ProcedureStep records
+  // (step_id / order / instruction / required_evidence / is_optional) —
+  // goals-procedures-9 previously read proof_required / proof_type / optional
+  // which never exist on the wire.
+  const steps: any[] = Array.isArray(detail?.steps) ? detail.steps : [];
+  const executionIds: string[] = Array.isArray(detail?.active_execution_ids)
+    ? detail.active_execution_ids
+    : [];
+  const note: string = typeof detail?.note === "string" ? detail.note : "";
 
   return (
     <Box sx={{ p: 2, bgcolor: "action.hover" }}>
       <Typography variant="subtitle2">Steps</Typography>
       <Table size="small">
         <TableBody>
-          {steps.map((s: any, i: number) => (
-            <TableRow key={i}>
-              <TableCell width={40}>{i + 1}</TableCell>
-              <TableCell>{s.instruction ?? s.text ?? ""}</TableCell>
-              <TableCell>
-                {s.proof_required && (
-                  <Chip
-                    size="small"
-                    label={s.proof_type || "proof"}
-                    color="warning"
-                  />
-                )}
-                {s.optional && (
-                  <Chip size="small" label="optional" sx={{ ml: 0.5 }} />
-                )}
-              </TableCell>
-            </TableRow>
-          ))}
+          {steps.map((s: any, i: number) => {
+            const evidence: any[] = Array.isArray(s.required_evidence)
+              ? s.required_evidence
+              : [];
+            const order =
+              typeof s.order === "number" ? s.order + 1 : i + 1;
+            return (
+              <TableRow key={s.step_id ?? i}>
+                <TableCell width={40}>{order}</TableCell>
+                <TableCell>{s.instruction ?? ""}</TableCell>
+                <TableCell>
+                  {evidence.map((ev: any, j: number) => (
+                    <Chip
+                      key={j}
+                      size="small"
+                      label={humanizeEnum(ev?.proof_type) || "Proof"}
+                      color="warning"
+                      sx={{ mr: 0.5 }}
+                    />
+                  ))}
+                  {s.is_optional && (
+                    <Chip size="small" label="optional" sx={{ ml: 0.5 }} />
+                  )}
+                </TableCell>
+              </TableRow>
+            );
+          })}
           {steps.length === 0 && (
             <TableRow>
               <TableCell colSpan={3}>No steps defined.</TableCell>
@@ -128,39 +147,14 @@ function DetailPanel({ id }: { id: string }) {
 
       <Divider sx={{ my: 1 }} />
       <Typography variant="subtitle2">Active executions</Typography>
-      {executions.length === 0 ? (
+      {executionIds.length === 0 ? (
         <Typography variant="body2" color="text.secondary">
-          None running.
+          {note || "None running."}
         </Typography>
       ) : (
-        executions.map((ex: any, i: number) => {
-          const total = ex.total_steps ?? steps.length ?? 1;
-          const done = ex.completed_steps ?? 0;
-          return (
-            <Box key={i} sx={{ my: 1 }}>
-              <Typography variant="body2">
-                {ex.actor_id ?? "actor"} · {ex.session_key ?? ""} · step{" "}
-                {done}/{total}
-              </Typography>
-              <LinearProgress
-                variant="determinate"
-                value={total ? (done / total) * 100 : 0}
-              />
-            </Box>
-          );
-        })
-      )}
-
-      <Divider sx={{ my: 1 }} />
-      <Typography variant="subtitle2">Recent completions</Typography>
-      {completions.length === 0 ? (
-        <Typography variant="body2" color="text.secondary">
-          No history.
-        </Typography>
-      ) : (
-        completions.slice(0, 10).map((c: any, i: number) => (
-          <Typography key={i} variant="body2">
-            {relativeTime(c.timestamp ?? c.completed_at)} · {c.actor_id ?? ""}
+        executionIds.map((execId) => (
+          <Typography key={execId} variant="body2">
+            {execId}
           </Typography>
         ))
       )}
@@ -175,16 +169,32 @@ function CreateProcedureDialog(props: {
 }) {
   const authority = useAuthority();
   const scopes = scopesForAuthority(authority);
+  // Backend Scope enum values are lowercase; scopesForAuthority returns SCREAMING
+  // labels. Map to enum values (goals-procedures-4: scope was sent UPPERCASE).
+  // Key the memo on content so the seeding effect doesn't re-fire each render.
+  const scopeKey = scopes.join(",");
+  const scopeValues = useMemo(
+    () => scopeKey.split(",").filter(Boolean).map((s) => s.toLowerCase()),
+    [scopeKey],
+  );
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [scope, setScope] = useState(scopes[0] || "ACTOR");
+  // Do not hardcode a pre-permissions default (goals-procedures-11); seed from
+  // the resolved scope list.
+  const [scope, setScope] = useState("");
   const [domain, setDomain] = useState<string>(DECISION_DOMAINS[0]);
   const [enabled, setEnabled] = useState(true);
   const [steps, setSteps] = useState<StepDraft[]>([
-    { instruction: "", proof_required: false, proof_type: "RECEIPT", optional: false },
+    { instruction: "", proof_required: false, proof_type: "receipt", optional: false },
   ]);
   const [err, setErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!scope || !scopeValues.includes(scope)) {
+      setScope(scopeValues[0] ?? "");
+    }
+  }, [scopeValues, scope]);
 
   const updateStep = (i: number, patch: Partial<StepDraft>) =>
     setSteps((prev) => prev.map((s, j) => (j === i ? { ...s, ...patch } : s)));
@@ -193,26 +203,45 @@ function CreateProcedureDialog(props: {
     setSaving(true);
     setErr(null);
     try {
+      // Align the payload with ProcedureDefinition / ProcedureStep
+      // (schemas/procedure.py) — goals-procedures-4:
+      //  - scope: lowercase Scope enum value (handled via scopeValues above)
+      //  - step_id: a real UUID (was "step-N")
+      //  - order: required, 0-based
+      //  - required_evidence: list[ProofRequirement] (was proof_required/proof_type)
+      //  - is_optional (was "optional")
+      // ProcedureDefinition also rejects procedures that are neither
+      // auto-triggered nor manual-only, so dashboard-created procedures (which
+      // carry no activation triggers) must set is_manual_only=true.
       await apiSend("POST", "/procedures/", {
         name,
         description,
         scope,
         decision_domain: domain,
         enabled,
+        is_manual_only: true,
         steps: steps
           .filter((s) => s.instruction.trim())
           .map((s, i) => ({
-            step_id: `step-${i + 1}`,
+            step_id: crypto.randomUUID(),
+            order: i,
             instruction: s.instruction,
-            proof_required: s.proof_required,
-            proof_type: s.proof_required ? s.proof_type : null,
-            optional: s.optional,
+            is_optional: s.optional,
+            required_evidence: s.proof_required
+              ? [
+                  {
+                    description: s.instruction,
+                    required: true,
+                    proof_type: s.proof_type,
+                  },
+                ]
+              : [],
           })),
       });
       props.onCreated();
       props.onClose();
     } catch (e) {
-      setErr((e as Error).message);
+      setErr(errorMessage(e));
     } finally {
       setSaving(false);
     }
@@ -245,9 +274,9 @@ function CreateProcedureDialog(props: {
               onChange={(e) => setScope(e.target.value)}
               sx={{ flex: 1 }}
             >
-              {scopes.map((s) => (
-                <MenuItem key={s} value={s}>
-                  {s}
+              {scopeValues.map((v) => (
+                <MenuItem key={v} value={v}>
+                  {humanizeEnum(v)}
                 </MenuItem>
               ))}
             </TextField>
@@ -260,7 +289,7 @@ function CreateProcedureDialog(props: {
             >
               {DECISION_DOMAINS.map((d) => (
                 <MenuItem key={d} value={d}>
-                  {d}
+                  {humanizeEnum(d)}
                 </MenuItem>
               ))}
             </TextField>
@@ -318,7 +347,7 @@ function CreateProcedureDialog(props: {
                     >
                       {PROOF_TYPES.map((p) => (
                         <MenuItem key={p} value={p}>
-                          {p}
+                          {humanizeEnum(p)}
                         </MenuItem>
                       ))}
                     </TextField>
@@ -345,7 +374,7 @@ function CreateProcedureDialog(props: {
                 {
                   instruction: "",
                   proof_required: false,
-                  proof_type: "RECEIPT",
+                  proof_type: "receipt",
                   optional: false,
                 },
               ])
@@ -372,6 +401,7 @@ export const ProceduresPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [query, setQuery] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -380,7 +410,7 @@ export const ProceduresPage: React.FC = () => {
       const res = await apiGet<any>("/dashboard/procedures");
       setRows(Array.isArray(res) ? res : (res.items ?? res.procedures ?? []));
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -390,12 +420,20 @@ export const ProceduresPage: React.FC = () => {
     void load();
   }, [load]);
 
-  const toggleEnabled = async (p: Procedure) => {
-    await apiSend("PUT", `/procedures/${procId(p)}`, {
-      enabled: !p.enabled,
-    });
-    void load();
-  };
+  // Client-side name/description filter + name sort (goals-procedures-12).
+  const visibleRows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const filtered = q
+      ? rows.filter(
+          (p) =>
+            (p.name || "").toLowerCase().includes(q) ||
+            (p.description || "").toLowerCase().includes(q),
+        )
+      : rows;
+    return [...filtered].sort((a, b) =>
+      (a.name || "").localeCompare(b.name || ""),
+    );
+  }, [rows, query]);
 
   return (
     <Box sx={{ p: 2 }}>
@@ -416,83 +454,96 @@ export const ProceduresPage: React.FC = () => {
           </Button>
         )}
       </Stack>
-      {error && <Alert severity="error">{error}</Alert>}
+      {error && (
+        <Alert severity="error" sx={{ mb: 1 }}>
+          {error}
+        </Alert>
+      )}
       {loading ? (
         <CircularProgress />
+      ) : rows.length === 0 ? (
+        <Box sx={{ py: 4, textAlign: "center" }}>
+          <Typography color="text.secondary" gutterBottom>
+            No procedures defined yet.
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            {authority >= 50
+              ? "Use “Create Procedure” to define a reusable, step-by-step runbook."
+              : "Procedures appear here once a team lead or admin defines them."}
+          </Typography>
+        </Box>
       ) : (
-        <Paper variant="outlined">
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableCell />
-                <TableCell>Name</TableCell>
-                <TableCell>Scope</TableCell>
-                <TableCell align="right">Steps</TableCell>
-                <TableCell align="right">Active</TableCell>
-                <TableCell align="right">Completions</TableCell>
-                <TableCell>Enabled</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {rows.map((p) => {
-                const id = procId(p);
-                const isOpen = expanded === id;
-                return (
-                  <React.Fragment key={id}>
-                    <TableRow hover>
-                      <TableCell>
-                        <IconButton
-                          size="small"
-                          onClick={() => setExpanded(isOpen ? null : id)}
-                        >
-                          {isOpen ? <ExpandMoreIcon /> : <ChevronRightIcon />}
-                        </IconButton>
-                      </TableCell>
-                      <TableCell>
-                        <Typography variant="body2">{p.name}</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          {p.description?.slice(0, 80)}
-                        </Typography>
-                      </TableCell>
-                      <TableCell>
-                        {p.scope && <Chip size="small" label={p.scope} />}
-                      </TableCell>
-                      <TableCell align="right">
-                        {p.steps?.length ?? "—"}
-                      </TableCell>
-                      <TableCell align="right">
-                        {p.active_executions?.length ?? 0}
-                      </TableCell>
-                      <TableCell align="right">
-                        {p.total_completions ?? 0}
-                      </TableCell>
-                      <TableCell>
-                        <Switch
-                          size="small"
-                          checked={!!p.enabled}
-                          disabled={authority < 50}
-                          onChange={() => toggleEnabled(p)}
-                        />
-                      </TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell colSpan={7} sx={{ p: 0, border: 0 }}>
-                        <Collapse in={isOpen} unmountOnExit>
-                          {isOpen && <DetailPanel id={id} />}
-                        </Collapse>
-                      </TableCell>
-                    </TableRow>
-                  </React.Fragment>
-                );
-              })}
-              {rows.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={7}>No procedures defined.</TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
-        </Paper>
+        <>
+          <TextField
+            size="small"
+            placeholder="Filter procedures by name or description…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            sx={{ mb: 1, minWidth: 320 }}
+          />
+          {visibleRows.length === 0 ? (
+            <Typography color="text.secondary" sx={{ mt: 2 }}>
+              No procedures match “{query.trim()}”.
+            </Typography>
+          ) : (
+            <Paper variant="outlined">
+              <Table>
+                <TableHead>
+                  <TableRow>
+                    <TableCell />
+                    <TableCell>Name</TableCell>
+                    <TableCell>Scope</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {visibleRows.map((p) => {
+                    const id = procId(p);
+                    const isOpen = expanded === id;
+                    return (
+                      <React.Fragment key={id}>
+                        <TableRow hover>
+                          <TableCell>
+                            <IconButton
+                              size="small"
+                              onClick={() => setExpanded(isOpen ? null : id)}
+                            >
+                              {isOpen ? (
+                                <ExpandMoreIcon />
+                              ) : (
+                                <ChevronRightIcon />
+                              )}
+                            </IconButton>
+                          </TableCell>
+                          <TableCell>
+                            <Typography variant="body2">{p.name}</Typography>
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                            >
+                              {p.description?.slice(0, 80)}
+                            </Typography>
+                          </TableCell>
+                          <TableCell>
+                            {p.scope && (
+                              <Chip size="small" label={humanizeEnum(p.scope)} />
+                            )}
+                          </TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell colSpan={3} sx={{ p: 0, border: 0 }}>
+                            <Collapse in={isOpen} unmountOnExit>
+                              {isOpen && <DetailPanel id={id} />}
+                            </Collapse>
+                          </TableCell>
+                        </TableRow>
+                      </React.Fragment>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </Paper>
+          )}
+        </>
       )}
       <CreateProcedureDialog
         open={createOpen}

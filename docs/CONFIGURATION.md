@@ -719,6 +719,7 @@ Path prefix: `guards.*`
 | `guards.llm_escalation_max_tokens` | `int` | `500` | -- | `ge=50` | Max output tokens for LLM escalation calls (Layer 6) | Too low = truncated LLM guard responses; too high = wasted tokens | `500` / `500` / `500` |
 | `guards.llm_escalation_timeout_seconds` | `float` | `10.0` | -- | `ge=1.0` | Timeout for LLM escalation HTTP calls | Too low = frequent timeouts; too high = blocks guard pipeline on slow LLM | `10.0` / `10.0` / `15.0` |
 | `guards.max_pattern_length` | `int` | `500` | -- | `ge=10` | Max characters for pattern strings in static rule matching | Too low = truncated patterns miss matches; too high = slow regex evaluation | `500` / `500` / `500` |
+| `guards.custom_rule_refresh_seconds` | `int` | `15` | -- | `ge=1` | Max staleness before loaded guard sessions re-probe the `CustomRuleStore` version counter for operator rule changes (single-row SQLite read, shared across sessions; full rule reload only when the version changed). Same-process dashboard rule writes invalidate the probe and enforce on the very next guard check; this interval only bounds cross-process staleness | Too low = frequent SQLite probes on the guard hot path; too high = rules changed from another process take longer to enforce | `15` / `15` / `15` |
 
 #### `StrictnessPreset` (nested in `guards.strictness_presets.*`)
 
@@ -3549,9 +3550,8 @@ RETURN properties(t) AS props
 
 #### Performance Implications
 
-1. **No explicit Neo4j indexes** -- The codebase does not create Neo4j property indexes via `CREATE INDEX`. All queries rely on label scans filtered by property matching. For production, the following indexes would improve performance:
+1. **No Neo4j indexes by default** -- Out of the box, all queries rely on label scans filtered by property matching. Five `FactDataPoint` property indexes are available as an **opt-in** feature managed via the admin API (see § 8. Fact Indexes below) — nothing creates them automatically. Additional indexes that would improve performance in production (not yet in the managed catalog):
    - `CREATE INDEX FOR (f:FactDataPoint) ON (f.eb_id)`
-   - `CREATE INDEX FOR (f:FactDataPoint) ON (f.gateway_id)`
    - `CREATE INDEX FOR (f:FactDataPoint) ON (f.session_key)`
    - `CREATE INDEX FOR (a:ActorDataPoint) ON (a.eb_id)`
    - `CREATE INDEX FOR (a:ActorDataPoint) ON (a.gateway_id)`
@@ -3568,6 +3568,42 @@ RETURN properties(t) AS props
 5. **Lazy driver init** -- Both `GraphAdapter` and `VectorAdapter` create connections on first use, avoiding startup overhead if the stores are not needed (e.g., in test/dev modes).
 
 6. **EXISTS subquery** -- The Phase 8 scope-aware goal query uses `EXISTS { MATCH ... }` which requires Neo4j 5.0+ (compatible with `neo4j:5-community` image).
+
+### 8. Fact Indexes (Opt-In, Admin-Managed)
+
+Five Neo4j property indexes on `FactDataPoint` speed up the dashboard memory browser and structural queries. They are **opt-in and default OFF** — no bootstrap, container-init, or startup path creates them. There is **no config flag**: Neo4j itself (`SHOW INDEXES`) is the source of truth, queried live via `GET /admin/indexes`, so state can never drift.
+
+#### Index Catalog (`FACT_INDEX_SPECS`, `elephantbroker/runtime/memory/facade.py`)
+
+| Index name | Property | Speeds up |
+|------------|----------|-----------|
+| `eb_fact_gateway_id` | `gateway_id` | Tenant filter on every browse / module-level Cypher query |
+| `eb_fact_created_at` | `created_at` | Default browser sort + recency-window queries |
+| `eb_fact_confidence` | `confidence` | Confidence range filter + sort |
+| `eb_fact_scope` | `scope` | Scope filter (session/actor/team/org/global) |
+| `eb_fact_memory_class` | `memory_class` | Memory-class filter |
+
+#### Management Surface
+
+Per-index control via the admin API (also exposed through `ebrun` and the dashboard). All four routes require the `manage_indexes` authority action (default `min_authority_level: 90` — config-class, same as `create_org`):
+
+```bash
+GET    /admin/indexes                        # catalog + live SHOW INDEXES status
+POST   /admin/indexes/{index_name}           # create (CREATE INDEX IF NOT EXISTS)
+DELETE /admin/indexes/{index_name}           # drop (DROP INDEX IF EXISTS)
+POST   /admin/indexes/{index_name}/rebuild   # drop then re-create
+```
+
+Unknown index names return `404`. Status entries report `exists`, `state` (`ONLINE` / `POPULATING` / `FAILED`), and `population_percent` straight from Neo4j.
+
+#### Cost of Enabling
+
+- **Per-write maintenance:** every `FactDataPoint` create/update pays index maintenance inside Neo4j for each enabled index (write amplification — this is why they are opt-in).
+- **One-time back-fill:** on creation, Neo4j populates the index in the background (`state: POPULATING` until done); queries fall back to label scans until `ONLINE`.
+
+#### Multi-Tenant Note
+
+Neo4j indexes are **database-global**: one index covers `FactDataPoint` nodes of ALL gateways sharing the Neo4j database. Enabling (or dropping) an index affects every tenant on the host — hence the level-90 authority gate.
 
 
 ---

@@ -110,17 +110,13 @@ class ProcedureEngine(IProcedureEngine):
 
         # TODO-8-R1-004 / TODO-8-R1-008: emit identity fields (gateway_id,
         # session_key, session_id) so per-tenant trace isolation works on
-        # activation events. PROCEDURE_STEP_PASSED is reused here for the
-        # activation event because TraceEventType has no PROCEDURE_ACTIVATED
-        # value; B2.5 wired `inc_procedure_activated()` beside this trace as
-        # the distinct counter, and adding a new enum value would be a
-        # breaking schema change. The `payload.action == "activate"` keeps
-        # the activation distinguishable from genuine step-pass events at
-        # query time. Splitting into a dedicated event type is a future
-        # refactor (tracked as observability follow-up).
+        # activation events. Uses the dedicated PROCEDURE_ACTIVATED event type
+        # so activation is no longer conflated with genuine per-step passes
+        # (which now emit PROCEDURE_STEP_PASSED from check_step). B2.5 wired
+        # `inc_procedure_activated()` beside this trace as the distinct counter.
         await self._trace.append_event(
             TraceEvent(
-                event_type=TraceEventType.PROCEDURE_STEP_PASSED,
+                event_type=TraceEventType.PROCEDURE_ACTIVATED,
                 gateway_id=self._gateway_id,
                 session_key=session_key,
                 session_id=session_id,
@@ -180,6 +176,25 @@ class ProcedureEngine(IProcedureEngine):
             execution.completed_steps.append(step_id)
             if self._metrics:
                 self._metrics.inc_procedure_step_completed()
+            # Emit a real per-step-pass trace event (activation now uses the
+            # dedicated PROCEDURE_ACTIVATED type). Fired only on first
+            # completion so it mirrors the metric above and stays visible to
+            # session_id/gateway-scoped trace summaries.
+            await self._trace.append_event(
+                TraceEvent(
+                    event_type=TraceEventType.PROCEDURE_STEP_PASSED,
+                    gateway_id=self._gateway_id,
+                    session_key=execution.session_key or None,
+                    session_id=execution.session_id,
+                    procedure_ids=[execution.procedure_id],
+                    actor_ids=[execution.actor_id] if execution.actor_id else [],
+                    payload={
+                        "action": "step_passed",
+                        "execution_id": str(execution.execution_id),
+                        "step_id": str(step_id),
+                    },
+                )
+            )
 
         # Update auto-goal sub-goal
         if self._session_goal_store and execution.session_key and execution.session_id:

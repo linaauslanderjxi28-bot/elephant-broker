@@ -9,7 +9,7 @@ from elephantbroker.schemas.trace import TraceEvent, TraceEventType, TraceQuery
 
 class TestTraceEventType:
     def test_all_event_types(self):
-        assert len(TraceEventType) == 51  # 44 (Phase 8) + 3 (Phase 9) + 4 (Phase 5 session goals)
+        assert len(TraceEventType) == 52  # 44 (Phase 8) + 3 (Phase 9) + 4 (Phase 5 session goals) + 1 (Phase 11 PROCEDURE_ACTIVATED)
 
     def test_spec_types_present(self):
         expected = {
@@ -38,6 +38,10 @@ class TestTraceEventType:
             # Phase 9 additions
             "CONSOLIDATION_STARTED", "CONSOLIDATION_STAGE_COMPLETED",
             "CONSOLIDATION_COMPLETED",
+            # Phase 11 addition — dedicated activation event so activate() no
+            # longer reuses PROCEDURE_STEP_PASSED (which now marks real
+            # per-step passes emitted from check_step)
+            "PROCEDURE_ACTIVATED",
         }
         assert {t.name for t in TraceEventType} == expected
 

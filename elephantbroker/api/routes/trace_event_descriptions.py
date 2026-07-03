@@ -8,6 +8,7 @@ TRACE_EVENT_DESCRIPTIONS: dict[str, str] = {
     "artifact_created": "Tool artifact stored (code, file, URL, etc.)",
     "claim_made": "Agent made a verifiable claim",
     "claim_verified": "Claim verification completed (accepted/rejected/pending)",
+    "procedure_activated": "Procedure activated for a session — execution tracking started",
     "procedure_step_passed": "Procedure step completed successfully",
     "procedure_step_failed": "Procedure step failed validation",
     "guard_triggered": "Red-line guard triggered — action blocked or requires approval",

@@ -24,8 +24,30 @@ class BasicMemoryScenario(Scenario):
             "Qdrant stores vector embeddings",
         ]):
             r = await self.sim.simulate_tool_memory_store(text, category="technical")
-            self.step(f"store_fact_{i}", passed="id" in r or "fact_id" in r,
+            # A fresh store returns an id; a dedup-skip (409) returns
+            # existing_fact_id/status=skipped — both mean the fact is in the store.
+            stored_ok = ("id" in r or "fact_id" in r
+                         or "existing_fact_id" in r or r.get("status") == "skipped")
+            self.step(f"store_fact_{i}", passed=stored_ok,
                       message=f"Stored: {text[:40]}")
+
+        # Step 1b: Drive the FULL-tier extraction path so FACT_EXTRACTED can fire.
+        # /memory/store only persists a fact DataPoint — it never runs the
+        # turn_ingest LLM pipeline that emits FACT_EXTRACTED. /context/ingest-batch
+        # runs turn_ingest scoped to this session_id, making the fact_extracted
+        # assertion satisfiable by store+search+ingest.
+        ingest = await self.sim.simulate_context_ingest_batch([
+            {"role": "user", "content": (
+                "We use Redis for pub/sub messaging, Neo4j with Cypher for graph "
+                "queries, and Qdrant to store vector embeddings."
+            )},
+            {"role": "assistant", "content": (
+                "Noted: Redis handles pub/sub, Neo4j uses the Cypher query "
+                "language, and Qdrant is the vector embedding store."
+            )},
+        ])
+        self.step("context_ingest_batch", passed=ingest is not None,
+                  message="Drove FULL-tier extraction (turn_ingest)")
 
         # Step 2: Search
         for query in ["Redis messaging", "Cypher graph queries", "vector embeddings"]:

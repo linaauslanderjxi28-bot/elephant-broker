@@ -21,6 +21,7 @@ Design rules honoured here:
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -136,12 +137,61 @@ def _range_start(time_range: str) -> tuple[str, datetime]:
     return tr, datetime.now(UTC) - _TIME_RANGES[tr]
 
 
+def _epoch_ms_to_dt(ms) -> datetime | None:
+    """Convert a stored ``eb_created_at``/``eb_updated_at`` epoch-ms int to UTC datetime."""
+    try:
+        v = int(ms)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    return datetime.fromtimestamp(v / 1000.0, tz=UTC)
+
+
+def _short_id(value) -> str:
+    """8-char prefix of an id, mirroring the frontend ``shortId`` helper."""
+    s = str(value or "")
+    return s[:8] if s else ""
+
+
+def _actor_label(display_name, actor_id) -> str:
+    """Resolve a human label for an actor from its registry ``display_name``.
+
+    Returns the registered ``display_name`` when present (the frontend
+    ``actorDisplayName`` helper further trims any ``dashboard:<uuid>`` handle),
+    else a short id prefix so the UI never renders a bare full UUID.
+    """
+    dn = str(display_name or "").strip()
+    if dn:
+        return dn
+    return _short_id(actor_id) or str(actor_id or "")
+
+
 def _get_redis(container):
     return getattr(container, "redis", None)
 
 
 def _get_custom_rule_store(container):
     return getattr(container, "custom_rule_store", None)
+
+
+def _invalidate_guard_rules_probe(container) -> None:
+    """Best-effort: nudge the in-process guard engine to re-probe the
+    CustomRuleStore version on its next preflight (FIX-4).
+
+    Called after a successful rule create/update/delete so a same-process rule
+    change enforces on the very next guard check — the configured
+    ``guards.custom_rule_refresh_seconds`` interval then only governs
+    cross-process staleness. Silently a no-op when no engine is wired.
+    """
+    engine = getattr(container, "guard_engine", None)
+    invalidate = getattr(engine, "invalidate_custom_rules_probe", None)
+    if not callable(invalidate):
+        return
+    try:
+        invalidate()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("dashboard: guard rules probe invalidation failed: %s", exc)
 
 
 def _get_prefs_store(container):
@@ -203,17 +253,69 @@ def _summarize_event(event_type: str, payload: dict) -> str:
         return event_type
 
 
-_SECRET_HINTS = ("password", "secret", "token", "api_key", "apikey", "dsn", "private_key")
+# Low-level / high-frequency internal event types that flood the overview
+# activity feed (one retrieval fans out into many ``retrieval_source_result``
+# rows, etc.). They are excluded from the *feed* only — period counters above
+# still aggregate over the full event stream. Keeps one search = one feed row.
+_FEED_NOISE_EVENT_TYPES: frozenset[str] = frozenset({
+    "retrieval_source_result",
+    "scoring_completed",
+    "memory_class_assigned",
+    "token_usage_reported",
+    "context_window_reported",
+    "successful_use_tracked",
+    "cognee_cognify_completed",
+    "ingest_buffer_flush",
+    "handle_resolved",
+    "subagent_parent_mapped",
+    "profile_resolved",
+    "after_turn_completed",
+    "procedure_completion_checked",
+    "constraint_reinjected",
+})
+
+
+# --- Effective-config secret masking (authority >= 90 view) ----------------
+# Mask only genuine credentials. A naive substring match ("token" in
+# "max_tokens", "api_key" in "api_keys_db_path") over-masks numeric limits and
+# filesystem paths, hiding harmless config from operators. We match secret
+# *words* on token boundaries plus a small set of known compounds, and never
+# mask keys that denote a location/limit.
+_SECRET_WORD_TOKENS: frozenset[str] = frozenset(
+    {"password", "passwd", "secret", "token", "credential", "credentials"}
+)
+_SECRET_COMPOUNDS: tuple[str, ...] = (
+    "api_key", "apikey", "private_key", "privatekey", "access_token",
+    "refresh_token", "client_secret", "hmac_secret", "dsn",
+)
+_NONSECRET_KEY_SUFFIXES: tuple[str, ...] = (
+    "_path", "_dir", "_file", "_url", "_uri", "_host", "_port",
+)
+
+
+def _is_secret_key(key: str) -> bool:
+    """True only when ``key`` names a real credential (not a path/limit).
+
+    ``max_tokens`` → False (numeric limit; ``tokens`` != the word ``token``).
+    ``api_keys_db_path`` → False (``_path`` suffix = location).
+    ``neo4j_password`` / ``api_key`` / ``callback_hmac_secret`` → True.
+    """
+    k = str(key).lower()
+    if k.endswith(_NONSECRET_KEY_SUFFIXES):
+        return False
+    words = {w for w in re.split(r"[^a-z0-9]+", k) if w}
+    if words & _SECRET_WORD_TOKENS:
+        return True
+    return any(compound in k for compound in _SECRET_COMPOUNDS)
 
 
 def _mask_config(value):
-    """Recursively mask secret-looking values in a config dump."""
+    """Recursively mask real secret values in a config dump."""
     if isinstance(value, dict):
         out = {}
         for k, v in value.items():
-            key_l = str(k).lower()
-            if any(hint in key_l for hint in _SECRET_HINTS) and isinstance(v, (str, int)):
-                out[k] = "***MASKED***" if v not in (None, "", 0) else v
+            if _is_secret_key(k) and isinstance(v, str) and v:
+                out[k] = "***MASKED***"
             else:
                 out[k] = _mask_config(v)
         return out
@@ -310,7 +412,12 @@ async def overview(request: Request, time_range: str = Query("24h")):
                 guard_near_misses += 1
             elif et == "degraded_operation":
                 errors += 1
-        for e in sorted(events, key=lambda x: x.timestamp, reverse=True)[:10]:
+        # Feed: drop low-level/internal noise so one search is one row, not six
+        # (overview-3). Period counters above still see the full stream.
+        feed_events = [
+            e for e in events if e.event_type.value not in _FEED_NOISE_EVENT_TYPES
+        ]
+        for e in sorted(feed_events, key=lambda x: x.timestamp, reverse=True)[:10]:
             recent_events.append(
                 RecentEvent(
                     timestamp=e.timestamp,
@@ -445,15 +552,24 @@ async def memory_browse(body: MemoryBrowseRequest, request: Request):
     # Lazy import of the facade query schemas (owned by the facade workstream).
     from elephantbroker.schemas.fact import FactFilters, FactSort, FactSortField
 
-    sort_map = {
-        "created_at": FactSortField.CREATED_AT,
-        "updated_at": FactSortField.UPDATED_AT,
-        "confidence": FactSortField.CONFIDENCE,
-        "use_count": FactSortField.USE_COUNT,
-        "successful_use_count": FactSortField.USE_COUNT,  # closest supported field
-        "last_used_at": FactSortField.LAST_USED_AT,
-    }
-    sort_field = sort_map.get(body.sort_by, FactSortField.CREATED_AT)
+    # Sortable columns == the whitelisted FactSortField enum (the facade's
+    # injection-safe ORDER BY boundary). Deriving the map from the enum means a
+    # later enum extension (category / session_key / successful_use_count — see
+    # crossFileNeeds) becomes sortable here with zero code change. Columns the
+    # UI offers but the facade can't honor fall back to created_at, and the
+    # response echoes ``applied_sort_*`` + ``sortable_fields`` so the grid
+    # reflects reality and can restrict its menu instead of silently sorting by
+    # the wrong column (memory-browse-6). The old map aliased
+    # successful_use_count -> use_count, which is exactly that silent mis-sort.
+    sort_map = {f.value: f for f in FactSortField}
+    sortable_fields = list(sort_map.keys())
+    requested_sort = body.sort_by or "created_at"
+    sort_field = sort_map.get(requested_sort, FactSortField.CREATED_AT)
+    applied_sort_by = (
+        requested_sort if requested_sort in sort_map else FactSortField.CREATED_AT.value
+    )
+    sort_order = "asc" if (body.sort_order or "desc").lower() == "asc" else "desc"
+
     filters = FactFilters(
         scope=body.scope,
         memory_class=body.memory_class,
@@ -461,8 +577,13 @@ async def memory_browse(body: MemoryBrowseRequest, request: Request):
         actor_id=str(body.source_actor_id) if body.source_actor_id else None,
         session_key=body.session_key,
         text_contains=body.text_contains,
+        # min_confidence IS a first-class FactFilters field — push it into the
+        # facade so ``total`` is computed AFTER filtering (rows == count).
+        # Applying it post-page (the old path) left the footer counting facts
+        # the page had already dropped (memory-browse-5).
+        min_confidence=body.min_confidence,
     )
-    sort = FactSort(field=sort_field, descending=(body.sort_order or "desc").lower() != "asc")
+    sort = FactSort(field=sort_field, descending=(sort_order != "asc"))
 
     try:
         page = await ms.query_facts(
@@ -478,9 +599,9 @@ async def memory_browse(body: MemoryBrowseRequest, request: Request):
         logger.warning("dashboard: query_facts failed: %s", exc)
         items, total = [], 0
 
-    # Best-effort supplementary filters (not in frozen FactFilters).
-    if body.min_confidence is not None:
-        items = [f for f in items if (f.confidence or 0.0) >= body.min_confidence]
+    # goal_id is an edge filter with no FactFilters equivalent; applied as a
+    # best-effort page-level refinement. Its total/has_more skew is tracked
+    # under memory-browse-2 (a frontend double-fetch fix outside this file).
     if body.goal_id is not None:
         container = get_container(request)
         goal_rows = await _cypher(
@@ -493,9 +614,16 @@ async def memory_browse(body: MemoryBrowseRequest, request: Request):
         items = [f for f in items if str(f.id) in goal_ids]
 
     has_more = (offset + len(items)) < total
-    return PaginatedResult[FactAssertion](
+    result = PaginatedResult[FactAssertion](
         items=items, total=total, offset=offset, limit=body.per_page, has_more=has_more
     ).model_dump(mode="json")
+    # Additive sort metadata (safe for existing consumers, which read items/total
+    # only): lets the grid reflect the sort actually applied and restrict its
+    # sortable columns to the set the backend can honor.
+    result["applied_sort_by"] = applied_sort_by
+    result["applied_sort_order"] = sort_order
+    result["sortable_fields"] = sortable_fields
+    return result
 
 
 @router.get("/memory/{fact_id}/detail", dependencies=[READ])
@@ -504,18 +632,31 @@ async def memory_detail(fact_id: uuid.UUID, request: Request):
     container = get_container(request)
     gw = _gateway_id(request)
 
+    # ``target_type`` picks the meaningful DataPoint label — ``labels(x)[0]``
+    # often returns Cognee's internal ``__Node__`` (dead "Connections" links,
+    # gap-4-6). ``target_label`` also coalesces ``claim_text`` so claim edges
+    # render their text instead of a bare UUID.
+    _ttype = (
+        "coalesce(head([l IN labels({n}) WHERE l ENDS WITH 'DataPoint']), "
+        "head([l IN labels({n}) WHERE NOT l STARTS WITH '__' AND l <> 'DataPoint' "
+        "AND l <> 'Entity']), head(labels({n})))"
+    )
+    _tlabel = (
+        "coalesce({n}.display_name, {n}.title, {n}.name, {n}.claim_text, "
+        "left({n}.text, 60), {n}.eb_id)"
+    )
     rows = await _cypher(
         container,
         "MATCH (f:FactDataPoint {eb_id: $fid, gateway_id: $gw}) "
         "OPTIONAL MATCH (f)-[r]->(t) "
         "WITH f, collect({relation_type: type(r), direction: 'outgoing', "
-        "target_id: t.eb_id, target_type: labels(t)[0], "
-        "target_label: coalesce(t.display_name, t.title, left(t.text, 60), t.eb_id), "
+        "target_id: t.eb_id, target_type: " + _ttype.format(n="t") + ", "
+        "target_label: " + _tlabel.format(n="t") + ", "
         "target_properties: properties(t)}) AS outgoing "
         "OPTIONAL MATCH (s)-[r2]->(f) "
         "WITH f, outgoing, collect({relation_type: type(r2), direction: 'incoming', "
-        "target_id: s.eb_id, target_type: labels(s)[0], "
-        "target_label: coalesce(s.display_name, s.title, left(s.text, 60), s.eb_id), "
+        "target_id: s.eb_id, target_type: " + _ttype.format(n="s") + ", "
+        "target_label: " + _tlabel.format(n="s") + ", "
         "target_properties: properties(s)}) AS incoming "
         "RETURN properties(f) AS fact, outgoing + incoming AS edges",
         {"fid": str(fact_id), "gw": gw},
@@ -544,17 +685,40 @@ async def memory_detail(fact_id: uuid.UUID, request: Request):
                 target_properties=tp if isinstance(tp, dict) else {},
             )
         )
-        if rel == "SUPPORTS" and e.get("direction") == "outgoing":
+        # A linked claim is any edge whose target node is a ClaimDataPoint —
+        # keyed on the node label, not a specific edge type/direction, so this
+        # read survives whatever fact<->claim edge the evidence engine wires
+        # (gap-4-1, currently unwritten). ClaimDataPoint stores ``claim_text``,
+        # not ``text`` (gap-4-2).
+        if str(e.get("target_type") or "") == "ClaimDataPoint":
             claims.append(
                 LinkedClaim(
                     claim_id=str(e.get("target_id") or ""),
-                    claim_text=str(tp.get("text", ""))[:200],
-                    status=str(tp.get("status", "")),
-                    evidence_count=int(tp.get("evidence_count", 0) or 0),
+                    claim_text=str(tp.get("claim_text") or tp.get("text") or "")[:200],
+                    status=str(tp.get("status") or ""),
+                    evidence_count=int(tp.get("evidence_count") or 0),
                 )
             )
         if rel == "SUPERSEDES" and e.get("direction") == "incoming":
             superseded_by = e.get("target_id")
+
+    # Real evidence count from the edges the engine actually writes:
+    # (:EvidenceDataPoint)-[:SUPPORTS]->(:ClaimDataPoint). The claim node carries
+    # no denormalized ``evidence_count`` property, so count the edges (gap-4-3).
+    if claims:
+        cids = [c.claim_id for c in claims if c.claim_id]
+        if cids:
+            ev_rows = await _cypher(
+                container,
+                "MATCH (e)-[:SUPPORTS]->(c:ClaimDataPoint) "
+                "WHERE c.gateway_id = $gw AND c.eb_id IN $cids "
+                "RETURN c.eb_id AS cid, count(e) AS n",
+                {"gw": gw, "cids": cids},
+            )
+            counts = {str(r.get("cid")): int(r.get("n", 0) or 0) for r in ev_rows}
+            for c in claims:
+                if c.claim_id in counts:
+                    c.evidence_count = counts[c.claim_id]
 
     fact = _fact_from_props(fact_props)
     usage = FactUsageSummary(
@@ -595,8 +759,27 @@ async def memory_detail(fact_id: uuid.UUID, request: Request):
 
 
 def _fact_from_props(props: dict) -> FactAssertion:
-    """Best-effort reconstruction of a FactAssertion from Neo4j node props."""
+    """Reconstruct a FactAssertion from Neo4j node props.
+
+    Delegates to the canonical ``FactDataPoint(**clean_graph_props(props))
+    .to_schema()`` path the facade uses, so stored fields survive —
+    ``eb_created_at`` / ``eb_updated_at`` map back to created_at/updated_at,
+    plus source_actor_id, session_id, goal_ids, last-used, etc. The previous
+    hand-rolled copy never read those keys, so ``FactAssertion`` fell back to
+    ``now()`` and the detail page always showed "created less than a minute
+    ago" while nulling the real provenance fields (memory-browse-3).
+    """
     p = dict(props or {})
+    try:
+        from elephantbroker.runtime.adapters.cognee.datapoints import FactDataPoint
+        from elephantbroker.runtime.graph_utils import clean_graph_props
+
+        return FactDataPoint(**clean_graph_props(p)).to_schema()
+    except Exception:  # noqa: BLE001 - fall back to a tolerant partial rebuild
+        logger.debug(
+            "dashboard: canonical fact rebuild failed; partial fallback", exc_info=True
+        )
+
     data: dict = {}
     fid = p.get("eb_id") or p.get("id")
     if fid:
@@ -610,12 +793,11 @@ def _fact_from_props(props: dict) -> FactAssertion:
     ):
         if p.get(key) is not None:
             data[key] = p[key]
-    for key in ("confidence",):
-        if p.get(key) is not None:
-            try:
-                data[key] = float(p[key])
-            except Exception:  # noqa: BLE001
-                pass
+    if p.get("confidence") is not None:
+        try:
+            data["confidence"] = float(p["confidence"])
+        except Exception:  # noqa: BLE001
+            pass
     for key in ("use_count", "successful_use_count"):
         if p.get(key) is not None:
             try:
@@ -625,6 +807,14 @@ def _fact_from_props(props: dict) -> FactAssertion:
     for key in ("archived", "autorecall_blacklisted"):
         if p.get(key) is not None:
             data[key] = bool(p[key])
+    # Preserve the stored timestamps even on the fallback path so we never
+    # fabricate "just now".
+    created = _epoch_ms_to_dt(p.get("eb_created_at"))
+    if created is not None:
+        data["created_at"] = created
+    updated = _epoch_ms_to_dt(p.get("eb_updated_at"))
+    if updated is not None:
+        data["updated_at"] = updated
     if p.get("gateway_id") is not None:
         data["gateway_id"] = p["gateway_id"]
     if not data.get("text"):
@@ -660,57 +850,104 @@ async def memory_stats(request: Request, time_range: str = Query("24h")):
     agg = await _cypher(
         container,
         "MATCH (f:FactDataPoint) WHERE f.gateway_id = $gw "
-        "RETURN avg(f.confidence) AS avg_conf, avg(f.use_count) AS avg_use, "
-        "avg(toFloat(coalesce(f.successful_use_count, 0)) / "
-        "CASE WHEN f.use_count > 0 THEN f.use_count ELSE 1 END) AS avg_success",
+        "RETURN avg(f.confidence) AS avg_conf, avg(f.use_count) AS avg_use",
         {"gw": gw},
     )
     avg_conf = float(agg[0].get("avg_conf") or 0.0) if agg else 0.0
     avg_use = float(agg[0].get("avg_use") or 0.0) if agg else 0.0
-    avg_success = float(agg[0].get("avg_success") or 0.0) if agg else 0.0
 
+    # Success rate honestly: average only over facts that have actually been
+    # used. Never-used facts carry no success/failure signal — the old query
+    # counted them as 0% success (use_count 0 -> 0/1), dragging the average to
+    # zero and framing untested facts as failures (memory-stats-6). ``facts_with
+    # _usage`` lets the UI render "N/A" instead of a misleading 0%.
+    succ = await _cypher(
+        container,
+        "MATCH (f:FactDataPoint) WHERE f.gateway_id = $gw AND coalesce(f.use_count, 0) > 0 "
+        "RETURN avg(toFloat(coalesce(f.successful_use_count, 0)) / f.use_count) AS avg_success, "
+        "count(f) AS used_count",
+        {"gw": gw},
+    )
+    avg_success = float(succ[0].get("avg_success") or 0.0) if succ else 0.0
+    facts_with_usage = int(succ[0].get("used_count") or 0) if succ else 0
+
+    # Top actors by owned-fact count. Skip empty-string source ids (the blank
+    # first row, memory-stats-2) and resolve each actor's registry display_name
+    # so the column shows a name, not a raw UUID (memory-stats-3).
     top_rows = await _cypher(
         container,
-        "MATCH (f:FactDataPoint) WHERE f.gateway_id = $gw AND f.source_actor_id IS NOT NULL "
-        "RETURN f.source_actor_id AS aid, count(f) AS cnt ORDER BY cnt DESC LIMIT 10",
+        "MATCH (f:FactDataPoint) WHERE f.gateway_id = $gw "
+        "AND f.source_actor_id IS NOT NULL AND trim(f.source_actor_id) <> '' "
+        "WITH f.source_actor_id AS aid, count(f) AS cnt "
+        "ORDER BY cnt DESC LIMIT 10 "
+        "OPTIONAL MATCH (a:ActorDataPoint {eb_id: aid, gateway_id: $gw}) "
+        "RETURN aid, cnt, a.display_name AS display_name",
         {"gw": gw},
     )
     top_actors = [
         ActorFactCount(
             actor_id=str(r.get("aid")),
-            actor_label=str(r.get("aid")),
+            actor_label=_actor_label(r.get("display_name"), r.get("aid")),
             fact_count=int(r.get("cnt", 0) or 0),
         )
         for r in top_rows
     ]
 
-    # Activity rates + sparkline from the trace stream.
+    # Activity rates + sparkline. Prefer the DURABLE store (ClickHouse via the
+    # OtelTraceQueryClient) so wide ranges (6h/24h/7d) reflect real cross-session
+    # history instead of only the bounded in-memory trace buffer (memory-stats-1).
+    # Fall back to the ledger ONLY when the durable store is unavailable, and
+    # record the source actually used so the footer is truthful in both modes
+    # (memory-stats-5). The ledger is fetched up front so the fallback path and
+    # the retention-window computation share one handle.
     extractions = 0
     dedups = 0
     supersessions = 0
     buckets: dict[datetime, int] = {}
     ledger = get_trace_ledger(request)
-    if ledger is not None:
-        from elephantbroker.schemas.trace import TraceQuery
 
+    durable = None
+    trace_qc = getattr(container, "trace_query_client", None)
+    if trace_qc is not None and getattr(trace_qc, "available", False):
         try:
-            events = await ledger.query_trace(
-                TraceQuery(gateway_id=gw, from_timestamp=since, limit=10000)
-            )
+            durable = await trace_qc.get_activity_stats(gateway_id=gw, since=since)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("dashboard: stats query_trace failed: %s", exc)
-            events = []
-        for e in events:
-            et = e.event_type.value
-            if et == "fact_extracted":
-                n = int((e.payload or {}).get("facts_count", 1) or 1)
-                extractions += n
-                bucket = e.timestamp.replace(minute=0, second=0, microsecond=0)
-                buckets[bucket] = buckets.get(bucket, 0) + n
-            elif et == "dedup_triggered":
-                dedups += 1
-            elif et == "fact_superseded":
-                supersessions += 1
+            logger.warning("dashboard: durable activity stats failed: %s", exc)
+            durable = None
+
+    if durable is not None:
+        activity_source = "clickhouse"
+        extractions = int(durable.get("extractions", 0) or 0)
+        dedups = int(durable.get("dedups", 0) or 0)
+        supersessions = int(durable.get("supersessions", 0) or 0)
+        for b in durable.get("buckets", []) or []:
+            ts = b.get("timestamp")
+            if ts is None:
+                continue
+            buckets[ts] = buckets.get(ts, 0) + int(b.get("count", 0) or 0)
+    else:
+        activity_source = "ledger"
+        if ledger is not None:
+            from elephantbroker.schemas.trace import TraceQuery
+
+            try:
+                events = await ledger.query_trace(
+                    TraceQuery(gateway_id=gw, from_timestamp=since, limit=10000)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("dashboard: stats query_trace failed: %s", exc)
+                events = []
+            for e in events:
+                et = e.event_type.value
+                if et == "fact_extracted":
+                    n = int((e.payload or {}).get("facts_count", 1) or 1)
+                    extractions += n
+                    bucket = e.timestamp.replace(minute=0, second=0, microsecond=0)
+                    buckets[bucket] = buckets.get(bucket, 0) + n
+                elif et == "dedup_triggered":
+                    dedups += 1
+                elif et == "fact_superseded":
+                    supersessions += 1
 
     dedup_rate = round(dedups / extractions, 4) if extractions else 0.0
     supersession_rate = round(supersessions / extractions, 4) if extractions else 0.0
@@ -718,7 +955,7 @@ async def memory_stats(request: Request, time_range: str = Query("24h")):
         TimeBucket(timestamp=ts, count=c) for ts, c in sorted(buckets.items())
     ]
 
-    return MemoryStatsResponse(
+    resp = MemoryStatsResponse(
         time_range=tr,
         total_facts=total_facts,
         by_class=by_class,
@@ -732,6 +969,51 @@ async def memory_stats(request: Request, time_range: str = Query("24h")):
         supersession_rate=supersession_rate,
         creation_over_time=creation_over_time,
     ).model_dump(mode="json")
+    # Additive honesty metadata (safe for existing consumers, which read the
+    # typed fields only).
+    resp["facts_with_usage"] = facts_with_usage
+
+    # Truthful activity-source labelling (memory-stats-1/5): the footer must
+    # state the source that ACTUALLY served the activity data at runtime — never
+    # a hardcoded claim.
+    resp["activity_source"] = activity_source
+    if activity_source == "clickhouse":
+        # The durable store serves the full requested window — nothing is capped.
+        resp["activity_source_label"] = "ClickHouse (durable)"
+        resp["activity_retention_seconds"] = None
+        resp["activity_window_capped"] = False
+        resp["note"] = (
+            "Activity rates and the creation sparkline are served from the "
+            "durable ClickHouse trace store over the full selected range."
+        )
+    else:
+        # In-memory trace buffer retention (RC-5): the ledger keeps only the last
+        # ``memory_ttl_seconds`` of events, so activity for a wider range can only
+        # ever reflect the retained window. Surface the effective window + a note
+        # so the UI can annotate (or cap) ranges the buffer cannot serve.
+        resp["activity_source_label"] = "in-memory trace ledger"
+        retention_s = (
+            int(getattr(ledger, "_ttl_seconds", 3600) or 3600) if ledger is not None else 3600
+        )
+        requested_s = int(_TIME_RANGES[tr].total_seconds())
+        activity_capped = requested_s > retention_s
+        resp["activity_retention_seconds"] = retention_s
+        resp["activity_window_capped"] = activity_capped
+        if activity_capped:
+            if retention_s >= 3600:
+                window_txt = f"{retention_s // 3600}h"
+            elif retention_s >= 60:
+                window_txt = f"{retention_s // 60}m"
+            else:
+                window_txt = f"{retention_s}s"
+            resp["note"] = (
+                "Activity rates and the creation sparkline reflect only the last "
+                f"{window_txt} of events retained in the in-memory trace buffer; the "
+                "selected range is wider than buffer retention. Enable the durable "
+                "ClickHouse trace store (EB_CLICKHOUSE_ENABLED=true) for full-range "
+                "analytics."
+            )
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -1112,6 +1394,7 @@ async def guards_create_rule(body: StaticRule, request: Request):
     except Exception as exc:  # noqa: BLE001
         logger.warning("dashboard: create rule failed: %s", exc)
         return JSONResponse(status_code=400, content={"detail": f"Failed to create rule: {exc}"})
+    _invalidate_guard_rules_probe(container)
     return created.model_dump(mode="json")
 
 
@@ -1133,6 +1416,7 @@ async def guards_update_rule(rule_id: str, body: GuardRuleUpdate, request: Reque
         return JSONResponse(status_code=400, content={"detail": f"Failed to update rule: {exc}"})
     if updated is None:
         return JSONResponse(status_code=404, content={"detail": "Rule not found"})
+    _invalidate_guard_rules_probe(container)
     return updated.model_dump(mode="json")
 
 
@@ -1151,6 +1435,7 @@ async def guards_delete_rule(rule_id: str, request: Request):
         return JSONResponse(status_code=400, content={"detail": f"Failed to delete rule: {exc}"})
     if not ok:
         return JSONResponse(status_code=404, content={"detail": "Rule not found"})
+    _invalidate_guard_rules_probe(container)
     return {"rule_id": rule_id, "status": "deleted"}
 
 
@@ -1305,11 +1590,29 @@ async def procedure_detail(procedure_id: uuid.UUID, request: Request):
 
 
 @router.get("/actors", dependencies=[READ])
-async def actors(request: Request, actor_type: str | None = None):
-    """Active actor list enriched with owned-fact counts."""
+async def actors(
+    request: Request,
+    actor_type: str | None = None,
+    status: str = Query("all"),
+):
+    """Actor roster enriched with owned-fact counts + last-active time.
+
+    ``status`` selects which actors are returned: ``active`` (default-active +
+    unset), ``inactive`` (deactivated), or ``all``. It defaults to ``all`` so the
+    grid's client-side status filter has inactive actors to show — the old query
+    hard-filtered to active-only, so deactivated actors vanished entirely and the
+    Inactive/All filters could never populate (actors-orgs-3).
+    """
     container = get_container(request)
     gw = _gateway_id(request)
     params: dict = {"gw": gw}
+    status_l = (status or "all").lower()
+    if status_l == "inactive":
+        active_clause = "AND a.active = false "
+    elif status_l == "all":
+        active_clause = ""
+    else:  # "active" (and any unrecognised value) -> default-active semantics
+        active_clause = "AND (a.active = true OR a.active IS NULL) "
     type_clause = ""
     if actor_type:
         type_clause = "AND a.actor_type = $atype "
@@ -1317,28 +1620,35 @@ async def actors(request: Request, actor_type: str | None = None):
     rows = await _cypher(
         container,
         "MATCH (a:ActorDataPoint) WHERE a.gateway_id = $gw "
-        "AND (a.active = true OR a.active IS NULL) " + type_clause +
+        + active_clause + type_clause +
         "OPTIONAL MATCH (f:FactDataPoint {gateway_id: $gw}) "
         "WHERE f.source_actor_id = a.eb_id "
-        "RETURN properties(a) AS props, count(f) AS fact_count",
+        "RETURN properties(a) AS props, count(f) AS fact_count, "
+        "max(f.eb_created_at) AS last_active_ms",
         params,
     )
     out = []
     for r in rows:
         p = r.get("props") or {}
         handles = p.get("handles") or []
-        out.append(
-            ActorSummary(
-                actor_id=str(p.get("eb_id") or p.get("id") or ""),
-                display_name=str(p.get("display_name", "")),
-                actor_type=str(p.get("actor_type", "")),
-                authority_level=int(p.get("authority_level", 0) or 0),
-                org_id=p.get("org_id"),
-                active=bool(p.get("active", True)),
-                fact_count=int(r.get("fact_count", 0) or 0),
-                handles=list(handles) if isinstance(handles, list) else [],
-            ).model_dump(mode="json")
-        )
+        row = ActorSummary(
+            actor_id=str(p.get("eb_id") or p.get("id") or ""),
+            display_name=str(p.get("display_name", "")),
+            actor_type=str(p.get("actor_type", "")),
+            authority_level=int(p.get("authority_level", 0) or 0),
+            org_id=p.get("org_id"),
+            active=bool(p.get("active", True)),
+            fact_count=int(r.get("fact_count", 0) or 0),
+            handles=list(handles) if isinstance(handles, list) else [],
+        ).model_dump(mode="json")
+        # last_active is not on the ActorSummary schema (see crossFileNeeds);
+        # attach it to the row so the grid's Last-active column can populate from
+        # the newest owned fact instead of always rendering an em-dash
+        # (actors-orgs-5). ``eb_created_at`` is the stored epoch-ms key — the old
+        # detail query read a nonexistent ``created_at`` and got null.
+        la = _epoch_ms_to_dt(r.get("last_active_ms"))
+        row["last_active"] = la.isoformat() if la else None
+        out.append(row)
     return {"actors": out}
 
 
@@ -1352,7 +1662,10 @@ async def actor_detail(actor_id: uuid.UUID, request: Request):
         "MATCH (a:ActorDataPoint {eb_id: $aid, gateway_id: $gw}) "
         "OPTIONAL MATCH (f:FactDataPoint {gateway_id: $gw}) "
         "WHERE f.source_actor_id = a.eb_id "
-        "RETURN properties(a) AS props, count(f) AS fact_count, max(f.created_at) AS last_active",
+        "WITH a, count(DISTINCT f) AS fact_count, max(f.eb_created_at) AS last_active_ms "
+        "OPTIONAL MATCH (a)-[:OWNS_GOAL]->(g:GoalDataPoint) WHERE g.gateway_id = $gw "
+        "RETURN properties(a) AS props, fact_count, last_active_ms, "
+        "count(DISTINCT g) AS goals_owned",
         {"aid": str(actor_id), "gw": gw},
     )
     if not rows or not rows[0].get("props"):
@@ -1361,14 +1674,13 @@ async def actor_detail(actor_id: uuid.UUID, request: Request):
     handles = p.get("handles") or []
     team_ids = p.get("team_ids") or []
     fact_count = int(rows[0].get("fact_count", 0) or 0)
+    goals_owned = int(rows[0].get("goals_owned", 0) or 0)
 
-    last_active = None
-    raw_last = rows[0].get("last_active")
-    if raw_last:
-        try:
-            last_active = datetime.fromisoformat(str(raw_last))
-        except Exception:  # noqa: BLE001
-            last_active = None
+    # Populate last_active from the newest owned fact's stored epoch-ms key.
+    # The old query read ``max(f.created_at)`` — a property FactDataPoint never
+    # writes (it stores ``eb_created_at``) — so last_active was always null and
+    # the UI rendered an em-dash (actors-orgs-5).
+    last_active = _epoch_ms_to_dt(rows[0].get("last_active_ms"))
 
     summary = ActorSummary(
         actor_id=str(p.get("eb_id") or actor_id),
@@ -1380,13 +1692,20 @@ async def actor_detail(actor_id: uuid.UUID, request: Request):
         fact_count=fact_count,
         handles=list(handles) if isinstance(handles, list) else [],
     )
-    return ActorDetailResponse(
+    detail = ActorDetailResponse(
         actor=summary,
         team_ids=[str(t) for t in team_ids] if isinstance(team_ids, list) else [],
         org_id=p.get("org_id"),
         fact_count=fact_count,
         last_active=last_active,
     ).model_dump(mode="json")
+    # goals_owned is not on the ActorDetailResponse schema (see crossFileNeeds);
+    # the actor-detail page reads it to replace the hardcoded "Owns 0 goals"
+    # (actors-orgs-7). Owner->goal is the ``(actor)-[:OWNS_GOAL]->(goal)`` edge
+    # the goal manager writes (goals/manager.py) — the ``owner_actor_ids`` list
+    # property is JSON-serialised and not Cypher list-membership queryable.
+    detail["goals_owned"] = goals_owned
+    return detail
 
 
 # ---------------------------------------------------------------------------
@@ -1408,18 +1727,31 @@ async def organizations(request: Request):
         "RETURN properties(o) AS props, team_count, count(DISTINCT a) AS actor_count",
         {"gw": gw},
     )
+    store = getattr(container, "org_override_store", None)
     out = []
     for r in rows:
         p = r.get("props") or {}
-        out.append(
-            OrganizationSummary(
-                org_id=str(p.get("eb_id") or ""),
-                name=str(p.get("name", "")),
-                display_label=str(p.get("display_label", "")),
-                team_count=int(r.get("team_count", 0) or 0),
-                actor_count=int(r.get("actor_count", 0) or 0),
-            ).model_dump(mode="json")
-        )
+        org_id = str(p.get("eb_id") or "")
+        org = OrganizationSummary(
+            org_id=org_id,
+            name=str(p.get("name", "")),
+            display_label=str(p.get("display_label", "")),
+            team_count=int(r.get("team_count", 0) or 0),
+            actor_count=int(r.get("actor_count", 0) or 0),
+        ).model_dump(mode="json")
+        # has_profile_override drives the org "Profile" column chip (custom vs
+        # default). The org node stores no profile — the association lives in the
+        # OrgOverrideStore, so the column was always blank (actors-orgs-9). Not on
+        # OrganizationSummary (see crossFileNeeds); attached to the row.
+        has_override = False
+        if store is not None and org_id:
+            try:
+                overrides = await store.list_overrides(org_id)
+                has_override = bool(overrides)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("dashboard: org override lookup failed: %s", exc)
+        org["has_profile_override"] = has_override
+        out.append(org)
     return {"organizations": out}
 
 
@@ -1430,7 +1762,14 @@ async def organizations(request: Request):
 
 @router.get("/profiles", dependencies=[READ])
 async def profiles(request: Request):
-    """Profile list with active-session counts (best-effort)."""
+    """Profile list with inheritance + best-effort active-session counts.
+
+    ``session_count`` was hardcoded to 0 and name/inheritance omitted
+    (guards-profiles-8). We resolve each profile for its real ``name``/``extends``
+    and count distinct sessions that resolved it from the retained trace window.
+    The count is bounded by in-memory trace-buffer retention (RC-5) — it reflects
+    recently observed sessions, not an all-time total.
+    """
     registry = get_profile_registry(request)
     if registry is None:
         return {"profiles": []}
@@ -1439,8 +1778,50 @@ async def profiles(request: Request):
     except Exception as exc:  # noqa: BLE001
         logger.warning("dashboard: list_profiles failed: %s", exc)
         names = []
-    # Session-per-profile mapping is not tracked centrally; default to 0.
-    out = [ProfileSummary(profile_id=n, session_count=0).model_dump(mode="json") for n in names]
+
+    # Best-effort per-profile session counts from the trace stream: a session
+    # resolves its profile at bootstrap (bootstrap_completed.payload.profile_name)
+    # or via profile_resolved.payload.profile.
+    session_counts: dict[str, set[str]] = {}
+    ledger = get_trace_ledger(request)
+    gw = _gateway_id(request)
+    if ledger is not None:
+        from elephantbroker.schemas.trace import TraceQuery
+
+        try:
+            events = await ledger.query_trace(TraceQuery(gateway_id=gw, limit=10000))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("dashboard: profiles trace query failed: %s", exc)
+            events = []
+        for e in events:
+            if e.event_type.value not in ("bootstrap_completed", "profile_resolved"):
+                continue
+            payload = e.payload or {}
+            pname = payload.get("profile_name") or payload.get("profile")
+            sess = e.session_key or (str(e.session_id) if e.session_id else None)
+            if pname and sess:
+                session_counts.setdefault(str(pname), set()).add(sess)
+
+    out = []
+    for n in names:
+        name = n
+        extends = None
+        try:
+            policy = await registry.resolve_profile(n)
+            name = policy.name or n
+            extends = policy.extends
+        except Exception:  # noqa: BLE001 - resolve is best-effort enrichment
+            pass
+        row = ProfileSummary(
+            profile_id=n,
+            session_count=len(session_counts.get(n, ())),
+        ).model_dump(mode="json")
+        # Additive metadata (safe for existing consumers): human name +
+        # inheritance parent so the row is self-describing without a second
+        # /profiles/{name}/resolve round-trip.
+        row["name"] = name
+        row["extends"] = extends
+        out.append(row)
     return {"profiles": out}
 
 

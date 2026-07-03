@@ -58,6 +58,21 @@ class TestResolveByHandle:
         result = await reg.resolve_by_handle("telegram:nobody")
         assert result is None
 
+    async def test_resolve_excludes_inactive_actors(self):
+        """The lookup Cypher filters soft-deactivated actors: a merged-away
+        duplicate keeps its handles as an audit record, so without the
+        ``active`` guard the LIMIT 1 lookup could return the dead node and
+        break login mapping / dedup (NULL means default-active)."""
+        reg, graph = _make_registry()
+        graph.query_cypher = AsyncMock(return_value=[])
+
+        await reg.resolve_by_handle("telegram:merged_away")
+
+        cypher = graph.query_cypher.call_args[0][0]
+        assert "AND (a.active = true OR a.active IS NULL)" in cypher
+        assert "$handle IN a.handles" in cypher
+        assert "a.gateway_id = $gateway_id" in cypher
+
     async def test_resolve_multi_handle_actor_found_by_any(self):
         reg, graph = _make_registry()
         aid = str(uuid.uuid4())

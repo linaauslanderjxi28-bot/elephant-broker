@@ -34,8 +34,11 @@ class TestTraceLedger:
         await ledger.append_event(e1)
         await ledger.append_event(e2)
         results = await ledger.query_trace(TraceQuery())
-        assert results[0].id == e1.id
-        assert results[1].id == e2.id
+        # Ledger returns events newest-first so offset/limit paginate from the
+        # most recent activity (consolidation-trace-2). e2 was appended last, so
+        # it must come before e1.
+        assert results[0].id == e2.id
+        assert results[1].id == e1.id
 
     async def test_get_evidence_chain(self):
         ledger = TraceLedger()

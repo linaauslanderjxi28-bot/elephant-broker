@@ -4,6 +4,14 @@
 // page, selected gateway). The selected gateway is mirrored to the shared
 // gateway store (providers/apiClient + providers/gatewayKey) so every request
 // helper scopes requests consistently.
+//
+// The other three preferences (theme, items-per-page, default-page) previously
+// saved to the backend but had no client-side effect (settings-3). We now mirror
+// them into canonical localStorage keys and broadcast PREFS_CHANGED_EVENT so
+// their consumers can apply them:
+//   - theme          → App.tsx switches the MUI ThemeProvider mode (see crossFileNeed).
+//   - items_per_page → the data provider's default page size (see crossFileNeed).
+//   - default_page   → the post-login redirect target (providers/authProvider).
 
 import React, { useCallback, useEffect, useState } from "react";
 import {
@@ -20,6 +28,8 @@ import {
 } from "@mui/material";
 import { apiGet, apiSend } from "../home/dashboardApi";
 import { setSelectedGateway } from "../../providers/apiClient";
+import { normalizeGateways, type SelectOption } from "../../lib/apiNormalize";
+import { errorMessage } from "../../lib/errors";
 
 interface Prefs {
   theme?: string;
@@ -30,6 +40,40 @@ interface Prefs {
 
 const PAGES = ["/", "/memory", "/sessions", "/guards", "/actors"];
 
+/**
+ * Canonical localStorage keys for the client-applied preferences. Consumers
+ * (App.tsx theme, providers/authProvider default-page, the data provider page
+ * size) read these keys and/or listen for PREFS_CHANGED_EVENT.
+ */
+export const PREF_KEYS = {
+  theme: "eb:pref:theme",
+  itemsPerPage: "eb:pref:items_per_page",
+  defaultPage: "eb:pref:default_page",
+} as const;
+
+/** Broadcast when the locally-applied preferences change (theme/items/default page). */
+export const PREFS_CHANGED_EVENT = "eb:prefs-changed";
+
+/**
+ * Mirror the given preferences into localStorage and broadcast a change event
+ * so consumers apply them immediately. Safe under SSR/private mode.
+ */
+function applyPrefsLocally(p: Prefs): void {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    if (p.theme) window.localStorage.setItem(PREF_KEYS.theme, p.theme);
+    if (typeof p.items_per_page === "number") {
+      window.localStorage.setItem(PREF_KEYS.itemsPerPage, String(p.items_per_page));
+    }
+    if (p.default_page) {
+      window.localStorage.setItem(PREF_KEYS.defaultPage, p.default_page);
+    }
+    window.dispatchEvent(new CustomEvent(PREFS_CHANGED_EVENT, { detail: p }));
+  } catch {
+    /* ignore storage failures */
+  }
+}
+
 export const PreferencesPage: React.FC = () => {
   const [prefs, setPrefs] = useState<Prefs>({
     theme: "light",
@@ -39,18 +83,21 @@ export const PreferencesPage: React.FC = () => {
   });
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
-  const [gateways, setGateways] = useState<string[]>([]);
+  const [gateways, setGateways] = useState<SelectOption[]>([]);
 
   const load = useCallback(async () => {
     try {
       const res = await apiGet<Prefs>("/dashboard/preferences");
       setPrefs((p) => ({ ...p, ...res }));
+      // Mirror the server-side prefs into localStorage so their consumers
+      // (theme / default-page / page-size) can apply them without a save.
+      applyPrefsLocally(res);
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     }
     try {
-      const g = await apiGet<any>("/dashboard/gateways");
-      setGateways(Array.isArray(g) ? g : (g.gateways ?? g.items ?? []));
+      const g = await apiGet<unknown>("/dashboard/gateways");
+      setGateways(normalizeGateways(g));
     } catch {
       setGateways([]);
     }
@@ -59,7 +106,7 @@ export const PreferencesPage: React.FC = () => {
     void load();
   }, [load]);
 
-  const set = (k: keyof Prefs, v: any) =>
+  const set = (k: keyof Prefs, v: string | number) =>
     setPrefs((p) => ({ ...p, [k]: v }));
 
   const save = async () => {
@@ -69,9 +116,11 @@ export const PreferencesPage: React.FC = () => {
       // Update the shared gateway store (persists to the canonical
       // localStorage key and broadcasts the change so open views refetch).
       setSelectedGateway(prefs.selected_gateway ?? "");
+      // Apply the remaining prefs client-side (theme / items / default page).
+      applyPrefsLocally(prefs);
       setSaved(true);
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     }
   };
 
@@ -124,9 +173,9 @@ export const PreferencesPage: React.FC = () => {
               onChange={(e) => set("selected_gateway", e.target.value)}
             >
               <MenuItem value="">Default</MenuItem>
-              {gateways.map((g) => (
-                <MenuItem key={g} value={g}>
-                  {g}
+              {gateways.map((opt) => (
+                <MenuItem key={opt.value} value={opt.value}>
+                  {opt.label}
                 </MenuItem>
               ))}
             </TextField>

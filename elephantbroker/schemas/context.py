@@ -199,12 +199,20 @@ class SubagentSpawnParams(BaseModel):
     parent_session_key: str
     child_session_key: str
     ttl_ms: int | None = None
+    # Ephemeral session_id (parent's, since spawn is initiated within the
+    # parent's turn). Stamped onto the SUBAGENT_PARENT_MAPPED trace event so
+    # session_id-scoped trace summaries can see the spawn. Optional: callers
+    # that only know routing keys may omit it.
+    session_id: uuid.UUID | None = None
 
 
 class SubagentEndedParams(BaseModel):
     """Parameters for ContextEngine.onSubagentEnded."""
     child_session_key: str
     reason: SubagentEndReason = "completed"
+    # Ephemeral session_id for the SUBAGENT_ENDED trace event so it is visible
+    # to session_id-scoped trace summaries. Optional.
+    session_id: uuid.UUID | None = None
 
 
 class SubagentSpawnResult(BaseModel):

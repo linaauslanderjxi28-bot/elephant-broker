@@ -5,7 +5,8 @@
 // expand to payload JSON. Event-type filter chips and fact navigation.
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigation, useParsed } from "@refinedev/core";
+import { useNavigation } from "@refinedev/core";
+import { useParams, useSearchParams } from "react-router-dom";
 import {
   Accordion,
   AccordionDetails,
@@ -39,6 +40,26 @@ import {
   summarizeEvent,
   useAuthority,
 } from "../home/dashboardApi";
+import { errorMessage } from "../../lib/errors";
+import { shortId } from "../../lib/labels";
+
+/** Best-effort agent id from a session_key (`gateway:agent:...`). */
+function agentFromKey(key: string): string {
+  if (!key) return "—";
+  const parts = key.split(":");
+  return parts.length >= 2 ? parts[1] : key;
+}
+
+/** Human-friendly duration from a seconds count. */
+function fmtDurationSecs(secs?: number | null): string {
+  if (secs == null || !Number.isFinite(secs)) return "—";
+  const s = Math.max(0, Math.round(secs));
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  if (h > 0) return `${h}h ${m % 60}m`;
+  if (m > 0) return `${m}m ${s % 60}s`;
+  return `${s}s`;
+}
 
 interface TraceEvent {
   event_id?: string;
@@ -513,8 +534,14 @@ function WorkingSetSection({ sessionId }: { sessionId: string }) {
 }
 
 export const SessionShowPage: React.FC = () => {
-  const { id } = useParsed();
-  const sessionId = decodeURIComponent(String(id ?? ""));
+  // Route is /sessions/:key. The list navigates by session_id (the UUID that
+  // the /trace/session/{id} and /working-set/{id} endpoints require), so the
+  // ":key" param carries the session_id. react-router already URI-decodes it.
+  const params = useParams();
+  const [searchParams] = useSearchParams();
+  const sessionId = params.key ?? "";
+  // The human-readable session_key is carried in the query string for display.
+  const sessionKey = searchParams.get("session_key") ?? "";
   const authority = useAuthority();
   const [summary, setSummary] = useState<any>(null);
   const [turns, setTurns] = useState<TurnGroup[]>([]);
@@ -537,7 +564,7 @@ export const SessionShowPage: React.FC = () => {
         : (tl?.turns ?? tl?.items ?? []);
       setTurns(groups);
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -573,7 +600,16 @@ export const SessionShowPage: React.FC = () => {
         alignItems="center"
         sx={{ mb: 2 }}
       >
-        <Typography variant="h5">{sessionId}</Typography>
+        <Box>
+          <Typography variant="h5">
+            {sessionKey || sessionId || "Session"}
+          </Typography>
+          {sessionKey && sessionId && (
+            <Typography variant="caption" color="text.secondary">
+              session {shortId(sessionId)}
+            </Typography>
+          )}
+        </Box>
         {authority >= 50 && (
           <Button
             variant="outlined"
@@ -596,10 +632,10 @@ export const SessionShowPage: React.FC = () => {
           }}
         >
           {[
-            ["Agent", summary.agent_name ?? summary.session_key],
-            ["Profile", summary.profile ?? summary.profile_name],
-            ["Turns", summary.turn_count ?? summary.turns],
-            ["Facts", summary.facts_extracted ?? summary.facts],
+            ["Agent", agentFromKey(sessionKey)],
+            ["Turns", summary.turn_count],
+            ["Facts", summary.facts_extracted],
+            ["Duration", fmtDurationSecs(summary.duration_seconds)],
           ].map(([label, value]) => (
             <Paper variant="outlined" sx={{ p: 1.5 }} key={String(label)}>
               <Typography variant="caption" color="text.secondary">

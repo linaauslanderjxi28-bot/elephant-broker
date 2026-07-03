@@ -23,7 +23,7 @@
  *   ./pages/profiles/list               — default ProfilesPage
  *   ./pages/consolidation/list          — default ConsolidationPage
  *   ./pages/trace/list                  — default TraceListPage
- *   ./pages/settings/api-keys|preferences|authority|config — default page components
+ *   ./pages/settings/api-keys|preferences|authority|config|indexes — default page components
  *   ./pages/auth/login|register|forgot-password            — default page components
  */
 import {
@@ -34,6 +34,7 @@ import {
   type ResourceProps,
 } from "@refinedev/core";
 import {
+  Breadcrumb,
   ErrorComponent,
   HamburgerMenu,
   RefineSnackbarProvider,
@@ -78,9 +79,11 @@ import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import ManageAccountsIcon from "@mui/icons-material/ManageAccounts";
 import GavelIcon from "@mui/icons-material/Gavel";
 import DescriptionIcon from "@mui/icons-material/Description";
+import SpeedIcon from "@mui/icons-material/Speed";
 import BedtimeIcon from "@mui/icons-material/Bedtime";
 import ManageSearchIcon from "@mui/icons-material/ManageSearch";
 
+import { useEffect, useState } from "react";
 import {
   BrowserRouter,
   Link as RouterLink,
@@ -99,9 +102,11 @@ import {
   accessControlProvider,
   invalidateAuthorityCache,
 } from "./accessControlProvider";
-import { ebTheme } from "./theme";
+import { ebTheme, ebThemeDark } from "./theme";
 import GatewaySelector from "./components/GatewaySelector";
 import BrandLogo from "./components/BrandLogo";
+import ErrorBoundary from "./components/ErrorBoundary";
+import { humanizeEnum } from "./lib/format";
 
 // --- Pages (owned by pages agents; referenced by default import) ---
 import OverviewPage from "./pages/home";
@@ -123,12 +128,17 @@ import ProfilesPage from "./pages/profiles/list";
 import ConsolidationPage from "./pages/consolidation/list";
 import TraceExplorerPage from "./pages/trace/list";
 import ApiKeysPage from "./pages/settings/api-keys";
-import PreferencesPage from "./pages/settings/preferences";
+import PreferencesPage, {
+  PREF_KEYS,
+  PREFS_CHANGED_EVENT,
+} from "./pages/settings/preferences";
 import AuthorityRulesPage from "./pages/settings/authority";
 import EffectiveConfigPage from "./pages/settings/config";
+import FactIndexesPage from "./pages/settings/indexes";
 import LoginPage from "./pages/auth/login";
 import RegisterPage from "./pages/auth/register";
 import ForgotPasswordPage from "./pages/auth/forgot-password";
+import ResetPasswordPage from "./pages/auth/reset-password";
 
 /**
  * Refine resource tree — six top-level sections (Phase 11 plan §11.3.5),
@@ -288,6 +298,15 @@ const resources: ResourceProps[] = [
       icon: <DescriptionIcon />,
     },
   },
+  {
+    name: "fact-indexes",
+    list: "/settings/indexes",
+    meta: {
+      parent: "settings_section",
+      label: "Fact Indexes",
+      icon: <SpeedIcon />,
+    },
+  },
 ];
 
 // BrowserRouter basename derived from Vite's base ("/ui/" in prod, "/" in dev).
@@ -346,11 +365,41 @@ const AppHeader = () => {
   );
 };
 
+/** Read the persisted "Theme" preference (settings-3). Defaults to light. */
+function readThemeMode(): "light" | "dark" {
+  if (typeof window === "undefined" || !window.localStorage) return "light";
+  try {
+    return window.localStorage.getItem(PREF_KEYS.theme) === "dark"
+      ? "dark"
+      : "light";
+  } catch {
+    return "light";
+  }
+}
+
 function App() {
+  // The Preferences page writes `PREF_KEYS.theme` and broadcasts
+  // PREFS_CHANGED_EVENT on save (and on initial load). We mirror that into React
+  // state so the MUI ThemeProvider swaps light/dark immediately — no reload —
+  // and stays in sync across tabs via the native `storage` event (settings-3).
+  const [themeMode, setThemeMode] = useState<"light" | "dark">(readThemeMode);
+  useEffect(() => {
+    const sync = () => setThemeMode(readThemeMode());
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === null || e.key === PREF_KEYS.theme) sync();
+    };
+    window.addEventListener(PREFS_CHANGED_EVENT, sync);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(PREFS_CHANGED_EVENT, sync);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
   return (
     <BrowserRouter basename={basename}>
       <SuperTokensWrapper>
-        <ThemeProvider theme={ebTheme}>
+        <ThemeProvider theme={themeMode === "dark" ? ebThemeDark : ebTheme}>
           <CssBaseline />
           <GlobalStyles styles={{ html: { WebkitFontSmoothing: "auto" } }} />
           <RefineSnackbarProvider>
@@ -378,7 +427,31 @@ function App() {
                       fallback={<CatchAllNavigate to="/login" />}
                     >
                       <ThemedLayoutV2 Header={AppHeader} Title={AppTitle}>
-                        <Outlet />
+                        {/* One consistent breadcrumb trail for every page
+                            (cross-cutting-6). Refine derives it from the active
+                            resource hierarchy and self-hides on the root
+                            overview (single segment). Rendering it once here in
+                            the layout — instead of relying on the single, broken
+                            per-page <List> breadcrumb — keeps the trail correct
+                            and uniform. The sx restores breathing room between a
+                            section's icon and its label (the default cramps
+                            non-linked parent segments). */}
+                        <Breadcrumb
+                          breadcrumbProps={{
+                            sx: {
+                              mb: 2,
+                              "& .MuiBreadcrumbs-li .MuiSvgIcon-root": {
+                                mr: 0.5,
+                              },
+                            },
+                          }}
+                        />
+                        {/* Boundary scopes a render crash to the current view
+                            (keeps sidebar/header alive) instead of white-screening
+                            the whole app — defense-in-depth for RC-3. */}
+                        <ErrorBoundary>
+                          <Outlet />
+                        </ErrorBoundary>
                       </ThemedLayoutV2>
                     </Authenticated>
                   }
@@ -437,6 +510,7 @@ function App() {
                     <Route path="preferences" element={<PreferencesPage />} />
                     <Route path="authority" element={<AuthorityRulesPage />} />
                     <Route path="config" element={<EffectiveConfigPage />} />
+                    <Route path="indexes" element={<FactIndexesPage />} />
                   </Route>
 
                   <Route path="*" element={<ErrorComponent />} />
@@ -459,11 +533,37 @@ function App() {
                     path="/forgot-password"
                     element={<ForgotPasswordPage />}
                   />
+                  {/* Landing page for the emailed reset link (fixes auth-2). */}
+                  <Route
+                    path="/reset-password"
+                    element={<ResetPasswordPage />}
+                  />
                 </Route>
               </Routes>
 
               <UnsavedChangesNotifier />
-              <DocumentTitleHandler />
+              {/* Force a consistent "<Resource> | ElephantBroker" document
+                  title on every page (the default handler otherwise leaks
+                  "Refine" — cross-cutting-5). */}
+              <DocumentTitleHandler
+                handler={({ resource, action, params }) => {
+                  const appName = "ElephantBroker";
+                  const label =
+                    (resource?.meta?.label as string | undefined) ??
+                    (resource?.name ? humanizeEnum(resource.name) : undefined);
+                  if (!label) return appName;
+
+                  let prefix = label;
+                  if (action === "show" && params?.id) {
+                    prefix = `${label} #${params.id}`;
+                  } else if (action === "edit" && params?.id) {
+                    prefix = `Edit ${label} #${params.id}`;
+                  } else if (action === "create") {
+                    prefix = `Create ${label}`;
+                  }
+                  return `${prefix} | ${appName}`;
+                }}
+              />
             </Refine>
           </RefineSnackbarProvider>
         </ThemeProvider>

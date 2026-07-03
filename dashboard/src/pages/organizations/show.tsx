@@ -34,6 +34,9 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import { apiGet, apiSend, useAuthority } from "../home/dashboardApi";
+import { humanizeEnum } from "../../lib/format";
+import { actorDisplayName } from "../../lib/labels";
+import { errorMessage } from "../../lib/errors";
 
 interface OrgDetail {
   org_id?: string;
@@ -61,6 +64,8 @@ function TeamPanel(props: {
   const [editLabel, setEditLabel] = useState("");
   const [editError, setEditError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [memberError, setMemberError] = useState<string | null>(null);
+  const [memberBusy, setMemberBusy] = useState(false);
 
   const saveEdit = async () => {
     setSaving(true);
@@ -74,9 +79,42 @@ function TeamPanel(props: {
       setEditOpen(false);
       props.onChanged();
     } catch (e) {
-      setEditError((e as Error).message);
+      setEditError(errorMessage(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const removeMember = async (mid: string) => {
+    if (!window.confirm("Remove member?")) return;
+    setMemberError(null);
+    setMemberBusy(true);
+    try {
+      await apiSend("DELETE", `/admin/teams/${teamId}/members/${mid}`);
+      await loadMembers();
+      props.onChanged();
+    } catch (e) {
+      setMemberError(errorMessage(e));
+    } finally {
+      setMemberBusy(false);
+    }
+  };
+
+  const addMember = async () => {
+    if (!newActor.trim()) return;
+    setMemberError(null);
+    setMemberBusy(true);
+    try {
+      await apiSend("POST", `/admin/teams/${teamId}/members`, {
+        actor_id: newActor.trim(),
+      });
+      setNewActor("");
+      await loadMembers();
+      props.onChanged();
+    } catch (e) {
+      setMemberError(errorMessage(e));
+    } finally {
+      setMemberBusy(false);
     }
   };
 
@@ -122,6 +160,15 @@ function TeamPanel(props: {
         </Typography>
       </AccordionSummary>
       <AccordionDetails>
+        {memberError && (
+          <Alert
+            severity="error"
+            sx={{ mb: 1 }}
+            onClose={() => setMemberError(null)}
+          >
+            {memberError}
+          </Alert>
+        )}
         <List dense>
           {(members ?? []).map((m) => {
             const mid = String(m.actor_id ?? m.eb_id ?? m.id ?? "");
@@ -132,15 +179,9 @@ function TeamPanel(props: {
                   props.canManage && (
                     <IconButton
                       edge="end"
-                      onClick={async () => {
-                        if (!window.confirm("Remove member?")) return;
-                        await apiSend(
-                          "DELETE",
-                          `/admin/teams/${teamId}/members/${mid}`,
-                        );
-                        void loadMembers();
-                        props.onChanged();
-                      }}
+                      aria-label="Remove member"
+                      disabled={memberBusy}
+                      onClick={() => void removeMember(mid)}
                     >
                       <DeleteIcon />
                     </IconButton>
@@ -148,8 +189,8 @@ function TeamPanel(props: {
                 }
               >
                 <ListItemText
-                  primary={m.display_name ?? mid}
-                  secondary={m.actor_type ?? m.type}
+                  primary={actorDisplayName(m.display_name) || mid}
+                  secondary={humanizeEnum(m.actor_type ?? m.type)}
                 />
               </ListItem>
             );
@@ -166,17 +207,7 @@ function TeamPanel(props: {
               value={newActor}
               onChange={(e) => setNewActor(e.target.value)}
             />
-            <Button
-              onClick={async () => {
-                if (!newActor) return;
-                await apiSend("POST", `/admin/teams/${teamId}/members`, {
-                  actor_id: newActor,
-                });
-                setNewActor("");
-                void loadMembers();
-                props.onChanged();
-              }}
-            >
+            <Button disabled={!newActor.trim() || memberBusy} onClick={() => void addMember()}>
               Add member
             </Button>
           </Stack>
@@ -222,6 +253,43 @@ function TeamPanel(props: {
   );
 }
 
+/** Render a single override leaf value as a readable string. */
+function formatOverrideScalar(v: any): string {
+  if (v === null || v === undefined) return "—";
+  if (Array.isArray(v)) {
+    if (v.length === 0) return "—";
+    return v
+      .map((x) => (x !== null && typeof x === "object" ? JSON.stringify(x) : String(x)))
+      .join(", ");
+  }
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  return String(v);
+}
+
+/**
+ * Flatten a profile-override object into readable "Parent · Child" label/value
+ * rows (actors-orgs-12) so the panel shows a legible list instead of a raw
+ * `JSON.stringify` dump. Nested objects are recursed; scalars/arrays become
+ * one row each.
+ */
+function flattenOverrides(obj: any, prefix = ""): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  if (obj === null || obj === undefined) return out;
+  if (typeof obj !== "object" || Array.isArray(obj)) {
+    out.push([prefix || "Value", formatOverrideScalar(obj)]);
+    return out;
+  }
+  for (const [k, v] of Object.entries(obj)) {
+    const label = prefix ? `${prefix} · ${humanizeEnum(k)}` : humanizeEnum(k);
+    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+      out.push(...flattenOverrides(v, label));
+    } else {
+      out.push([label, formatOverrideScalar(v)]);
+    }
+  }
+  return out;
+}
+
 export const OrganizationShowPage: React.FC = () => {
   const { id } = useParsed();
   const orgId = String(id ?? "");
@@ -231,11 +299,18 @@ export const OrganizationShowPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [addTeamOpen, setAddTeamOpen] = useState(false);
   const [teamName, setTeamName] = useState("");
+  const [teamError, setTeamError] = useState<string | null>(null);
+  const [teamSaving, setTeamSaving] = useState(false);
   const [editOrgOpen, setEditOrgOpen] = useState(false);
   const [orgName, setOrgName] = useState("");
   const [orgLabel, setOrgLabel] = useState("");
   const [orgEditError, setOrgEditError] = useState<string | null>(null);
   const [orgSaving, setOrgSaving] = useState(false);
+  // Actor org-membership management (actors-orgs-10).
+  const [addActorOpen, setAddActorOpen] = useState(false);
+  const [newActorId, setNewActorId] = useState("");
+  const [actorError, setActorError] = useState<string | null>(null);
+  const [actorBusy, setActorBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -272,7 +347,7 @@ export const OrganizationShowPage: React.FC = () => {
         profile_overrides,
       });
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -297,9 +372,63 @@ export const OrganizationShowPage: React.FC = () => {
       setEditOrgOpen(false);
       void load();
     } catch (e) {
-      setOrgEditError((e as Error).message);
+      setOrgEditError(errorMessage(e));
     } finally {
       setOrgSaving(false);
+    }
+  };
+
+  // Org membership is the actor's ``org_id`` property, set via the same admin
+  // endpoint the actor-detail page uses. Adding here just stamps this org onto
+  // the given actor; removing clears it. Both refetch to update the card + count.
+  const addActorToOrg = async () => {
+    if (!newActorId.trim()) return;
+    setActorBusy(true);
+    setActorError(null);
+    try {
+      await apiSend("PUT", `/admin/actors/${newActorId.trim()}/organization`, {
+        org_id: orgId,
+      });
+      setAddActorOpen(false);
+      setNewActorId("");
+      void load();
+    } catch (e) {
+      setActorError(errorMessage(e));
+    } finally {
+      setActorBusy(false);
+    }
+  };
+
+  const removeActorFromOrg = async (aid: string) => {
+    if (!aid || !window.confirm("Remove this actor from the organization?")) return;
+    setActorError(null);
+    setActorBusy(true);
+    try {
+      await apiSend("PUT", `/admin/actors/${aid}/organization`, { org_id: null });
+      void load();
+    } catch (e) {
+      setActorError(errorMessage(e));
+    } finally {
+      setActorBusy(false);
+    }
+  };
+
+  const addTeam = async () => {
+    if (!teamName.trim()) return;
+    setTeamSaving(true);
+    setTeamError(null);
+    try {
+      await apiSend("POST", "/admin/teams", {
+        name: teamName.trim(),
+        org_id: orgId,
+      });
+      setTeamName("");
+      setAddTeamOpen(false);
+      void load();
+    } catch (e) {
+      setTeamError(errorMessage(e));
+    } finally {
+      setTeamSaving(false);
     }
   };
 
@@ -347,7 +476,14 @@ export const OrganizationShowPage: React.FC = () => {
               >
                 <Typography variant="subtitle2">Teams</Typography>
                 {authority >= 70 && (
-                  <Button size="small" onClick={() => setAddTeamOpen(true)}>
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      setTeamName("");
+                      setTeamError(null);
+                      setAddTeamOpen(true);
+                    }}
+                  >
                     + Add Team
                   </Button>
                 )}
@@ -372,17 +508,55 @@ export const OrganizationShowPage: React.FC = () => {
 
         <Card variant="outlined">
             <CardContent>
-              <Typography variant="subtitle2" gutterBottom>
-                Actors
-              </Typography>
-              <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
-                {(data.actors ?? []).map((a, i) => (
-                  <Chip
-                    key={i}
+              <Stack
+                direction="row"
+                justifyContent="space-between"
+                alignItems="center"
+              >
+                <Typography variant="subtitle2">Actors</Typography>
+                {authority >= 70 && (
+                  <Button
                     size="small"
-                    label={a.display_name ?? a.actor_id}
-                  />
-                ))}
+                    onClick={() => {
+                      setNewActorId("");
+                      setActorError(null);
+                      setAddActorOpen(true);
+                    }}
+                  >
+                    + Add actor
+                  </Button>
+                )}
+              </Stack>
+              {actorError && (
+                <Alert
+                  severity="error"
+                  sx={{ my: 1 }}
+                  onClose={() => setActorError(null)}
+                >
+                  {actorError}
+                </Alert>
+              )}
+              <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", mt: 1 }}>
+                {(data.actors ?? []).map((a, i) => {
+                  const aid = String(a.actor_id ?? a.eb_id ?? a.id ?? "");
+                  return (
+                    <Chip
+                      key={aid || i}
+                      size="small"
+                      title={a.display_name ?? a.actor_id}
+                      label={
+                        actorDisplayName(a.display_name) ||
+                        actorDisplayName(a.actor_id) ||
+                        "—"
+                      }
+                      onDelete={
+                        authority >= 70 && aid && !actorBusy
+                          ? () => void removeActorFromOrg(aid)
+                          : undefined
+                      }
+                    />
+                  );
+                })}
                 {(data.actors ?? []).length === 0 && (
                   <Typography variant="body2" color="text.secondary">
                     None
@@ -400,17 +574,41 @@ export const OrganizationShowPage: React.FC = () => {
         <AccordionDetails>
           {data.profile_overrides &&
           Object.keys(data.profile_overrides).length > 0 ? (
-            Object.entries(data.profile_overrides).map(([k, v]) => (
-              <Stack
-                key={k}
-                direction="row"
-                justifyContent="space-between"
-                sx={{ py: 0.5 }}
-              >
-                <Typography variant="body2">{k}</Typography>
-                <Typography variant="body2">{JSON.stringify(v)}</Typography>
-              </Stack>
-            ))
+            Object.entries(data.profile_overrides).map(([profileId, overrides]) => {
+              const fields = flattenOverrides(overrides);
+              return (
+                <Box key={profileId} sx={{ mb: 2 }}>
+                  <Typography variant="subtitle2" gutterBottom>
+                    {humanizeEnum(profileId)}
+                  </Typography>
+                  {fields.length === 0 ? (
+                    <Typography variant="body2" color="text.secondary">
+                      No fields overridden.
+                    </Typography>
+                  ) : (
+                    fields.map(([label, value], i) => (
+                      <Stack
+                        key={i}
+                        direction="row"
+                        spacing={2}
+                        justifyContent="space-between"
+                        sx={{ py: 0.25 }}
+                      >
+                        <Typography variant="body2" color="text.secondary">
+                          {label}
+                        </Typography>
+                        <Typography
+                          variant="body2"
+                          sx={{ textAlign: "right", wordBreak: "break-word" }}
+                        >
+                          {value}
+                        </Typography>
+                      </Stack>
+                    ))
+                  )}
+                </Box>
+              );
+            })
           ) : (
             <Typography variant="body2" color="text.secondary">
               No overrides — using default profile. Edit overrides requires
@@ -420,9 +618,43 @@ export const OrganizationShowPage: React.FC = () => {
         </AccordionDetails>
       </Accordion>
 
+      <Dialog open={addActorOpen} onClose={() => setAddActorOpen(false)} fullWidth>
+        <DialogTitle>Add actor to organization</DialogTitle>
+        <DialogContent>
+          {actorError && (
+            <Alert severity="error" sx={{ mb: 1 }}>
+              {actorError}
+            </Alert>
+          )}
+          <TextField
+            autoFocus
+            fullWidth
+            label="Actor ID"
+            sx={{ mt: 1 }}
+            value={newActorId}
+            onChange={(e) => setNewActorId(e.target.value)}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setAddActorOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            disabled={!newActorId.trim() || actorBusy}
+            onClick={() => void addActorToOrg()}
+          >
+            Add
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={addTeamOpen} onClose={() => setAddTeamOpen(false)} fullWidth>
         <DialogTitle>Add team</DialogTitle>
         <DialogContent>
+          {teamError && (
+            <Alert severity="error" sx={{ mb: 1 }}>
+              {teamError}
+            </Alert>
+          )}
           <TextField
             autoFocus
             fullWidth
@@ -436,16 +668,8 @@ export const OrganizationShowPage: React.FC = () => {
           <Button onClick={() => setAddTeamOpen(false)}>Cancel</Button>
           <Button
             variant="contained"
-            disabled={!teamName}
-            onClick={async () => {
-              await apiSend("POST", "/admin/teams", {
-                name: teamName,
-                org_id: orgId,
-              });
-              setTeamName("");
-              setAddTeamOpen(false);
-              void load();
-            }}
+            disabled={!teamName.trim() || teamSaving}
+            onClick={() => void addTeam()}
           >
             Add
           </Button>

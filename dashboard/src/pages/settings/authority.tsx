@@ -2,6 +2,12 @@
 //
 // Views all authority rules with effective values and edits / resets overrides
 // via GET/PUT/DELETE /admin/authority-rules.
+//
+// GET /admin/authority-rules returns a DICT keyed by action
+// ({ create_org: { min_authority_level, require_matching_org, ... }, ... }), not
+// a list — the previous array/`.rules` handling always yielded "No rules."
+// (settings-1). We normalize the dict into rows and map the backend field names
+// (min_authority_level / require_self_ownership / matching_exempt_level).
 
 import React, { useCallback, useEffect, useState } from "react";
 import {
@@ -13,6 +19,7 @@ import {
   Dialog,
   DialogActions,
   DialogContent,
+  DialogContentText,
   DialogTitle,
   MenuItem,
   Paper,
@@ -33,6 +40,7 @@ import {
   AUTHORITY_OPTIONS,
   useAuthority,
 } from "../home/dashboardApi";
+import { errorMessage } from "../../lib/errors";
 
 const ACTION_LABELS: Record<string, string> = {
   create_global_goal: "Create global goal",
@@ -48,15 +56,33 @@ const ACTION_LABELS: Record<string, string> = {
   merge_actors: "Merge actor identities",
 };
 
+/** A rule as returned by the backend authority store (field names verified). */
 interface Rule {
   action: string;
-  min_level?: number;
-  required_level?: number;
+  min_authority_level?: number;
   require_matching_org?: boolean;
   require_matching_team?: boolean;
-  require_self?: boolean;
-  override_exempt_level?: number;
-  source?: string;
+  require_self_ownership?: boolean;
+  matching_exempt_level?: number | null;
+}
+
+/**
+ * Normalize the `/admin/authority-rules` payload into rows. The backend returns
+ * a plain `{ action: rule }` dict; we also tolerate a bare array or an
+ * `{ rules | items }` envelope for forward-compatibility.
+ */
+function toRows(payload: unknown): Rule[] {
+  if (Array.isArray(payload)) return payload as Rule[];
+  if (payload && typeof payload === "object") {
+    const obj = payload as Record<string, unknown>;
+    const envelope = obj.rules ?? obj.items;
+    if (Array.isArray(envelope)) return envelope as Rule[];
+    return Object.entries(obj).map(([action, rule]) => ({
+      action,
+      ...(rule && typeof rule === "object" ? (rule as Record<string, unknown>) : {}),
+    })) as Rule[];
+  }
+  return [];
 }
 
 export const AuthorityRulesPage: React.FC = () => {
@@ -65,15 +91,16 @@ export const AuthorityRulesPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Rule | null>(null);
+  const [resetTarget, setResetTarget] = useState<Rule | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await apiGet<any>("/admin/authority-rules");
-      setRows(Array.isArray(res) ? res : (res.rules ?? res.items ?? []));
+      const res = await apiGet<unknown>("/admin/authority-rules");
+      setRows(toRows(res));
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -92,19 +119,40 @@ export const AuthorityRulesPage: React.FC = () => {
     );
   }
 
-  const level = (r: Rule) => r.required_level ?? r.min_level ?? 0;
+  const level = (r: Rule) => r.min_authority_level ?? 0;
+
+  const actionTitle = (action: string) => ACTION_LABELS[action] ?? action;
 
   const save = async () => {
     if (!editing) return;
-    await apiSend("PUT", `/admin/authority-rules/${editing.action}`, editing);
-    setEditing(null);
-    void load();
+    setError(null);
+    try {
+      // Send exactly the UpdateAuthorityRuleRequest shape.
+      await apiSend("PUT", `/admin/authority-rules/${editing.action}`, {
+        min_authority_level: level(editing),
+        require_matching_org: !!editing.require_matching_org,
+        require_matching_team: !!editing.require_matching_team,
+        require_self_ownership: !!editing.require_self_ownership,
+        matching_exempt_level: editing.matching_exempt_level ?? null,
+      });
+      setEditing(null);
+      void load();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
   };
 
-  const reset = async (action: string) => {
-    if (!window.confirm("Reset to default?")) return;
-    await apiSend("DELETE", `/admin/authority-rules/${action}`);
-    void load();
+  const confirmReset = async () => {
+    if (!resetTarget) return;
+    const action = resetTarget.action;
+    setResetTarget(null);
+    setError(null);
+    try {
+      await apiSend("DELETE", `/admin/authority-rules/${action}`);
+      void load();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
   };
 
   return (
@@ -123,14 +171,13 @@ export const AuthorityRulesPage: React.FC = () => {
                 <TableCell>Action</TableCell>
                 <TableCell>Required level</TableCell>
                 <TableCell>Matching rules</TableCell>
-                <TableCell>Source</TableCell>
                 <TableCell />
               </TableRow>
             </TableHead>
             <TableBody>
               {rows.map((r) => (
                 <TableRow key={r.action}>
-                  <TableCell>{ACTION_LABELS[r.action] ?? r.action}</TableCell>
+                  <TableCell>{actionTitle(r.action)}</TableCell>
                   <TableCell>
                     {authorityLabel(level(r))} ({level(r)})
                   </TableCell>
@@ -142,23 +189,23 @@ export const AuthorityRulesPage: React.FC = () => {
                       {r.require_matching_team && (
                         <Chip size="small" label="match team" />
                       )}
-                      {r.require_self && (
+                      {r.require_self_ownership && (
                         <Chip size="small" label="self only" />
                       )}
+                      {!r.require_matching_org &&
+                        !r.require_matching_team &&
+                        !r.require_self_ownership && (
+                          <Typography variant="body2" color="text.disabled">
+                            —
+                          </Typography>
+                        )}
                     </Stack>
-                  </TableCell>
-                  <TableCell>
-                    <Chip
-                      size="small"
-                      label={r.source ?? "default"}
-                      color={r.source === "custom" ? "secondary" : "default"}
-                    />
                   </TableCell>
                   <TableCell align="right">
                     <Button size="small" onClick={() => setEditing({ ...r })}>
                       Edit
                     </Button>
-                    <Button size="small" onClick={() => reset(r.action)}>
+                    <Button size="small" onClick={() => setResetTarget(r)}>
                       Reset
                     </Button>
                   </TableCell>
@@ -166,7 +213,7 @@ export const AuthorityRulesPage: React.FC = () => {
               ))}
               {rows.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={5}>No rules.</TableCell>
+                  <TableCell colSpan={4}>No rules.</TableCell>
                 </TableRow>
               )}
             </TableBody>
@@ -176,7 +223,7 @@ export const AuthorityRulesPage: React.FC = () => {
 
       <Dialog open={!!editing} onClose={() => setEditing(null)} fullWidth>
         <DialogTitle>
-          Edit rule: {editing && (ACTION_LABELS[editing.action] ?? editing.action)}
+          Edit rule: {editing && actionTitle(editing.action)}
         </DialogTitle>
         <DialogContent>
           {editing && (
@@ -188,7 +235,7 @@ export const AuthorityRulesPage: React.FC = () => {
                 onChange={(e) =>
                   setEditing({
                     ...editing,
-                    required_level: Number(e.target.value),
+                    min_authority_level: Number(e.target.value),
                   })
                 }
               >
@@ -225,9 +272,12 @@ export const AuthorityRulesPage: React.FC = () => {
               <Stack direction="row" alignItems="center" justifyContent="space-between">
                 <Typography variant="body2">Require self ownership</Typography>
                 <Switch
-                  checked={!!editing.require_self}
+                  checked={!!editing.require_self_ownership}
                   onChange={(e) =>
-                    setEditing({ ...editing, require_self: e.target.checked })
+                    setEditing({
+                      ...editing,
+                      require_self_ownership: e.target.checked,
+                    })
                   }
                 />
               </Stack>
@@ -238,6 +288,24 @@ export const AuthorityRulesPage: React.FC = () => {
           <Button onClick={() => setEditing(null)}>Cancel</Button>
           <Button variant="contained" onClick={save}>
             Save
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={!!resetTarget} onClose={() => setResetTarget(null)}>
+        <DialogTitle>Reset authority rule?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Reset{" "}
+            <strong>{resetTarget && actionTitle(resetTarget.action)}</strong> to
+            its shipped default? Any custom override for this action will be
+            removed.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setResetTarget(null)}>Cancel</Button>
+          <Button color="warning" variant="contained" onClick={confirmReset}>
+            Reset to default
           </Button>
         </DialogActions>
       </Dialog>

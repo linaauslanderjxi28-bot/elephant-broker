@@ -33,6 +33,12 @@ class TraceLedger(ITraceLedger):
         agent_id: str | None = None,
     ) -> None:
         self._events: list[TraceEvent] = []
+        # consolidation-trace-1: O(1) lookup of an event by its own id. Kept in
+        # lockstep with ``_events`` on every append and eviction so a single
+        # event can be fetched by id (GET /trace/{id}) — the reference-scan in
+        # ``get_evidence_chain`` never matches an event's OWN id, so without
+        # this index every by-id fetch 404'd.
+        self._events_by_id: dict[uuid.UUID, TraceEvent] = {}
         self._gateway_id = gateway_id
         self._agent_key = agent_key
         self._agent_id = agent_id
@@ -58,6 +64,7 @@ class TraceLedger(ITraceLedger):
         if self._agent_id and not event.agent_id:
             event.agent_id = self._agent_id
         self._events.append(event)
+        self._events_by_id[event.id] = event
         self._evict_stale()
 
         # OTEL log export (durable persistence to ClickHouse via OTEL Collector)
@@ -71,14 +78,17 @@ class TraceLedger(ITraceLedger):
 
     def _evict_stale(self) -> None:
         """Enforce circular buffer (max events) and TTL-based eviction."""
-        # Size cap — evict oldest when over limit
+        # Size cap — evict oldest when over limit. Drop the evicted event from
+        # the by-id index too so a stale id can never resolve (or leak memory).
         while len(self._events) > self._max_events:
-            self._events.pop(0)
+            evicted = self._events.pop(0)
+            self._events_by_id.pop(evicted.id, None)
         # TTL cap — prune events older than ttl_seconds (lazy, on each append)
         if self._events and self._ttl_seconds > 0:
             cutoff = datetime.now(UTC) - timedelta(seconds=self._ttl_seconds)
             while self._events and self._events[0].timestamp < cutoff:
-                self._events.pop(0)
+                evicted = self._events.pop(0)
+                self._events_by_id.pop(evicted.id, None)
 
     def _emit_otel_log(self, event: TraceEvent) -> None:
         """Emit a TraceEvent as an OTEL LogRecord for durable storage."""
@@ -119,6 +129,13 @@ class TraceLedger(ITraceLedger):
         if query.gateway_id is not None:
             results = [e for e in results if e.gateway_id == query.gateway_id]
 
+        # consolidation-trace-2: events are stored oldest→newest, so slicing the
+        # front returned the OLDEST ``limit`` events and silently dropped the
+        # most recent activity once the buffer exceeded ``limit``. Order
+        # newest-first BEFORE applying offset/limit so pagination pages from the
+        # most recent events. Callers that need chronological order (session
+        # timeline / summary) re-sort by timestamp themselves.
+        results.reverse()
         results = results[query.offset:]
         return results[: query.limit]
 
@@ -173,9 +190,31 @@ class TraceLedger(ITraceLedger):
             total_count=total_count,
         )
 
+    async def get_event_by_id(self, event_id: uuid.UUID) -> TraceEvent | None:
+        """Return the single event with this id, or None.
+
+        consolidation-trace-1: dedicated O(1) by-id primitive backing
+        GET /trace/{id}. Gateway-agnostic — the route layer applies the
+        gateway_id filter (a stale/cross-gateway id resolves to 404 there).
+        """
+        return self._events_by_id.get(event_id)
+
     async def get_evidence_chain(self, target_id: uuid.UUID) -> list[TraceEvent]:
+        # consolidation-trace-1: GET /trace/{id} resolves a single event via
+        # this method, but the reference scan below only matches events that
+        # *reference* ``target_id`` (in their actor/artifact/claim/procedure/
+        # goal id lists) — it never matches an event's OWN id, so every by-id
+        # fetch 404'd. Seed the chain with the event whose id == target_id (if
+        # any) so the root event is returned first. When ``target_id`` is a
+        # fact/claim/actor id (the evidence-chain use case) no event carries
+        # that id, so this is a safe no-op superset for existing callers.
         chain: list[TraceEvent] = []
+        root = self._events_by_id.get(target_id)
+        if root is not None:
+            chain.append(root)
         for ev in self._events:
+            if ev is root:
+                continue
             refs = ev.actor_ids + ev.artifact_ids + ev.claim_ids + ev.procedure_ids + ev.goal_ids
             if target_id in refs:
                 chain.append(ev)

@@ -10,8 +10,8 @@
  * only offered to system admins (authority >= 90), per the SOW.
  */
 
-import { useEffect, useState, type FC } from "react";
-import { usePermissions } from "@refinedev/core";
+import { useEffect, useRef, useState, type FC } from "react";
+import { usePermissions, useInvalidate } from "@refinedev/core";
 import {
   FormControl,
   InputLabel,
@@ -24,16 +24,13 @@ import {
   apiClient,
   getSelectedGateway,
   setSelectedGateway,
+  GATEWAY_CHANGED_EVENT,
 } from "../providers/apiClient";
+import { normalizeGateways, type SelectOption } from "../lib/apiNormalize";
 
 /** Sentinel value for the "all gateways" (unscoped) option. */
 const ALL_GATEWAYS = "__all__";
 const ALL_GATEWAYS_MIN_AUTHORITY = 90;
-
-interface GatewayOption {
-  id: string;
-  label: string;
-}
 
 interface DashboardPreferences {
   theme?: string;
@@ -43,30 +40,9 @@ interface DashboardPreferences {
   [key: string]: unknown;
 }
 
-/** Coerce the `/dashboard/gateways` payload into a stable option list. */
-function normalizeGateways(payload: unknown): GatewayOption[] {
-  const raw: unknown[] = Array.isArray(payload)
-    ? payload
-    : payload && typeof payload === "object"
-      ? ((payload as Record<string, unknown>).gateways as unknown[]) ??
-        ((payload as Record<string, unknown>).items as unknown[]) ??
-        []
-      : [];
-
-  const options: GatewayOption[] = [];
-  for (const entry of raw ?? []) {
-    if (typeof entry === "string") {
-      options.push({ id: entry, label: entry });
-    } else if (entry && typeof entry === "object") {
-      const obj = entry as Record<string, unknown>;
-      const id = String(obj.gateway_id ?? obj.id ?? obj.name ?? "");
-      if (!id) continue;
-      const label = String(obj.name ?? obj.label ?? id);
-      options.push({ id, label });
-    }
-  }
-  return options;
-}
+// Gateway option normalization lives in lib/apiNormalize (single source of
+// truth) so every gateway dropdown shares the same envelope handling — the
+// duplicate previously inlined here has been removed.
 
 export interface GatewaySelectorProps {
   /** Optional callback fired after a successful selection change. */
@@ -78,12 +54,40 @@ export const GatewaySelector: FC<GatewaySelectorProps> = ({ onChange }) => {
   const authorityLevel = permissions?.authorityLevel ?? 0;
   const canSelectAll = authorityLevel >= ALL_GATEWAYS_MIN_AUTHORITY;
 
-  const [gateways, setGateways] = useState<GatewayOption[]>([]);
+  const [gateways, setGateways] = useState<SelectOption[]>([]);
   // Represent the empty/default selection with the ALL sentinel in the UI.
   const [selected, setSelected] = useState<string>(
     getSelectedGateway() || ALL_GATEWAYS,
   );
   const [loading, setLoading] = useState<boolean>(true);
+
+  // Refine's query-cache invalidator. Switching gateway must refetch every
+  // mounted view under the new scope; the module store (getSelectedGateway) is
+  // the single source of truth the data provider reads, but react-query keys do
+  // not encode the gateway, so an explicit invalidation is what drives refetch.
+  const invalidate = useInvalidate();
+
+  // Track the gateway we last invalidated for so redundant broadcasts (e.g. the
+  // mount-time hydration re-setting the already-current value) don't churn.
+  const lastInvalidatedRef = useRef<string>(getSelectedGateway());
+
+  // Drive query invalidation off the canonical GATEWAY_CHANGED_EVENT so EVERY
+  // gateway change — this selector, the Preferences page, or any programmatic
+  // setSelectedGateway — invalidates all data-provider queries and refetches
+  // under the new scope. Fixes stale cross-tenant display on gateway switch.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const next =
+        (event as CustomEvent<string>).detail ?? getSelectedGateway();
+      if (next === lastInvalidatedRef.current) return;
+      lastInvalidatedRef.current = next;
+      // `all` invalidates the whole data-provider query tree (every resource's
+      // list/detail/many); active queries refetch immediately.
+      void invalidate({ invalidates: ["all"] });
+    };
+    window.addEventListener(GATEWAY_CHANGED_EVENT, handler);
+    return () => window.removeEventListener(GATEWAY_CHANGED_EVENT, handler);
+  }, [invalidate]);
 
   // Load available gateways + persisted preference on mount.
   useEffect(() => {
@@ -130,7 +134,7 @@ export const GatewaySelector: FC<GatewaySelectorProps> = ({ onChange }) => {
   useEffect(() => {
     if (loading || canSelectAll) return;
     if (selected === ALL_GATEWAYS && gateways.length > 0) {
-      const first = gateways[0].id;
+      const first = gateways[0].value;
       setSelectedGateway(first);
       setSelected(first);
     }
@@ -141,13 +145,29 @@ export const GatewaySelector: FC<GatewaySelectorProps> = ({ onChange }) => {
     const gatewayId = raw === ALL_GATEWAYS ? "" : raw;
 
     setSelected(raw);
-    // Update the module store (persists to localStorage + broadcasts event so
-    // the data provider and open views pick up the new scope).
+    // Update the module store (persists to localStorage + broadcasts
+    // GATEWAY_CHANGED_EVENT, which our listener above turns into a query-cache
+    // invalidation so every open view refetches under the new scope).
     setSelectedGateway(gatewayId);
 
     // Persist to server-side preferences (best-effort; UI already updated).
+    // `PUT /dashboard/preferences` is a FULL replace: the backend validates the
+    // body into a UserPreferences model and writes every field, so a partial
+    // body would reset theme / items_per_page / default_page to their defaults
+    // (settings-4). Read-modify-write the latest prefs and change only the
+    // gateway to preserve everything else.
     try {
+      let current: DashboardPreferences = {};
+      try {
+        current =
+          (await apiClient.get<DashboardPreferences>(
+            "/dashboard/preferences",
+          )) ?? {};
+      } catch {
+        /* if prefs can't be read, fall through to a gateway-only update */
+      }
       await apiClient.put("/dashboard/preferences", {
+        ...current,
         selected_gateway: gatewayId,
       });
     } catch {
@@ -171,7 +191,7 @@ export const GatewaySelector: FC<GatewaySelectorProps> = ({ onChange }) => {
           <MenuItem value={ALL_GATEWAYS}>All gateways</MenuItem>
         )}
         {gateways.map((gw) => (
-          <MenuItem key={gw.id} value={gw.id}>
+          <MenuItem key={gw.value} value={gw.value}>
             {gw.label}
           </MenuItem>
         ))}

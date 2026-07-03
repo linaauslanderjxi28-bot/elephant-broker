@@ -5,7 +5,7 @@
 // follow the selected time range.
 
 import React, { useCallback, useEffect, useState } from "react";
-import { useNavigation } from "@refinedev/core";
+import { useNavigation, usePermissions } from "@refinedev/core";
 import {
   Accordion,
   AccordionDetails,
@@ -17,6 +17,7 @@ import {
   Chip,
   CircularProgress,
   List,
+  ListItem,
   ListItemButton,
   ListItemText,
   Stack,
@@ -25,6 +26,7 @@ import {
   Typography,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import {
   apiGet,
   COMPONENT_LABELS,
@@ -34,6 +36,52 @@ import {
   TIME_RANGES,
   type TimeRange,
 } from "../home/dashboardApi";
+import { humanizeEnum } from "../../lib/format";
+
+// Dashboard read routes require authority >= 70 (backend READ dependency).
+const MIN_READ_AUTHORITY = 70;
+
+type HealthTone = "success" | "warning" | "error" | "default";
+function systemHealthColor(health: string | undefined): HealthTone {
+  switch ((health || "").toLowerCase()) {
+    case "healthy":
+      return "success";
+    case "degraded":
+      return "warning";
+    case "unhealthy":
+      return "error";
+    default:
+      return "default";
+  }
+}
+
+/**
+ * Friendly access-denied panel for authenticated-but-under-authority operators
+ * (auth-3). Fresh dashboard users have authority 0; every read 403s. Rather
+ * than a wall of raw "403 Forbidden" errors, explain the situation.
+ */
+function NotAuthorized({ authority }: { authority: number }) {
+  return (
+    <Box sx={{ p: 2, display: "flex", justifyContent: "center" }}>
+      <Card variant="outlined" sx={{ maxWidth: 520, width: "100%", mt: 6 }}>
+        <CardContent sx={{ textAlign: "center", py: 4 }}>
+          <LockOutlinedIcon sx={{ fontSize: 48, color: "text.disabled" }} />
+          <Typography variant="h6" sx={{ mt: 1 }}>
+            Access pending
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            Your account is signed in, but it doesn&rsquo;t yet have permission
+            to view dashboard data. An administrator needs to raise your
+            authority level to at least {MIN_READ_AUTHORITY}.
+          </Typography>
+          <Typography variant="caption" color="text.disabled" sx={{ mt: 2, display: "block" }}>
+            Current authority level: {authority}
+          </Typography>
+        </CardContent>
+      </Card>
+    </Box>
+  );
+}
 
 interface ComponentHealth {
   status: string;
@@ -99,8 +147,19 @@ export const HomePage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { push } = useNavigation();
+  const { data: perms, isLoading: permsLoading } = usePermissions<{
+    authorityLevel?: number;
+  }>();
+  const authority = perms?.authorityLevel ?? 0;
+  const authorized = authority >= MIN_READ_AUTHORITY;
 
   const load = useCallback(async () => {
+    // Reads require authority >= 70; skip the request (it would 403) and let the
+    // friendly access-denied panel handle under-authority operators.
+    if (!authorized) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -113,11 +172,23 @@ export const HomePage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [range]);
+  }, [range, authorized]);
 
   useEffect(() => {
+    if (permsLoading) return;
     void load();
-  }, [load]);
+  }, [load, permsLoading]);
+
+  if (permsLoading) {
+    return (
+      <Box sx={{ display: "flex", justifyContent: "center", p: 4 }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+  if (!authorized) {
+    return <NotAuthorized authority={authority} />;
+  }
 
   return (
     <Box sx={{ p: 2 }}>
@@ -181,9 +252,26 @@ export const HomePage: React.FC = () => {
             />
           </Box>
 
-          <Typography variant="h6" sx={{ mt: 3, mb: 1 }}>
-            System health
-          </Typography>
+          <Stack
+            direction="row"
+            alignItems="center"
+            spacing={1.5}
+            sx={{ mt: 3, mb: 1 }}
+          >
+            <Typography variant="h6">System health</Typography>
+            {data.system_health && (
+              <Chip
+                size="small"
+                label={humanizeEnum(data.system_health)}
+                color={systemHealthColor(data.system_health)}
+                variant={
+                  systemHealthColor(data.system_health) === "success"
+                    ? "outlined"
+                    : "filled"
+                }
+              />
+            )}
+          </Stack>
           <Box
             sx={{
               display: "grid",
@@ -240,26 +328,45 @@ export const HomePage: React.FC = () => {
                   primary="No recent events."
                 />
               )}
-              {(data.recent_events || []).map((ev, i) => (
-                <ListItemButton
-                  key={i}
-                  onClick={() =>
-                    ev.session_key &&
-                    push(`/sessions/${encodeURIComponent(ev.session_key)}`)
-                  }
-                >
+              {(data.recent_events || []).map((ev, i) => {
+                const chip = (
                   <Chip
                     size="small"
-                    label={ev.event_type}
+                    label={humanizeEnum(ev.event_type)}
                     color={eventChipColor(ev.event_type)}
                     sx={{ mr: 1.5, minWidth: 120 }}
                   />
+                );
+                const text = (
                   <ListItemText
-                    primary={ev.summary || summarizeEvent(ev.event_type, ev as any)}
+                    primary={
+                      ev.summary || summarizeEvent(ev.event_type, ev as any)
+                    }
                     secondary={relativeTime(ev.timestamp)}
                   />
-                </ListItemButton>
-              ))}
+                );
+                // Only rows with a session to open are actually navigable —
+                // non-navigable rows render as plain list items so they don't
+                // look clickable (overview-4).
+                return ev.session_key ? (
+                  <ListItemButton
+                    key={i}
+                    onClick={() =>
+                      push(
+                        `/sessions/${encodeURIComponent(ev.session_key as string)}`,
+                      )
+                    }
+                  >
+                    {chip}
+                    {text}
+                  </ListItemButton>
+                ) : (
+                  <ListItem key={i}>
+                    {chip}
+                    {text}
+                  </ListItem>
+                );
+              })}
             </List>
           </Card>
 
@@ -283,7 +390,9 @@ export const HomePage: React.FC = () => {
                       direction="row"
                       justifyContent="space-between"
                     >
-                      <Typography variant="body2">{k}</Typography>
+                      <Typography variant="body2">
+                        {humanizeEnum(k) || "—"}
+                      </Typography>
                       <Typography variant="body2">{v}</Typography>
                     </Stack>
                   ))}
@@ -296,7 +405,9 @@ export const HomePage: React.FC = () => {
                       direction="row"
                       justifyContent="space-between"
                     >
-                      <Typography variant="body2">{k}</Typography>
+                      <Typography variant="body2">
+                        {humanizeEnum(k) || "—"}
+                      </Typography>
                       <Typography variant="body2">{v}</Typography>
                     </Stack>
                   ))}

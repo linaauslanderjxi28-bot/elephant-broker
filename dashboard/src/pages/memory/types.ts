@@ -6,6 +6,8 @@
 // the runtime dataProvider (fe:providers) transports these shapes over
 // `/dashboard/memory/*` and `/memory/search`.
 
+import { humanizeEnum } from "../../lib/format";
+
 // ---------------------------------------------------------------------------
 // Enums (string unions matching the backend StrEnum values)
 // ---------------------------------------------------------------------------
@@ -171,6 +173,21 @@ export interface MemoryStatsResponse {
   dedup_rate: number;
   supersession_rate: number;
   creation_over_time: TimeBucket[];
+  /**
+   * Which store actually served the activity rates + sparkline at request time:
+   * "clickhouse" = the durable OTEL trace store (full selected range),
+   * "ledger" = the bounded in-memory trace ledger (window may be capped).
+   * Backend emits these additively (see api/routes/dashboard.py memory_stats).
+   */
+  activity_source?: "clickhouse" | "ledger";
+  /** Human-readable label for `activity_source`, e.g. "ClickHouse (durable)". */
+  activity_source_label?: string;
+  /** True when the ledger path could not cover the full selected range. */
+  activity_window_capped?: boolean;
+  /** Ledger buffer retention in seconds when `activity_window_capped`, else null. */
+  activity_retention_seconds?: number | null;
+  /** Optional truthful note about how activity data was served. */
+  note?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,13 +295,18 @@ export const CATEGORY_LABELS: Record<string, string> = {
 };
 
 // Retrieval `source` field -> user-friendly label (plan Section 2 Search).
+//
+// Keys MUST match the exact `source` strings the backend retrieval orchestrator
+// emits (elephantbroker/runtime/retrieval/orchestrator.py): "structural",
+// "keyword", "vector", "graph", "artifact", plus the facade fallback "hybrid".
+// Any unrecognized source falls back to humanizeEnum() via sourceLabel().
 export const SOURCE_LABELS: Record<string, string> = {
-  cognee_graph: "Graph",
-  cognee_chunks: "Semantic",
-  cypher: "Structural",
+  structural: "Structural",
+  keyword: "Keyword",
+  vector: "Semantic",
+  graph: "Graph",
+  artifact: "Artifact",
   hybrid: "Hybrid",
-  artifacts: "Artifact",
-  chunks_lexical: "Keyword",
 };
 
 export const SOURCE_TOOLTIPS: Record<string, string> = {
@@ -351,5 +373,5 @@ export function scopeLabel(scope: string): string {
 }
 
 export function sourceLabel(source: string): string {
-  return SOURCE_LABELS[source] ?? source;
+  return SOURCE_LABELS[source] ?? humanizeEnum(source);
 }

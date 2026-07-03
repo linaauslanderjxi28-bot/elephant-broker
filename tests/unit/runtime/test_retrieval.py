@@ -179,8 +179,14 @@ class TestRetrievalOrchestratorPhase4:
             vector_enabled=False, graph_expansion_enabled=False, artifact_enabled=False,
         )
         results = await orch.retrieve_candidates("test", policy=policy)
+        # Same fact id from two sources dedups to ONE candidate (memory-search-1).
         assert len(results) == 1
-        assert results[0].score == 0.5  # Kept structural (higher)
+        # Corrected merge fuses per-source contributions ADDITIVELY rather than
+        # keeping only the single max-scored copy: structural (1.0 * 0.5 = 0.5)
+        # + keyword (0.8 * 0.3 = 0.24) = 0.74.
+        assert results[0].score == 0.74
+        # Attribution goes to the top-contributing source (structural 0.5 > keyword 0.24).
+        assert results[0].source == "structural"
 
     async def test_root_top_k_caps_results(self, monkeypatch, mock_cognee):
         orch, graph, *_ = self._make()

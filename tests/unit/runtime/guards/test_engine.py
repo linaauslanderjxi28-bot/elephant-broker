@@ -886,3 +886,111 @@ class TestGuardConfigEnabledShortCircuit:
         # We can't strictly assert call_count without coupling to internals,
         # but we can verify the engine reached _SessionGuardState bookkeeping.
         assert engine._sessions[SID].last_accessed_at is not None
+
+
+class TestCustomRuleRefresh:
+    """FIX-4: versioned custom-rule change detection.
+
+    ``_maybe_refresh_custom_rules`` must probe the store's version counter
+    (single-row read, cached at engine level per ``custom_rule_refresh_seconds``)
+    and only run the full ``list_rules()`` + registry rebuild when the version
+    actually changed.
+    """
+
+    def _make_with_store(self, version: int = 1, **overrides):
+        store = AsyncMock()
+        store.get_rules_version = AsyncMock(return_value=version)
+        store.list_rules = AsyncMock(return_value=[])
+        engine, *_ = _make_engine(custom_rule_store=store, **overrides)
+        return engine, store
+
+    @pytest.mark.asyncio
+    async def test_no_store_no_refresh(self):
+        """Preserved behavior: no CustomRuleStore wired → no refresh at all."""
+        engine, *_ = _make_engine()
+        state = engine._sessions[SID]
+        # Should be a no-op (no AttributeError, no registry rebuild).
+        await engine._maybe_refresh_custom_rules(state)
+        assert state.custom_rules_version is None
+
+    @pytest.mark.asyncio
+    async def test_version_unchanged_skips_full_reload(self):
+        engine, store = self._make_with_store(version=3)
+        state = engine._sessions[SID]
+        state.custom_rules_version = 3
+        await engine._maybe_refresh_custom_rules(state)
+        store.get_rules_version.assert_awaited_once()
+        store.list_rules.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_version_changed_reloads_and_records_version(self):
+        engine, store = self._make_with_store(version=4)
+        state = engine._sessions[SID]
+        state.custom_rules_version = 3
+        await engine._maybe_refresh_custom_rules(state)
+        store.list_rules.assert_awaited_once()
+        assert state.custom_rules_version == 4
+
+    @pytest.mark.asyncio
+    async def test_probe_cached_across_sessions_within_interval(self):
+        """N sessions in the same interval share ONE version probe."""
+        engine, store = self._make_with_store(version=5)
+        state = engine._sessions[SID]
+        state.custom_rules_version = 5
+        other = _SessionGuardState(session_id=uuid.uuid4(), custom_rules_version=5)
+        engine._sessions[other.session_id] = other
+        await engine._maybe_refresh_custom_rules(state)
+        await engine._maybe_refresh_custom_rules(other)
+        store.get_rules_version.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_probe_reissued_after_interval_elapsed(self):
+        engine, store = self._make_with_store(version=5)
+        state = engine._sessions[SID]
+        state.custom_rules_version = 5
+        await engine._maybe_refresh_custom_rules(state)
+        # Age the cached probe past the configured interval.
+        engine._rules_version_probed_at = datetime.now(UTC) - timedelta(
+            seconds=engine._config.custom_rule_refresh_seconds + 1
+        )
+        await engine._maybe_refresh_custom_rules(state)
+        assert store.get_rules_version.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_invalidate_probe_forces_immediate_reprobe(self):
+        """Same-process rule writes invalidate the cache: the next check
+        re-probes immediately instead of waiting out the interval."""
+        engine, store = self._make_with_store(version=1)
+        state = engine._sessions[SID]
+        state.custom_rules_version = 1
+        await engine._maybe_refresh_custom_rules(state)
+        store.list_rules.assert_not_awaited()
+
+        # Simulate a dashboard write in the same process.
+        store.get_rules_version = AsyncMock(return_value=2)
+        engine.invalidate_custom_rules_probe()
+
+        await engine._maybe_refresh_custom_rules(state)
+        store.list_rules.assert_awaited_once()
+        assert state.custom_rules_version == 2
+
+    @pytest.mark.asyncio
+    async def test_probe_failure_is_nonfatal_and_skips_reload(self):
+        engine, store = self._make_with_store()
+        store.get_rules_version = AsyncMock(side_effect=RuntimeError("db locked"))
+        state = engine._sessions[SID]
+        state.custom_rules_version = 1
+        await engine._maybe_refresh_custom_rules(state)
+        # Previous rules stay in force; no blind full reload on failure.
+        store.list_rules.assert_not_awaited()
+        assert state.custom_rules_version == 1
+
+    @pytest.mark.asyncio
+    async def test_load_session_rules_stamps_applied_version(self):
+        engine, store = self._make_with_store(version=7)
+        from elephantbroker.schemas.profile import ProfilePolicy
+        engine._profiles = AsyncMock()
+        engine._profiles.resolve_profile = AsyncMock(return_value=ProfilePolicy(id="test", name="test"))
+        sid = uuid.uuid4()
+        await engine.load_session_rules(sid, "coding", session_key="agent:main:main", agent_id="main")
+        assert engine._sessions[sid].custom_rules_version == 7

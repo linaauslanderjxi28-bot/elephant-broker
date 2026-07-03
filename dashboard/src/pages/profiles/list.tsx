@@ -30,19 +30,25 @@ import {
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { apiGet } from "../home/dashboardApi";
+import { errorMessage } from "../../lib/errors";
+import { humanizeEnum } from "../../lib/format";
 
+// GET /dashboard/profiles -> { profiles: [{ profile_id, session_count }] }
+// (schemas/dashboard.py::ProfileSummary). The page previously read `name`/`id`
+// — neither of which the endpoint returns — so every row rendered blank and the
+// resolve calls hit `/profiles//resolve` (guards-profiles-1 / cross-cutting-2).
+// The human name + inheritance parent (`name`, `extends`) come from the resolve
+// endpoint's policy, surfaced inside ResolvedSection.
 interface Profile {
+  profile_id: string;
+  session_count?: number;
+  // Tolerated legacy/alternate shapes so a bare array or `{name}` still renders.
   name?: string;
   id?: string;
-  inherits_from?: string;
-  description?: string;
-  active_sessions?: number;
-  session_count?: number;
-  has_org_override?: boolean;
 }
 
-function profileName(p: Profile): string {
-  return String(p.name ?? p.id ?? "");
+function profileId(p: Profile): string {
+  return String(p.profile_id ?? p.id ?? p.name ?? "");
 }
 
 function flatten(obj: any, prefix = ""): Record<string, any> {
@@ -70,9 +76,27 @@ function ResolvedSection({ name }: { name: string }) {
 
   if (!resolved) return <CircularProgress size={20} />;
   const flat = flatten(resolved);
+  // resolve -> { policy: { id, name, extends, ... }, weights } — the human name
+  // and inheritance parent only exist here, not in the list row.
+  const policy = resolved?.policy ?? resolved ?? {};
+  const displayName: string = policy.name || humanizeEnum(policy.id) || "";
+  const extendsFrom: string = policy.extends || "";
 
   return (
     <Box>
+      {(displayName || extendsFrom) && (
+        <Stack
+          direction="row"
+          spacing={1}
+          alignItems="center"
+          sx={{ mb: 1, flexWrap: "wrap", rowGap: 1 }}
+        >
+          {displayName && <Typography variant="subtitle2">{displayName}</Typography>}
+          {extendsFrom && (
+            <Chip size="small" label={`inherits ${humanizeEnum(extendsFrom)}`} />
+          )}
+        </Stack>
+      )}
       <Accordion defaultExpanded>
         <AccordionSummary expandIcon={<ExpandMoreIcon />}>
           <Typography>Raw parameters</Typography>
@@ -166,7 +190,7 @@ export const ProfilesPage: React.FC = () => {
       const res = await apiGet<any>("/dashboard/profiles");
       setRows(Array.isArray(res) ? res : (res.items ?? res.profiles ?? []));
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -205,45 +229,31 @@ export const ProfilesPage: React.FC = () => {
       ) : (
         <Paper variant="outlined">
           {rows.map((p) => {
-            const name = profileName(p);
+            const id = profileId(p);
             return (
-              <Accordion key={name}>
+              <Accordion key={id}>
                 <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                   <Checkbox
-                    checked={selected.includes(name)}
+                    checked={selected.includes(id)}
                     onClick={(e) => {
                       e.stopPropagation();
-                      toggleSelect(name);
+                      toggleSelect(id);
                     }}
                   />
                   <Stack sx={{ flex: 1 }}>
-                    <Typography>{name}</Typography>
+                    <Typography>{humanizeEnum(id) || id}</Typography>
                     <Typography variant="caption" color="text.secondary">
-                      {p.description}
+                      {id}
                     </Typography>
                   </Stack>
-                  {p.inherits_from && (
-                    <Chip
-                      size="small"
-                      label={`inherits ${p.inherits_from}`}
-                      sx={{ mr: 1 }}
-                    />
-                  )}
-                  <Chip
-                    size="small"
-                    label={`${p.active_sessions ?? p.session_count ?? 0} sessions`}
-                  />
-                  {p.has_org_override && (
-                    <Chip
-                      size="small"
-                      color="secondary"
-                      label="custom"
-                      sx={{ ml: 1 }}
-                    />
-                  )}
+                  {/* Inheritance parent, real session_count, and org-override
+                      flags are not in the ProfileSummary the list endpoint
+                      returns (guards-profiles-8) — inheritance is surfaced from
+                      the resolve endpoint inside ResolvedSection; the rest are
+                      reported as a backend crossFileNeed rather than faked. */}
                 </AccordionSummary>
                 <AccordionDetails>
-                  <ResolvedSection name={name} />
+                  <ResolvedSection name={id} />
                 </AccordionDetails>
               </Accordion>
             );

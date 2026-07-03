@@ -62,10 +62,17 @@ class ActorRegistry(IActorRegistry):
         return actor
 
     async def resolve_by_handle(self, handle: str) -> ActorRef | None:
-        """Look up an actor by platform-qualified handle (e.g. 'telegram:user_tg')."""
+        """Look up an actor by platform-qualified handle (e.g. 'telegram:user_tg').
+
+        Inactive actors are excluded: a merged-away duplicate keeps its handles
+        as an audit record (soft-deactivate, see ``merge_actors``), so without
+        the ``active`` filter the LIMIT 1 lookup could return the dead node and
+        break login mapping / dedup.
+        """
         cypher = (
             "MATCH (a:ActorDataPoint) "
             "WHERE $handle IN a.handles AND a.gateway_id = $gateway_id "
+            "AND (a.active = true OR a.active IS NULL) "
             "RETURN properties(a) AS props LIMIT 1"
         )
         records = await self._graph.query_cypher(
@@ -132,3 +139,134 @@ class ActorRegistry(IActorRegistry):
                 relationship_type=rel_type,
             ))
         return relationships
+
+    # ------------------------------------------------------------------
+    # actors-orgs-4: merge a duplicate actor into a survivor
+    # ------------------------------------------------------------------
+    #
+    # A correct merge is a cross-node graph refactor, not a stub. Duplicate
+    # dashboard actors reference the same human across the whole graph in two
+    # distinct ways, and BOTH must be re-pointed or the merge leaves dangling
+    # references (a symptom-hiding bandaid):
+    #   1. Typed EDGES to/from the actor node (MEMBER_OF, REPORTS_TO,
+    #      SUPERVISES, CREATED_BY, ABOUT_ACTOR, SERVES_GOAL, ...).
+    #   2. Scalar / list actor-id PROPERTIES carried on Fact / Goal / Artifact /
+    #      Evidence / Procedure / Trace DataPoints (source_actor_id,
+    #      created_by_actor_id, actor_id, verifier_actor_id; target_actor_ids,
+    #      owner_actor_ids, actor_ids). These are stored under their plain names
+    #      (only the node's own id uses the ``eb_`` prefix).
+    # Everything is strictly gateway-scoped. The survivor's own attributes win;
+    # only multi-valued identity (handles / team_ids / tags) is unioned so the
+    # merged actor keeps every way the human was addressable.
+
+    #: Single-valued actor-reference properties carried on other DataPoints.
+    _SCALAR_ACTOR_REF_PROPS = (
+        "source_actor_id",
+        "created_by_actor_id",
+        "actor_id",
+        "verifier_actor_id",
+    )
+    #: List-valued actor-reference properties carried on other DataPoints.
+    _ARRAY_ACTOR_REF_PROPS = (
+        "target_actor_ids",
+        "owner_actor_ids",
+        "actor_ids",
+    )
+
+    async def merge_actors(
+        self, survivor_id: uuid.UUID, duplicate_id: uuid.UUID
+    ) -> ActorRef:
+        gw = self._gateway_id
+        surv, dup = str(survivor_id), str(duplicate_id)
+        if surv == dup:
+            raise ValueError("Cannot merge an actor into itself")
+
+        surv_entity = await self._graph.get_entity(surv, gateway_id=gw)
+        dup_entity = await self._graph.get_entity(dup, gateway_id=gw)
+        if surv_entity is None:
+            raise ValueError(f"Survivor actor {surv} not found in gateway {gw!r}")
+        if dup_entity is None:
+            raise ValueError(f"Duplicate actor {dup} not found in gateway {gw!r}")
+
+        survivor = ActorDataPoint.from_entity_dict(surv_entity).to_schema()
+        duplicate = ActorDataPoint.from_entity_dict(dup_entity).to_schema()
+
+        # 1. Union multi-valued identity onto the survivor (order-preserving dedup).
+        def _union(a: list, b: list) -> list:
+            return list(dict.fromkeys([*a, *b]))
+
+        survivor.handles = _union(survivor.handles, duplicate.handles)
+        survivor.team_ids = _union(survivor.team_ids, duplicate.team_ids)
+        survivor.tags = _union(survivor.tags, duplicate.tags)
+        await add_data_points([ActorDataPoint.from_schema(survivor)])
+
+        # 2. Re-point scalar actor-id properties across the gateway.
+        for prop in self._SCALAR_ACTOR_REF_PROPS:
+            await self._graph.query_cypher(
+                f"MATCH (n) WHERE n.gateway_id = $gw AND n.{prop} = $dup "
+                f"SET n.{prop} = $surv",
+                {"gw": gw, "dup": dup, "surv": surv},
+            )
+
+        # 3. Re-point list actor-id properties (drop the duplicate id, add the
+        #    survivor id only if not already present — no duplicate entries).
+        for prop in self._ARRAY_ACTOR_REF_PROPS:
+            await self._graph.query_cypher(
+                f"MATCH (n) WHERE n.gateway_id = $gw AND $dup IN n.{prop} "
+                f"SET n.{prop} = [x IN n.{prop} WHERE x <> $dup] + "
+                f"CASE WHEN $surv IN n.{prop} THEN [] ELSE [$surv] END",
+                {"gw": gw, "dup": dup, "surv": surv},
+            )
+
+        # 4. Re-point typed edges onto the survivor (add_relation MERGEs, so no
+        #    duplicate edges are created), carrying each edge's properties along.
+        #    Skip edges to/from the survivor itself to avoid self-loops.
+        out_edges = await self._graph.query_cypher(
+            "MATCH (d {eb_id: $dup})-[r]->(t) WHERE d.gateway_id = $gw "
+            "RETURN type(r) AS rel_type, t.eb_id AS other, properties(r) AS props",
+            {"dup": dup, "gw": gw},
+        )
+        for rec in out_edges:
+            other = rec.get("other")
+            if other and other != surv:
+                await self._graph.add_relation(
+                    surv, other, rec["rel_type"], properties=rec.get("props") or {}
+                )
+
+        in_edges = await self._graph.query_cypher(
+            "MATCH (s)-[r]->(d {eb_id: $dup}) WHERE d.gateway_id = $gw "
+            "RETURN type(r) AS rel_type, s.eb_id AS other, properties(r) AS props",
+            {"dup": dup, "gw": gw},
+        )
+        for rec in in_edges:
+            other = rec.get("other")
+            if other and other != surv:
+                await self._graph.add_relation(
+                    other, surv, rec["rel_type"], properties=rec.get("props") or {}
+                )
+
+        # 5. Provenance — emitted BEFORE the terminal soft-deactivate step so a
+        #    mid-crash merge is always audited (every prior step is an
+        #    idempotent MERGE/SET, so a retry after the event is safe).
+        await self._trace.append_event(
+            TraceEvent(
+                event_type=TraceEventType.ACTOR_MERGED,
+                actor_ids=[survivor.id],
+                payload={
+                    "action": "merge_actors",
+                    "survivor": surv,
+                    "duplicate": dup,
+                    "merged_handles": survivor.handles,
+                },
+            )
+        )
+
+        # 6. Retire the duplicate by soft-deactivation (Cognee-first upsert, no
+        #    DETACH DELETE): the node, its handles, and ALL its original edges
+        #    stay intact as an audit/provenance record (TD-70 / TF-ER-008).
+        #    Inactive actors are hidden from listings, handle resolution, and
+        #    authorization by the ``active`` filters on those paths.
+        duplicate.active = False
+        await add_data_points([ActorDataPoint.from_schema(duplicate)])
+
+        return survivor

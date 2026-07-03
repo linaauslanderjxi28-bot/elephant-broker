@@ -50,6 +50,8 @@ import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import { apiGet, apiSend, relativeTime, useAuthority } from "../home/dashboardApi";
+import { errorMessage } from "../../lib/errors";
+import { humanizeEnum } from "../../lib/format";
 
 // --- Local types (mirror elephantbroker/schemas/consolidation.py) ------------
 
@@ -202,15 +204,19 @@ function parseJsonSafe(raw: string | null | undefined): any {
   }
 }
 
-/** Turn apiSend's "409 Conflict"-style errors into operator-friendly text. */
-function friendlyRunError(message: string): string {
-  if (message.startsWith("409")) {
+/** Turn a run-consolidation error into operator-friendly text.
+ *
+ * Reads the ApiError status code (not a fragile message prefix) and otherwise
+ * surfaces the normalized backend detail rather than a bare "500" (gap-5-2). */
+function friendlyRunError(err: unknown): string {
+  const status = (err as any)?.status ?? (err as any)?.statusCode;
+  if (status === 409) {
     return "A consolidation run is already in progress for this gateway.";
   }
-  if (message.startsWith("501")) {
+  if (status === 501) {
     return "The consolidation engine is not available on this runtime.";
   }
-  return message;
+  return errorMessage(err);
 }
 
 // --- Run confirmation dialog ---------------------------------------------------
@@ -299,7 +305,7 @@ function ReportDrawer(props: { report: ConsolidationReport | null; onClose: () =
   const r = detail;
   return (
     <Drawer anchor="right" open={!!props.report} onClose={props.onClose}>
-      <Box sx={{ width: { xs: 360, sm: 520 }, p: 2 }}>
+      <Box sx={{ width: { xs: 360, sm: 600 }, p: 2 }}>
         <Stack direction="row" alignItems="center" justifyContent="space-between">
           <Typography variant="h6">Consolidation report</Typography>
           <IconButton onClick={props.onClose} size="small">
@@ -371,8 +377,11 @@ function ReportDrawer(props: { report: ConsolidationReport | null; onClose: () =
               <Typography variant="subtitle2" gutterBottom>
                 Stages
               </Typography>
-              <Paper variant="outlined">
-                <Table size="small">
+              {/* Horizontal scroll + non-wrapping numeric cells so the metrics
+                  and the expand chevron never clip inside the narrow drawer
+                  (consolidation-trace-7). */}
+              <Paper variant="outlined" sx={{ overflowX: "auto" }}>
+                <Table size="small" sx={{ "& td, & th": { whiteSpace: "nowrap" } }}>
                   <TableHead>
                     <TableRow>
                       <TableCell>#</TableCell>
@@ -392,7 +401,13 @@ function ReportDrawer(props: { report: ConsolidationReport | null; onClose: () =
                         <React.Fragment key={s.stage}>
                           <TableRow hover>
                             <TableCell>{s.stage}</TableCell>
-                            <TableCell>{s.name || STAGE_NAMES[s.stage] || ""}</TableCell>
+                            {/* Prefer the curated human stage map (which was
+                                dead code while the raw snake_case backend name
+                                won), fall back to humanizing it —
+                                consolidation-trace-6. */}
+                            <TableCell sx={{ whiteSpace: "normal" }}>
+                              {STAGE_NAMES[s.stage] || humanizeEnum(s.name) || s.name}
+                            </TableCell>
                             <TableCell align="right">{s.items_processed}</TableCell>
                             <TableCell align="right">{s.items_affected}</TableCell>
                             <TableCell align="right">{s.llm_calls_made}</TableCell>
@@ -515,6 +530,78 @@ function ReportsTab(props: {
 const SUGGESTION_FILTERS = ["pending", "approved", "rejected", "all"] as const;
 type SuggestionFilter = (typeof SUGGESTION_FILTERS)[number];
 
+/**
+ * The backend builds `pattern_description` as
+ * `"Repeated sequence: a → b (seen in N sessions)"` (refine_procedures.py) and
+ * the card ALSO renders "seen in N sessions" from `sessions_observed`, printing
+ * it twice (gap-5-5). Strip the redundant trailing parenthetical for display;
+ * the structured count stays on the metadata line.
+ */
+function cleanPatternDescription(desc?: string | null): string {
+  return String(desc ?? "")
+    .replace(/\s*\(seen in \d+\s+sessions?\)\s*$/i, "")
+    .trim();
+}
+
+/**
+ * Render a draft ProcedureDefinition as a readable step list instead of dumping
+ * raw snake_case JSON with step_id UUIDs (gap-5-3).
+ */
+function DraftProcedureView({ body }: { body: any }) {
+  if (!body || typeof body !== "object") {
+    return <Typography color="text.secondary">No draft details available.</Typography>;
+  }
+  const steps = Array.isArray(body.steps)
+    ? [...body.steps].sort((a, b) => (a?.order ?? 0) - (b?.order ?? 0))
+    : [];
+  return (
+    <Stack spacing={1.5}>
+      {body.description && <Typography variant="body2">{body.description}</Typography>}
+      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+        {body.scope && (
+          <Chip size="small" variant="outlined" label={`Scope: ${humanizeEnum(body.scope)}`} />
+        )}
+        {body.decision_domain && (
+          <Chip size="small" variant="outlined" label={humanizeEnum(body.decision_domain)} />
+        )}
+      </Stack>
+      {steps.length > 0 ? (
+        <Box component="ol" sx={{ m: 0, pl: 3 }}>
+          {steps.map((st: any, i: number) => {
+            const evidence = Array.isArray(st?.required_evidence)
+              ? st.required_evidence
+              : [];
+            return (
+              <Box component="li" key={st?.step_id ?? i} sx={{ mb: 1 }}>
+                <Typography variant="body2">
+                  {st?.instruction || humanizeEnum(st?.name) || "(step)"}
+                  {st?.is_optional ? " · optional" : ""}
+                </Typography>
+                {evidence.length > 0 && (
+                  <Typography variant="caption" color="text.secondary">
+                    Evidence:{" "}
+                    {evidence
+                      .map(
+                        (ev: any) =>
+                          ev?.description || humanizeEnum(ev?.proof_type),
+                      )
+                      .filter(Boolean)
+                      .join("; ")}
+                  </Typography>
+                )}
+              </Box>
+            );
+          })}
+        </Box>
+      ) : (
+        <Typography variant="caption" color="text.secondary">
+          This draft has no steps.
+        </Typography>
+      )}
+    </Stack>
+  );
+}
+
 function SuggestionsTab(props: { onChanged: () => void }) {
   const authority = useAuthority();
   const canReview = authority >= 70;
@@ -523,16 +610,26 @@ function SuggestionsTab(props: { onChanged: () => void }) {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ title: string; body: any } | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
+    // Clear both the action error and the load error whenever we refetch (e.g.
+    // on a filter switch) so a stale alert can't persist across views (gap-5-2).
+    setError(null);
+    setLoadError(null);
     apiGet<ProcedureSuggestion[]>(
       "/consolidation/suggestions",
       filter === "all" ? undefined : { approval_status: filter },
     )
       .then((r) => setSuggestions(Array.isArray(r) ? r : []))
-      .catch(() => setSuggestions([]))
+      .catch((e) => {
+        // A failed load previously rendered as an empty queue while the summary
+        // card still showed a count (gap-5-1). Surface the real error instead.
+        setSuggestions([]);
+        setLoadError(errorMessage(e));
+      })
       .finally(() => setLoading(false));
   }, [filter]);
   useEffect(() => load(), [load]);
@@ -547,7 +644,7 @@ function SuggestionsTab(props: { onChanged: () => void }) {
       load();
       props.onChanged();
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setBusyId(null);
     }
@@ -569,7 +666,7 @@ function SuggestionsTab(props: { onChanged: () => void }) {
         >
           {SUGGESTION_FILTERS.map((f) => (
             <ToggleButton key={f} value={f}>
-              {f}
+              {humanizeEnum(f)}
             </ToggleButton>
           ))}
         </ToggleButtonGroup>
@@ -584,11 +681,16 @@ function SuggestionsTab(props: { onChanged: () => void }) {
           {error}
         </Alert>
       )}
+      {loadError && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setLoadError(null)}>
+          Could not load procedure suggestions: {loadError}
+        </Alert>
+      )}
       {loading ? (
         <CircularProgress />
       ) : (
         <Stack spacing={2}>
-          {suggestions.length === 0 && (
+          {suggestions.length === 0 && !loadError && (
             <Typography color="text.secondary">
               No {filter === "all" ? "" : `${filter} `}procedure suggestions.
             </Typography>
@@ -609,10 +711,12 @@ function SuggestionsTab(props: { onChanged: () => void }) {
                   >
                     <Chip
                       size="small"
-                      label={s.approval_status}
+                      label={humanizeEnum(s.approval_status)}
                       color={suggestionStatusColor(s.approval_status)}
                     />
-                    <Typography variant="subtitle2">{s.pattern_description}</Typography>
+                    <Typography variant="subtitle2">
+                      {cleanPatternDescription(s.pattern_description)}
+                    </Typography>
                   </Stack>
                   <Typography
                     variant="body2"
@@ -646,7 +750,12 @@ function SuggestionsTab(props: { onChanged: () => void }) {
                       <Button
                         size="small"
                         onClick={() =>
-                          setDraft({ title: s.pattern_description, body: draftBody })
+                          setDraft({
+                            title:
+                              draftBody?.name ||
+                              cleanPatternDescription(s.pattern_description),
+                            body: draftBody,
+                          })
                         }
                       >
                         View draft procedure
@@ -683,13 +792,8 @@ function SuggestionsTab(props: { onChanged: () => void }) {
       )}
       <Dialog open={!!draft} onClose={() => setDraft(null)} fullWidth maxWidth="md">
         <DialogTitle>Draft procedure — {draft?.title}</DialogTitle>
-        <DialogContent>
-          <Box
-            component="pre"
-            sx={{ m: 0, fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-word" }}
-          >
-            {JSON.stringify(draft?.body, null, 2)}
-          </Box>
+        <DialogContent dividers>
+          <DraftProcedureView body={draft?.body} />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setDraft(null)}>Close</Button>
@@ -776,7 +880,7 @@ export const ConsolidationPage: React.FC = () => {
       loadStatus();
       if (report?.id) setSelected(report);
     } catch (e) {
-      setRunError(friendlyRunError((e as Error).message));
+      setRunError(friendlyRunError(e));
     } finally {
       setRunBusy(false);
     }

@@ -8,11 +8,13 @@
 
 import { useState, type FC } from "react";
 import { useNavigate } from "react-router";
+import { useSearchParams } from "react-router-dom";
 import { useApiUrl, useCustomMutation } from "@refinedev/core";
 import {
   Accordion,
   AccordionDetails,
   AccordionSummary,
+  Alert,
   Box,
   Button,
   Card,
@@ -35,14 +37,16 @@ import {
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import SearchIcon from "@mui/icons-material/Search";
 
+import { errorMessage } from "../../lib/errors";
+import { humanizeEnum, pluralize } from "../../lib/format";
 import {
   MEMORY_CLASS_COLORS,
   MEMORY_CLASS_HEX,
   MEMORY_CLASS_LABELS,
   PROFILE_OPTIONS,
   SCOPE_LABELS,
-  SOURCE_LABELS,
   SOURCE_TOOLTIPS,
+  sourceLabel,
   type MemoryClass,
   type Scope,
   type SearchResult,
@@ -50,29 +54,87 @@ import {
 
 const MAX_RESULT_OPTIONS = [10, 20, 50];
 
+// memory-search-5: preserve the last query + results across in-app navigation
+// (e.g. click a result → Back). The component unmounts on navigate, so a
+// module-level cache keyed by the exact inputs restores the view without
+// re-issuing the request. Inputs also live in the URL so a reload/deep-link
+// rehydrates the search box (results are re-run by the operator on reload).
+interface SearchInputs {
+  query: string;
+  profile: string;
+  maxResults: number;
+  autoRecall: boolean;
+}
+interface ResultsSnapshot {
+  key: string;
+  results: SearchResult[] | null;
+  elapsed: number | null;
+  error: string | null;
+}
+let resultsCache: ResultsSnapshot | null = null;
+
+const inputsKey = (i: SearchInputs): string =>
+  JSON.stringify([i.query.trim(), i.profile, i.maxResults, i.autoRecall]);
+
 export const MemorySearch: FC = () => {
   const navigate = useNavigate();
   const apiUrl = useApiUrl();
   const { mutate, isLoading } = useCustomMutation<SearchResult[]>();
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  const [query, setQuery] = useState("");
-  const [profile, setProfile] = useState("coding");
-  const [maxResults, setMaxResults] = useState(20);
-  const [autoRecall, setAutoRecall] = useState(false);
-  const [results, setResults] = useState<SearchResult[] | null>(null);
-  const [elapsed, setElapsed] = useState<number | null>(null);
-  const [errored, setErrored] = useState(false);
+  // Inputs are seeded from the URL (deep-link / reload survival).
+  const [query, setQuery] = useState(() => searchParams.get("q") ?? "");
+  const [profile, setProfile] = useState(
+    () => searchParams.get("profile") ?? "coding",
+  );
+  const [maxResults, setMaxResults] = useState(() => {
+    const n = Number(searchParams.get("max"));
+    return MAX_RESULT_OPTIONS.includes(n) ? n : 20;
+  });
+  const [autoRecall, setAutoRecall] = useState(
+    () => searchParams.get("recall") === "1",
+  );
+
+  // Results / error state, hydrated from the module cache when the initial
+  // (URL-seeded) inputs match the last executed search — back-nav restores the
+  // exact prior view without re-issuing the request (memory-search-5).
+  const initialKey = inputsKey({ query, profile, maxResults, autoRecall });
+  const [results, setResults] = useState<SearchResult[] | null>(() =>
+    resultsCache && resultsCache.key === initialKey ? resultsCache.results : null,
+  );
+  const [elapsed, setElapsed] = useState<number | null>(() =>
+    resultsCache && resultsCache.key === initialKey ? resultsCache.elapsed : null,
+  );
+  const [error, setError] = useState<string | null>(() =>
+    resultsCache && resultsCache.key === initialKey ? resultsCache.error : null,
+  );
 
   const runSearch = () => {
-    if (!query.trim()) return;
-    setErrored(false);
+    // memory-search-3: honour the in-flight guard so Enter (or a double click)
+    // cannot race a second request whose stale response overwrites the first.
+    if (!query.trim() || isLoading) return;
+    setError(null);
+
+    // Snapshot the EXECUTED inputs — the module cache is keyed by these (not the
+    // live, possibly-still-being-edited inputs) so a later restore is coherent.
+    const executed: SearchInputs = { query: query.trim(), profile, maxResults, autoRecall };
+    const key = inputsKey(executed);
+
+    // Reflect the executed inputs in the URL (shareable / reload-safe).
+    const next = new URLSearchParams();
+    next.set("q", executed.query);
+    next.set("profile", profile);
+    next.set("max", String(maxResults));
+    if (autoRecall) next.set("recall", "1");
+    setSearchParams(next, { replace: true });
+
     const started = performance.now();
     mutate(
       {
         url: `${apiUrl}/memory/search`,
         method: "post",
         values: {
-          query: query.trim(),
+          query: executed.query,
           max_results: maxResults,
           profile_name: profile,
           auto_recall: autoRecall,
@@ -80,16 +142,24 @@ export const MemorySearch: FC = () => {
       },
       {
         onSuccess: (resp) => {
-          setElapsed((performance.now() - started) / 1000);
+          const el = (performance.now() - started) / 1000;
           const raw = resp?.data as unknown;
           const list: SearchResult[] = Array.isArray(raw)
             ? (raw as SearchResult[])
             : ((raw as { results?: SearchResult[] })?.results ?? []);
+          setElapsed(el);
           setResults(list);
+          setError(null);
+          resultsCache = { key, results: list, elapsed: el, error: null };
         },
-        onError: () => {
-          setErrored(true);
-          setResults([]);
+        onError: (err) => {
+          // memory-search-4: one coherent error state — surface the real backend
+          // message and DON'T also render an empty "0 results" block.
+          const msg = errorMessage(err);
+          setError(msg);
+          setResults(null);
+          setElapsed(null);
+          resultsCache = { key, results: null, elapsed: null, error: msg };
         },
       },
     );
@@ -141,7 +211,7 @@ export const MemorySearch: FC = () => {
               >
                 {PROFILE_OPTIONS.map((p) => (
                   <MenuItem key={p} value={p}>
-                    {p}
+                    {humanizeEnum(p)}
                   </MenuItem>
                 ))}
               </Select>
@@ -180,27 +250,29 @@ export const MemorySearch: FC = () => {
         </Box>
       )}
 
-      {errored && (
-        <Typography color="error" sx={{ mb: 2 }}>
-          Search failed. Please try again.
-        </Typography>
+      {!isLoading && error && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          {error}
+        </Alert>
       )}
 
-      {results !== null && !isLoading && (
+      {results !== null && !isLoading && !error && (
         <>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            {results.length} result{results.length === 1 ? "" : "s"}
+            {results.length} {pluralize(results.length, "result")}
             {elapsed !== null ? ` (${elapsed.toFixed(2)}s)` : ""}
           </Typography>
           {results.length === 0 ? (
-            <Typography color="text.secondary">No results.</Typography>
+            <Typography color="text.secondary">
+              No results. Try a different query or profile.
+            </Typography>
           ) : (
             <Stack spacing={1.5}>
               {results.map((r) => {
                 const cls = r.memory_class as MemoryClass;
                 const clsHex = MEMORY_CLASS_HEX[cls];
                 const pct = Math.round((r.score ?? 0) * 100);
-                const srcLabel = SOURCE_LABELS[r.source] ?? r.source;
+                const srcLabel = sourceLabel(r.source);
                 return (
                   <Card key={r.id} variant="outlined">
                     <CardActionArea onClick={() => navigate(`/memory/${r.id}`)}>

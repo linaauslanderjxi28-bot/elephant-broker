@@ -88,6 +88,25 @@ async def check_authority(
             ))
         raise HTTPException(status_code=404, detail=f"Actor not found: {actor_id}")
 
+    # Inactive actors never authorize. Point lookups (``resolve_actor``) still
+    # return them so historical display keeps working, but a soft-deactivated
+    # actor (merged duplicate / offboarded operator) must not act — defense in
+    # depth alongside the SuperTokens session revocation in
+    # ``set_actor_status``.
+    if getattr(actor, "active", True) is False:
+        if metrics:
+            metrics.inc_authority_check(action, "denied")
+        if trace_ledger:
+            await trace_ledger.append_event(TraceEvent(
+                event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                actor_ids=[aid],
+                payload={"action": action, "reason": "actor_inactive"},
+            ))
+        raise HTTPException(
+            status_code=403,
+            detail=f"Actor is deactivated and cannot perform action '{action}'",
+        )
+
     # Load rule
     rule = await authority_store.get_rule(action)
     min_level = rule.get("min_authority_level", 90)

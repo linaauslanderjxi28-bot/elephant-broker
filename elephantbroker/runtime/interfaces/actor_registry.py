@@ -29,3 +29,17 @@ class IActorRegistry(ABC):
     async def get_relationships(self, actor_id: uuid.UUID) -> list[ActorRelationship]:
         """Get all relationships involving this actor."""
         ...
+
+    @abstractmethod
+    async def merge_actors(
+        self, survivor_id: uuid.UUID, duplicate_id: uuid.UUID
+    ) -> ActorRef:
+        """Merge a duplicate actor into a survivor.
+
+        Unions multi-valued identity onto the survivor, re-points every
+        actor-reference property and typed edge in the graph, then
+        soft-deactivates the duplicate (``active=False``) — the duplicate node
+        and its original edges are preserved for provenance. Returns the
+        merged survivor.
+        """
+        ...

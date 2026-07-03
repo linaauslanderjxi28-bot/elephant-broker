@@ -12,6 +12,7 @@ from cognee.tasks.storage import add_data_points
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from elephantbroker.api.auth.identity import get_identity
 from elephantbroker.api.routes._authority import check_authority
 from elephantbroker.runtime.adapters.cognee.datapoints import (
     ActorDataPoint,
@@ -85,19 +86,56 @@ class SetActorStatusRequest(BaseModel):
     active: bool
 
 
+class SetActorOrgRequest(BaseModel):
+    # ``None`` / empty string clears the actor's organization membership.
+    org_id: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _get_deps(request: Request):
-    """Extract common dependencies from request."""
+    """Extract common dependencies (container + resolved calling actor id).
+
+    RC-1 root-cause fix: the calling actor is taken from the identity resolved
+    by ``AuthMiddleware`` (``request.state.identity``), which unifies ALL
+    supported auth methods — SuperTokens session cookie (dashboard users),
+    ``X-EB-API-Key`` (``ebrun`` CLI), and ``X-EB-Agent-Key`` gateway identity
+    (TS plugins). This is the SAME principal the ``/dashboard/*`` read routes
+    authorize against, so a browser session cookie now resolves to a real
+    ``actor_id`` here too (previously ``/admin/*`` read only
+    ``request.state.actor_id``, set solely for gateway-header / API-key callers,
+    so every dashboard-session write 401'd).
+
+    Security: ``actor_id`` is NEVER read from a browser-supplied header directly.
+    ``resolve_identity`` derives it from the validated credential (session /
+    API-key record / deterministic agent uuid). The raw ``X-EB-Actor-Id``
+    fallback below only covers non-middleware/test paths, and even there the
+    legacy header is the lowest-precedence method inside ``resolve_identity``
+    — a resolved session always wins over any spoofed actor header.
+    """
     container = request.app.state.container
-    actor_id_str = getattr(request.state, "actor_id", "") or request.headers.get("X-EB-Actor-Id", "")
+    identity = get_identity(request)
+    actor_id_str = str(identity.actor_id) if getattr(identity, "actor_id", None) else ""
+    if not actor_id_str:
+        # Non-middleware / test path: fall back to the raw header stamp so the
+        # legacy Phase 8 trust boundary keeps working when AuthMiddleware is
+        # not wired.
+        actor_id_str = getattr(request.state, "actor_id", "") or request.headers.get("X-EB-Actor-Id", "")
     return container, actor_id_str
 
 
 async def _auth(request: Request, action: str, target_org_id: str | None = None, target_team_id: str | None = None):
-    """Shortcut for authority check."""
+    """Authorize the resolved caller for ``action`` via the per-action rule store.
+
+    Authorization stays on the per-action authority model (``check_authority`` +
+    ``AuthorityRuleStore``) so the admin-configurable authority rules and
+    org/team matching constraints are preserved. Only the *identity resolution*
+    changed (RC-1): the caller now comes from the middleware-resolved
+    ``AuthIdentity`` rather than a trusted header, so dashboard sessions,
+    API keys, and gateway identity all authorize consistently.
+    """
     container, actor_id_str = _get_deps(request)
     # Lazy bootstrap detection (avoids Neo4j connection during container init)
     bootstrap = False
@@ -106,7 +144,7 @@ async def _auth(request: Request, action: str, target_org_id: str | None = None,
     elif hasattr(container, "_bootstrap_mode"):
         bootstrap = getattr(container, "_bootstrap_mode", False) or False
     if not actor_id_str and not bootstrap:
-        raise HTTPException(status_code=401, detail="X-EB-Actor-Id header required for admin operations")
+        raise HTTPException(status_code=401, detail="Authentication required for admin operations")
     aid = uuid.UUID(actor_id_str) if actor_id_str else uuid.uuid4()
     return await check_authority(
         container.actor_registry,
@@ -440,12 +478,19 @@ async def remove_team_member(team_id: str, actor_id: str, request: Request):
 
 
 @router.get("/teams/{team_id}/members")
-async def list_team_members(team_id: str, request: Request):
+async def list_team_members(
+    team_id: str, request: Request, include_inactive: bool = Query(False)
+):
+    """List a team's member actors. Soft-deactivated actors are hidden by
+    default; pass ``include_inactive=true`` to return everything."""
     await _auth(request, "add_team_member", target_team_id=team_id)
     container = request.app.state.container
+    # ``active`` was introduced after early actors were stored, so NULL means
+    # default-active.
+    active_clause = "" if include_inactive else "WHERE (a.active = true OR a.active IS NULL) "
     records = await container.graph.query_cypher(
         "MATCH (a:ActorDataPoint)-[:MEMBER_OF]->(t:TeamDataPoint {eb_id: $team_id}) "
-        "RETURN properties(a) AS props",
+        + active_clause + "RETURN properties(a) AS props",
         {"team_id": team_id},
     )
     return [{"actor_id": r["props"].get("eb_id"), "display_name": r["props"].get("display_name"),
@@ -458,20 +503,31 @@ async def list_team_members(team_id: str, request: Request):
 # ---------------------------------------------------------------------------
 
 @router.get("/actors")
-async def list_actors(request: Request, org_id: str | None = None):
+async def list_actors(
+    request: Request,
+    org_id: str | None = None,
+    include_inactive: bool = Query(False),
+):
+    """List gateway actors. Soft-deactivated actors (``active=false`` — merged
+    duplicates, offboarded operators) are hidden by default; pass
+    ``include_inactive=true`` to return everything."""
     await _auth(request, "register_actor")
     container = request.app.state.container
     # Post-Bucket-A: middleware default is "" not "local". See TD-41.
     gw_id = getattr(request.state, "gateway_id", "")
+    # ``active`` was introduced after early actors were stored, so NULL means
+    # default-active.
+    active_clause = "" if include_inactive else "AND (a.active = true OR a.active IS NULL) "
     if org_id:
         records = await container.graph.query_cypher(
             "MATCH (a:ActorDataPoint) WHERE a.gateway_id = $gw AND a.org_id = $org "
-            "RETURN properties(a) AS props",
+            + active_clause + "RETURN properties(a) AS props",
             {"gw": gw_id, "org": org_id},
         )
     else:
         records = await container.graph.query_cypher(
-            "MATCH (a:ActorDataPoint) WHERE a.gateway_id = $gw RETURN properties(a) AS props",
+            "MATCH (a:ActorDataPoint) WHERE a.gateway_id = $gw "
+            + active_clause + "RETURN properties(a) AS props",
             {"gw": gw_id},
         )
     return [{"actor_id": r["props"].get("eb_id"), "display_name": r["props"].get("display_name"),
@@ -537,6 +593,23 @@ async def update_actor(actor_id: str, request: Request):
 
 @router.post("/actors/{actor_id}/merge")
 async def merge_actors(actor_id: str, request: Request):
+    """Merge a duplicate actor into a surviving actor.
+
+    actors-orgs-4: a *correct* merge must re-point every inbound/outbound edge
+    (MEMBER_OF, CREATED_BY, REPORTS_TO/SUPERVISES, ABOUT_ACTOR, …) AND remap the
+    scalar/list actor-reference properties carried on Fact/Goal/Artifact/
+    Evidence/Procedure DataPoints, then soft-deactivate the duplicate
+    (preserving it for provenance) — a cross-node graph refactor that belongs on
+    ``IActorRegistry.merge_actors`` (backed by graph refactor primitives), not
+    an ad-hoc route handler. When the registry exposes that capability we
+    delegate to it; otherwise we return a stable 501 the dashboard already
+    detects to disable the action.
+
+    The primary *source* of duplicate dashboard actors — non-idempotent
+    first-login actor creation — is fixed at the root in
+    ``api/auth/identity.resolve_actor_from_st_user`` (actors-orgs-2), so the
+    merge tool is a rarely-needed cleanup rather than a routine necessity.
+    """
     body = await request.json()
     await _auth(request, "merge_actors")
     container = request.app.state.container
@@ -548,7 +621,10 @@ async def merge_actors(actor_id: str, request: Request):
             uuid.UUID(actor_id), uuid.UUID(duplicate_id)
         )
         return result.model_dump(mode="json")
-    raise HTTPException(status_code=501, detail="Actor merge not implemented")
+    raise HTTPException(
+        status_code=501,
+        detail="Actor merge is not supported by this server build.",
+    )
 
 
 async def _revoke_actor_sessions(actor) -> int:
@@ -614,6 +690,67 @@ async def set_actor_status(actor_id: str, body: SetActorStatusRequest, request: 
     return {"actor_id": actor_id, "active": body.active, "revoked_sessions": revoked_sessions}
 
 
+@router.put("/actors/{actor_id}/organization")
+async def set_actor_organization(actor_id: str, body: SetActorOrgRequest, request: Request):
+    """Set or clear an actor's organization membership (actors-orgs-10).
+
+    Org membership is modeled as the ``org_id`` *property* on the actor node —
+    every read path proves this: ``admin.list_actors(org_id=…)`` filters on
+    ``a.org_id``, the dashboard org list counts actors via ``a.org_id = o.eb_id``,
+    and the actor-detail endpoint returns ``org_id`` from the actor's props.
+    Unlike team membership (which needs a ``MEMBER_OF`` edge because reads
+    traverse it), org membership has no edge reader, so the property IS the
+    model. Nothing previously *wrote* it, which is why the org 'Actors' card, the
+    org actor count, and the actor-detail org section were permanently empty.
+
+    Mirrors the team-membership handlers: same ``_auth`` gate (``register_actor``,
+    the action that already governs every actor mutation) with the target org
+    passed for org-matching rules, and the same ``assert_same_gateway`` link-spam
+    guard on the actor. The write goes through ``ActorRegistry.register_actor``
+    (the canonical actor persistence path, as ``update_actor`` /
+    ``set_actor_status`` already do) so the ``org_id`` change upserts in place.
+    """
+    new_org = (body.org_id or "").strip() or None
+    await _auth(request, "register_actor", target_org_id=new_org)
+    container = request.app.state.container
+
+    # Link-spam guard: the actor must belong to the caller's gateway. Orgs carry
+    # no gateway_id (business entities span gateways), so assert_same_gateway on
+    # the org is a no-op — instead we verify the org exists.
+    # Canonical None-guard: middleware always stamps request.state.gateway_id to
+    # a string (possibly ""); `is None` only short-circuits when middleware is
+    # unwired (test paths). A truthy `or` would misread "" as missing.
+    gw_id = getattr(request.state, "gateway_id", None)
+    if gw_id is None:
+        gw_id = container.gateway_id
+    await assert_same_gateway(container.graph, actor_id, gw_id)
+    if new_org:
+        org_entity = await container.graph.get_entity(new_org)
+        if not org_entity:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
+    actor = await container.actor_registry.resolve_actor(uuid.UUID(actor_id))
+    if not actor:
+        raise HTTPException(status_code=404, detail="Actor not found")
+    actor.org_id = uuid.UUID(new_org) if new_org else None
+    await container.actor_registry.register_actor(actor)
+
+    await container.trace_ledger.append_event(TraceEvent(
+        # Reuse the generic membership events (as team membership does); the
+        # payload discriminator distinguishes org from team membership.
+        event_type=TraceEventType.MEMBER_ADDED if new_org else TraceEventType.MEMBER_REMOVED,
+        actor_ids=[actor.id],
+        payload={"actor_id": actor_id, "org_id": new_org or "", "membership": "organization"},
+    ))
+    logger.info(
+        "Set actor %s organization -> %s", actor_id, new_org or "(cleared)"
+    )
+    metrics = getattr(container, "metrics_ctx", None)
+    if metrics:
+        metrics.inc_admin_op("set_actor_org", "success")
+    return {"actor_id": actor_id, "org_id": new_org, "status": "set" if new_org else "cleared"}
+
+
 # ---------------------------------------------------------------------------
 # Persistent goals
 # ---------------------------------------------------------------------------
@@ -657,11 +794,27 @@ async def create_persistent_goal(body: CreatePersistentGoalRequest, request: Req
 
 
 @router.get("/goals")
-async def list_persistent_goals(request: Request, scope: str | None = None, org_id: str | None = None):
+async def list_persistent_goals(
+    request: Request,
+    scope: str | None = None,
+    org_id: str | None = None,
+    status: str | None = None,
+):
+    """List persistent goals, gateway-scoped.
+
+    goals-procedures-7 fix: previously hard-filtered ``status = 'active'``, so
+    paused/completed/cancelled roots silently vanished from the UI. Now returns
+    ALL statuses by default (each goal's ``status`` is included in the returned
+    ``props`` so the UI can render/group by it), with an optional ``status``
+    query filter for callers that only want one state.
+    """
     container = request.app.state.container
     gw_id = getattr(request.state, "gateway_id", "")
-    cypher = "MATCH (g:GoalDataPoint) WHERE g.gateway_id = $gw AND g.status = 'active'"
+    cypher = "MATCH (g:GoalDataPoint) WHERE g.gateway_id = $gw"
     params: dict = {"gw": gw_id}
+    if status:
+        cypher += " AND g.status = $status"
+        params["status"] = status
     if scope:
         cypher += " AND g.scope = $scope"
         params["scope"] = scope
@@ -800,3 +953,79 @@ async def delete_profile_override(org_id: str, profile_id: str, request: Request
     container = request.app.state.container
     await container.profile_registry.delete_org_override(org_id, profile_id)
     return {"org_id": org_id, "profile_id": profile_id, "status": "deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Fact indexes (Fix 5) — opt-in, per-index Neo4j index management
+#
+# DEFAULT OFF: no startup path creates these. Neo4j itself is the source of
+# truth for what exists (SHOW INDEXES via fact_index_status) — no config flag
+# that can drift. Indexes are database-global: enabling one affects every
+# gateway sharing the Neo4j database, hence the config-class authority gate
+# ("manage_indexes", level 90) on all four routes including the read.
+# ---------------------------------------------------------------------------
+
+def _get_memory_facade(request: Request):
+    """Resolve the memory facade or 503 (context-only deployments have none)."""
+    ms = request.app.state.container.memory_store
+    if ms is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory store not available (context-only deployment)",
+        )
+    return ms
+
+
+@router.get("/indexes")
+async def list_fact_indexes(request: Request):
+    await _auth(request, "manage_indexes")
+    ms = _get_memory_facade(request)
+    return {"indexes": await ms.fact_index_status()}
+
+
+@router.post("/indexes/{index_name}")
+async def create_fact_index(index_name: str, request: Request):
+    await _auth(request, "manage_indexes")
+    ms = _get_memory_facade(request)
+    container = request.app.state.container
+    try:
+        await ms.ensure_fact_index(index_name)
+    except ValueError as exc:
+        # Unknown catalog name — the facade whitelist is the injection guard.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    metrics = getattr(container, "metrics_ctx", None)
+    if metrics:
+        metrics.inc_admin_op("create_fact_index", "success")
+    return {"index": index_name, "status": "created"}
+
+
+@router.delete("/indexes/{index_name}")
+async def drop_fact_index(index_name: str, request: Request):
+    await _auth(request, "manage_indexes")
+    ms = _get_memory_facade(request)
+    container = request.app.state.container
+    try:
+        await ms.drop_fact_index(index_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    metrics = getattr(container, "metrics_ctx", None)
+    if metrics:
+        metrics.inc_admin_op("drop_fact_index", "success")
+    return {"index": index_name, "status": "dropped"}
+
+
+@router.post("/indexes/{index_name}/rebuild")
+async def rebuild_fact_index(index_name: str, request: Request):
+    """Drop then re-create — Neo4j re-populates the index in the background."""
+    await _auth(request, "manage_indexes")
+    ms = _get_memory_facade(request)
+    container = request.app.state.container
+    try:
+        await ms.drop_fact_index(index_name)
+        await ms.ensure_fact_index(index_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    metrics = getattr(container, "metrics_ctx", None)
+    if metrics:
+        metrics.inc_admin_op("rebuild_fact_index", "success")
+    return {"index": index_name, "status": "rebuilt"}

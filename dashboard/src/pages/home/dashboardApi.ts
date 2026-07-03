@@ -11,6 +11,7 @@ import { usePermissions } from "@refinedev/core";
 
 import { getSelectedGateway } from "../../providers/apiClient";
 import { SELECTED_GATEWAY_KEY } from "../../providers/gatewayKey";
+import { humanizeEnum } from "../../lib/format";
 
 export const API_URL: string =
   ((import.meta as any).env?.VITE_EB_RUNTIME_URL as string | undefined) ||
@@ -49,12 +50,64 @@ function buildUrl(path: string, params?: Record<string, unknown>): string {
   return url.toString();
 }
 
+/**
+ * Error thrown by {@link apiGet} / {@link apiSend} for a non-2xx response.
+ *
+ * Historically these helpers threw `new Error("404 Not Found")`, discarding the
+ * response body — so call sites could never surface FastAPI's `{detail}` (string
+ * or 422 validation array) and forms lost field-level errors (RC-4:
+ * guards-profiles-9, goals-procedures-10, gap-5-2). This carries the parsed body
+ * on `.body` so any caller can run it through `normalizeApiError(err)` (which
+ * reads `.body`) to get a human message plus per-field errors.
+ *
+ * The `.message` is intentionally kept as `"{status} {statusText}"` for backward
+ * compatibility with the few call sites that branch on the status prefix
+ * (e.g. `err.message.startsWith("501")`); prefer `.status` / `normalizeApiError`
+ * in new code.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  /** Alias of {@link status}; matches the `statusCode` convention used elsewhere. */
+  readonly statusCode: number;
+  readonly statusText: string;
+  /** Parsed JSON response body (or the raw text, or null). */
+  readonly body: unknown;
+
+  constructor(status: number, statusText: string, body: unknown) {
+    super(`${status} ${statusText}`.trim());
+    this.name = "ApiError";
+    this.status = status;
+    this.statusCode = status;
+    this.statusText = statusText;
+    this.body = body;
+  }
+}
+
+/** Read a failed Response into an ApiError, preserving the parsed body. */
+async function toApiError(res: Response): Promise<ApiError> {
+  let raw = "";
+  try {
+    raw = await res.text();
+  } catch {
+    /* body unavailable — keep the status line only */
+  }
+  let body: unknown = raw || null;
+  if (raw) {
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = raw;
+    }
+  }
+  return new ApiError(res.status, res.statusText, body);
+}
+
 export async function apiGet<T = any>(
   path: string,
   params?: Record<string, unknown>,
 ): Promise<T> {
   const res = await fetch(buildUrl(path, params), { credentials: "include" });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) throw await toApiError(res);
   return (await res.json()) as T;
 }
 
@@ -70,7 +123,7 @@ export async function apiSend<T = any>(
     headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) throw await toApiError(res);
   const text = await res.text();
   return (text ? JSON.parse(text) : {}) as T;
 }
@@ -236,34 +289,73 @@ export function scopesForAuthority(level: number): string[] {
 
 // --- Trace event summaries (mirror of the server-side map) -------------------
 
+/**
+ * Distinguish the several `session_boundary` sub-events by their `payload.event`
+ * discriminator (`start` | `end` | `lifecycle_session_end` | `engine_teardown`
+ * | `goals_flushed`). Previously every boundary rendered as "Session ended",
+ * mislabelling session STARTS (sessions-5, consolidation-trace-4).
+ */
+function summarizeSessionBoundary(p: Record<string, any>): string {
+  switch (String(p.event ?? "").toLowerCase()) {
+    case "start":
+      return "Session started";
+    case "end":
+    case "lifecycle_session_end":
+      return "Session ended";
+    case "engine_teardown":
+      return "Session engine torn down";
+    case "goals_flushed":
+      return "Session goals flushed";
+    default:
+      return "Session boundary";
+  }
+}
+
 export function summarizeEvent(
   eventType: string,
   payload: Record<string, any> = {},
 ): string {
   const p = payload || {};
   switch (eventType) {
-    case "fact_extracted":
-      return `New fact extracted: ${String(p.text ?? "").slice(0, 60)}`;
+    case "fact_extracted": {
+      const text = String(p.text ?? "").trim();
+      if (text) return `New fact extracted: ${text.slice(0, 60)}`;
+      return typeof p.facts_count === "number"
+        ? `Facts extracted: ${p.facts_count}`
+        : "Facts extracted";
+    }
     case "retrieval_performed":
-      return `Memory search: ${p.result_count ?? "?"} results`;
+      // The trace ledger emits `results` (retrieval count); `result_count` was
+      // never written, so this always printed "? results" (overview-1,
+      // consolidation-trace-3). Fall back through the legacy/candidate keys.
+      return `Memory search: ${p.results ?? p.result_count ?? p.candidate_count ?? "?"} results`;
     case "context_assembled":
       return `Context assembled: ${p.total_tokens ?? "?"} tokens`;
-    case "guard_triggered":
-      return `Guard triggered: ${p.action ?? "?"} blocked`;
-    case "guard_near_miss":
-      return `Guard near-miss: ${p.action ?? "?"} close to threshold`;
+    case "guard_triggered": {
+      const domain = humanizeEnum(p.decision_domain);
+      const what = p.action_target || humanizeEnum(p.outcome) || "action";
+      return domain
+        ? `Guard triggered: ${what} (${domain})`
+        : `Guard triggered: ${what}`;
+    }
+    case "guard_near_miss": {
+      const domain = humanizeEnum(p.decision_domain);
+      return domain ? `Guard near-miss (${domain})` : "Guard near-miss";
+    }
     case "scoring_completed":
       return `Scoring: ${p.candidate_count ?? "?"} candidates ranked`;
     case "compaction_action":
-      return `Compaction: ${p.trigger ?? "?"}`;
+      return `Compaction: ${humanizeEnum(p.trigger) || "action"}`;
     case "degraded_operation":
       return `Error: ${p.error ?? "unknown"}`;
     case "session_boundary":
-      return "Session ended";
+      return summarizeSessionBoundary(p);
     case "bootstrap_completed":
-      return `Session started: profile=${p.profile_name ?? "?"}`;
+      return `Session started: profile ${p.profile_name ?? "?"}`;
     default:
-      return eventType;
+      // Unknown/uncatalogued event types: show a humanized label rather than
+      // the raw snake_case token (overview-2, consolidation-trace-5).
+      return humanizeEnum(eventType) || eventType;
   }
 }
 

@@ -1,7 +1,8 @@
 // Memory Stats (`/memory/stats`) — memory health dashboard.
 //
 // Backend: `GET /dashboard/memory/stats?time_range=24h` -> MemoryStatsResponse.
-// Neo4j current-state aggregates + ClickHouse activity rates + a creation
+// Neo4j current-state aggregates + activity rates (durable ClickHouse trace
+// store when available, in-memory trace ledger otherwise) + a creation
 // sparkline (MUI X Charts, AD-20). View-only.
 //
 // Implements plan Section 2 "Memory Stats" + SOW page 4.
@@ -32,6 +33,8 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { BarChart } from "@mui/x-charts/BarChart";
 import { SparkLineChart } from "@mui/x-charts/SparkLineChart";
 
+import { humanizeEnum } from "../../lib/format";
+import { actorDisplayName } from "../../lib/labels";
 import {
   MEMORY_CLASS_HEX,
   MEMORY_CLASS_LABELS,
@@ -40,6 +43,12 @@ import {
   type MemoryStatsResponse,
   type Scope,
 } from "./types";
+
+/** Enum-key → label with a consistent Title-Case fallback (memory-stats-7). */
+const classLabel = (k: string): string =>
+  MEMORY_CLASS_LABELS[k.toLowerCase() as MemoryClass] ?? humanizeEnum(k);
+const scopeDisplay = (k: string): string =>
+  SCOPE_LABELS[k.toLowerCase() as Scope] ?? humanizeEnum(k);
 
 const TIME_RANGES = ["1h", "6h", "24h", "7d"];
 
@@ -79,6 +88,13 @@ export const MemoryStats: FC = () => {
 
   const stats = data?.data;
 
+  // memory-stats-2 (FE mitigation): drop placeholder rows for an empty-string
+  // actor so the table never shows a blank first row. The real fix (not emitting
+  // the empty actor) is backend-side.
+  const topActors = (stats?.top_actors ?? []).filter(
+    (a) => (a.actor_label || a.actor_id || "").trim() !== "",
+  );
+
   const classColor = (cls: string): string | undefined => MEMORY_CLASS_HEX[cls as MemoryClass];
 
   return (
@@ -112,16 +128,22 @@ export const MemoryStats: FC = () => {
             <Typography variant="subtitle1" gutterBottom>
               Totals by type ({stats.total_facts.toLocaleString()} facts)
             </Typography>
-            <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
-              {Object.entries(stats.by_class).map(([k, v]) => (
-                <StatCard
-                  key={k}
-                  label={MEMORY_CLASS_LABELS[k.toLowerCase() as MemoryClass] ?? k}
-                  value={v.toLocaleString()}
-                  color={classColor(k.toLowerCase())}
-                />
-              ))}
-            </Stack>
+            {Object.keys(stats.by_class).length === 0 ? (
+              <Typography variant="body2" color="text.secondary">
+                No facts recorded yet.
+              </Typography>
+            ) : (
+              <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
+                {Object.entries(stats.by_class).map(([k, v]) => (
+                  <StatCard
+                    key={k}
+                    label={classLabel(k)}
+                    value={v.toLocaleString()}
+                    color={classColor(k.toLowerCase())}
+                  />
+                ))}
+              </Stack>
+            )}
           </Box>
 
           {/* Totals by scope */}
@@ -129,15 +151,17 @@ export const MemoryStats: FC = () => {
             <Typography variant="subtitle1" gutterBottom>
               Totals by scope
             </Typography>
-            <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
-              {Object.entries(stats.by_scope).map(([k, v]) => (
-                <StatCard
-                  key={k}
-                  label={SCOPE_LABELS[k.toLowerCase() as Scope] ?? k}
-                  value={v.toLocaleString()}
-                />
-              ))}
-            </Stack>
+            {Object.keys(stats.by_scope).length === 0 ? (
+              <Typography variant="body2" color="text.secondary">
+                No scoped facts yet.
+              </Typography>
+            ) : (
+              <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
+                {Object.entries(stats.by_scope).map(([k, v]) => (
+                  <StatCard key={k} label={scopeDisplay(k)} value={v.toLocaleString()} />
+                ))}
+              </Stack>
+            )}
           </Box>
 
           {/* Quality indicators */}
@@ -156,7 +180,14 @@ export const MemoryStats: FC = () => {
               />
               <StatCard
                 label="Success rate"
-                value={`${Math.round(stats.avg_success_rate * 100)}%`}
+                // memory-stats-6: a flat "0%" reads as "everything failed" when the
+                // real story is "nothing has been recalled yet". Show "—" until
+                // there is usage to compute a rate from.
+                value={
+                  stats.avg_use_count > 0
+                    ? `${Math.round(stats.avg_success_rate * 100)}%`
+                    : "—"
+                }
               />
             </Stack>
           </Box>
@@ -167,10 +198,10 @@ export const MemoryStats: FC = () => {
               Activity ({timeRange})
             </Typography>
             <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap sx={{ mb: 2 }}>
-              <StatCard label="facts extracted" value={stats.extractions_in_period.toLocaleString()} />
-              <StatCard label="duplicate rate" value={`${Math.round(stats.dedup_rate * 100)}%`} />
+              <StatCard label="Facts extracted" value={stats.extractions_in_period.toLocaleString()} />
+              <StatCard label="Duplicate rate" value={`${Math.round(stats.dedup_rate * 100)}%`} />
               <StatCard
-                label="supersession rate"
+                label="Supersession rate"
                 value={`${Math.round(stats.supersession_rate * 100)}%`}
               />
             </Stack>
@@ -217,9 +248,7 @@ export const MemoryStats: FC = () => {
                   xAxis={[
                     {
                       scaleType: "band",
-                      data: Object.keys(stats.by_class).map(
-                        (k) => MEMORY_CLASS_LABELS[k.toLowerCase() as MemoryClass] ?? k,
-                      ),
+                      data: Object.keys(stats.by_class).map((k) => classLabel(k)),
                     },
                   ]}
                   series={[{ data: Object.values(stats.by_class), label: "Facts" }]}
@@ -234,7 +263,7 @@ export const MemoryStats: FC = () => {
               <Typography>Top actors by fact count</Typography>
             </AccordionSummary>
             <AccordionDetails>
-              {stats.top_actors.length === 0 ? (
+              {topActors.length === 0 ? (
                 <Typography variant="body2" color="text.secondary">
                   No actor data.
                 </Typography>
@@ -247,14 +276,14 @@ export const MemoryStats: FC = () => {
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {stats.top_actors.map((a) => (
+                    {topActors.map((a) => (
                       <TableRow key={a.actor_id} hover>
                         <TableCell>
                           <MuiLink
                             component="button"
                             onClick={() => navigate(`/actors/${a.actor_id}`)}
                           >
-                            {a.actor_label || a.actor_id}
+                            {actorDisplayName(a.actor_label || a.actor_id)}
                           </MuiLink>
                         </TableCell>
                         <TableCell align="right">{a.fact_count.toLocaleString()}</TableCell>
@@ -281,10 +310,16 @@ export const MemoryStats: FC = () => {
       )}
 
       <Box sx={{ mt: 2 }}>
-        <Typography variant="caption" color="text.secondary">
-          Current-state figures come from Neo4j; activity rates and the sparkline come from
-          ClickHouse over the selected window. For deep analytics use Grafana.
+        <Typography variant="caption" color="text.secondary" component="div">
+          Current-state figures come from the graph store; activity rates and the sparkline are
+          served over the selected window from {stats?.activity_source_label ?? "the in-memory trace ledger"}.
+          For deep analytics use Grafana.
         </Typography>
+        {stats?.note && (
+          <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 0.5 }}>
+            {stats.note}
+          </Typography>
+        )}
       </Box>
     </Box>
   );

@@ -18,9 +18,16 @@ class SubagentLifecycleScenario(Scenario):
 
     async def run(self):
         # -- Trace assertions --
-        self.expect_trace("subagent_parent_mapped", min_count=1, max_count=1)
-        self.expect_trace("subagent_ended", min_count=1, max_count=1)
+        # NOTE: subagent_parent_mapped and subagent_ended are emitted scoped to
+        # the CHILD session_key with no session_id (see ContextLifecycle
+        # prepare_subagent_spawn / on_subagent_ended), so the parent's
+        # session_id-scoped summary can never count them. They are re-targeted
+        # below as explicit step() checks that query POST /trace/query filtered
+        # by the child session_key (see _assert_child_trace_event).
         self.expect_trace("bootstrap_completed", min_count=1)
+        # fact_extracted is satisfied by driving the parent through the FULL-tier
+        # extraction path (/context/ingest-batch → turn_ingest) in Step 2b —
+        # memory/store and the ingest-messages 202 path never emit it.
         self.expect_trace("fact_extracted", min_count=2)
 
         # -- Step 1: Bootstrap parent session --
@@ -55,6 +62,29 @@ class SubagentLifecycleScenario(Scenario):
             message=f"Stored {len(stored_ids)} facts in parent session",
         )
 
+        # -- Step 2b: Drive the FULL-tier extraction path in the parent --
+        # memory/store persists fact DataPoints but never runs turn_ingest, and
+        # the ingest-messages path short-circuits to 202 — neither emits
+        # FACT_EXTRACTED. Drive /context/ingest-batch (turn_ingest, scoped to the
+        # parent session_id) so the parent's summary can satisfy fact_extracted.
+        await self.sim.simulate_context_ingest_batch([
+            {"role": "user", "content": (
+                "Summarize our database stack: the PostgreSQL migration uses "
+                "Alembic with async engine support and the connection pool caps "
+                "at 20 connections."
+            )},
+            {"role": "assistant", "content": (
+                "Understood. PostgreSQL migrations run via Alembic with an async "
+                "engine, the connection pool is capped at 20 connections, and "
+                "Redis fronts the query service as a caching layer."
+            )},
+        ])
+        self.step(
+            "parent_turn_ingested",
+            passed=True,
+            message="Drove FULL-tier extraction (turn_ingest) in parent",
+        )
+
         # -- Step 3: Spawn subagent --
         child_sk = f"scenario:{self.name}:{uuid.uuid4().hex[:8]}:child"
         spawn_result = await self.sim.simulate_context_subagent_spawn(
@@ -66,6 +96,16 @@ class SubagentLifecycleScenario(Scenario):
             "subagent_spawned",
             passed=parent_mapped and rollback_key is not None,
             message=f"Spawn returned rollback_key={rollback_key}, mapped={parent_mapped}",
+        )
+
+        # Re-targeted trace assertion: subagent_parent_mapped is stamped with the
+        # child session_key (no session_id), so query the ledger by child_sk.
+        mapped_events = await self._assert_child_trace_event(
+            child_sk, "subagent_parent_mapped")
+        self.step(
+            "subagent_parent_mapped_traced",
+            passed=len(mapped_events) >= 1,
+            message=f"Found {len(mapped_events)} subagent_parent_mapped event(s) for child",
         )
 
         # -- Step 4: Create child simulator + bootstrap child --
@@ -132,6 +172,17 @@ class SubagentLifecycleScenario(Scenario):
                 message="Subagent ended with reason=completed",
             )
 
+            # Re-targeted trace assertion: subagent_ended is stamped with the
+            # child session_key (no session_id), so query the ledger by child_sk
+            # rather than the parent's session_id-scoped summary.
+            ended_events = await self._assert_child_trace_event(
+                child_sk, "subagent_ended")
+            self.step(
+                "subagent_ended_traced",
+                passed=len(ended_events) >= 1,
+                message=f"Found {len(ended_events)} subagent_ended event(s) for child",
+            )
+
         finally:
             # Clean up child simulator resources
             try:
@@ -149,3 +200,22 @@ class SubagentLifecycleScenario(Scenario):
             passed=parent_search is not None,
             message=f"Parent search returned {len(parent_search)} result(s) after child ended",
         )
+
+    async def _assert_child_trace_event(
+        self, child_session_key: str, event_type: str
+    ) -> list[dict]:
+        """Query POST /trace/query filtered by the child session_key.
+
+        Subagent lifecycle events (subagent_parent_mapped, subagent_ended) are
+        stamped with the CHILD session_key and no session_id, so they are not
+        visible in the parent's session_id-scoped summary. This queries the
+        ledger by session_key directly. Uses the parent's client (self.sim) so
+        the gateway_id filter matches the same one the parent summary uses.
+        """
+        r = await self.sim.client.post("/trace/query", json={
+            "session_key": child_session_key,
+            "event_types": [event_type],
+            "limit": 500,
+        })
+        r.raise_for_status()
+        return r.json()

@@ -79,11 +79,15 @@ describe("authProvider.login", () => {
   it("aggregates FIELD_ERROR messages", async () => {
     signIn.mockResolvedValue({
       status: "FIELD_ERROR",
-      formFields: [{ id: "email", error: "invalid" }],
+      formFields: [
+        { id: "email", error: "invalid" },
+        { id: "password", error: "too weak" },
+      ],
     });
     const result = await authProvider.login({ email: "x", password: "y" });
     expect(result.success).toBe(false);
-    expect((result as any).error.message).toContain("email: invalid");
+    // auth-6: the raw field-id prefix is stripped and errors are joined by "; ".
+    expect((result as any).error.message).toBe("invalid; too weak");
   });
 
   it("returns failure when the SDK throws", async () => {

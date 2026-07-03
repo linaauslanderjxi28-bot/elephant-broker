@@ -33,6 +33,10 @@ AUTHORITY_DEFAULTS: dict[str, dict[str, Any]] = {
         "min_authority_level": 70, "require_matching_org": True, "matching_exempt_level": 90,
     },
     "merge_actors": {"min_authority_level": 70},
+    # Fix 5: opt-in Neo4j fact-index management (/admin/indexes). Indexes are
+    # database-global config — one index spans every gateway on the host — so
+    # this is config-class (level 90, same as create_org), not a read (70).
+    "manage_indexes": {"min_authority_level": 90},
 }
 
 

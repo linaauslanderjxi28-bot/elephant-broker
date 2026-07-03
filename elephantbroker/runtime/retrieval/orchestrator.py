@@ -116,8 +116,28 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
             "artifact": policy.artifact_enabled,
         }
 
-        # Collect candidates with weighted scores
-        all_candidates: list[RetrievalCandidate] = []
+        # Weighted-sum fusion across sources (memory-search-1 root cause).
+        #
+        # Structural hits are matched by graph properties (scope, session_key,
+        # actor_id, gateway_id) — the query text never enters that Cypher — and
+        # they carry a flat ``score=1.0``. After weighting, every
+        # structurally-present fact therefore sat at the constant
+        # ``1.0 * structural_weight``. The previous merge deduped by keeping the
+        # single MAX-scored copy per fact id, and that structural constant
+        # almost always beat the query-dependent vector contribution
+        # (``cosine * vector_weight`` is below the structural constant whenever
+        # ``cosine < structural_weight / vector_weight``). So max-dedup discarded
+        # the query score and pinned every result to the flat structural value —
+        # producing identical, flat-scored structural facts for ANY query
+        # (including gibberish).
+        #
+        # Fusing the weighted per-source contributions ADDITIVELY preserves the
+        # query-relevance signal: the vector source's real per-query cosine
+        # scores now move the ranking, and cross-source agreement is rewarded.
+        # The structural contribution becomes a constant recall floor that no
+        # longer erases the query score, so the final order depends on the query.
+        fused: dict[str, RetrievalCandidate] = {}
+        top_contrib: dict[str, float] = {}
         for i, source_name in enumerate(source_names):
             result = results[i]
             _trace_gw = caller_gateway_id or self._gateway_id
@@ -145,8 +165,25 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
                 continue
             weight = weight_map.get(source_name, 0.3)
             for candidate in result:
-                candidate.score = candidate.score * weight
-                all_candidates.append(candidate)
+                contribution = candidate.score * weight
+                key = str(candidate.fact.id)
+                existing = fused.get(key)
+                if existing is None:
+                    candidate.score = contribution
+                    fused[key] = candidate
+                    top_contrib[key] = contribution
+                else:
+                    existing.score += contribution
+                    # Attribute the fused candidate to the source that
+                    # contributed the most, so a strong vector match surfaces
+                    # source="vector" rather than the first-seen "structural".
+                    if contribution > top_contrib.get(key, 0.0):
+                        top_contrib[key] = contribution
+                        existing.source = candidate.source
+                    # Preserve typed relations found by any source (structural
+                    # carries them; the vector/keyword paths do not).
+                    if not existing.relations and candidate.relations:
+                        existing.relations = candidate.relations
             if self._trace:
                 await self._trace.append_event(TraceEvent(
                     event_type=TraceEventType.RETRIEVAL_SOURCE_RESULT,
@@ -168,18 +205,11 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
                         payload={"source_type": src, "result_count": 0, "enabled": False},
                     ))
 
-        # ID-based dedup — keep highest score
-        best: dict[str, RetrievalCandidate] = {}
-        for c in all_candidates:
-            key = str(c.fact.id)
-            if key not in best or c.score > best[key].score:
-                best[key] = c
-
         # Post-retrieval isolation filter. TD-61 semantics: auto_recall
         # bypasses isolation-scope filters symmetrically for both
         # SESSION_KEY and ACTOR scopes — explicit-search enforces, auto
         # recall pulls cross-session/actor candidates.
-        filtered = list(best.values())
+        filtered = list(fused.values())
         if policy.isolation_scope == IsolationScope.SESSION_KEY and session_key and not auto_recall:
             filtered = [c for c in filtered if c.fact.session_key == session_key or c.fact.session_key is None]
         elif policy.isolation_scope == IsolationScope.ACTOR and actor_id and not auto_recall:
@@ -200,7 +230,11 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
                 session_key=session_key,
                 payload={
                     "action": "retrieve_candidates", "query": query[:100],
-                    "sources": source_names, "results": len(capped),
+                    "sources": source_names,
+                    # overview-1: the dashboard reads ``result_count`` for the
+                    # retrieval_performed activity summary. Emit that key; keep
+                    # ``results`` for backward-compatible consumers.
+                    "result_count": len(capped), "results": len(capped),
                     "auto_recall": auto_recall,
                 },
             )

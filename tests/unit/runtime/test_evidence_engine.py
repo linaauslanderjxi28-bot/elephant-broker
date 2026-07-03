@@ -246,6 +246,87 @@ class TestEvidenceEngine:
         assert len(reject_events) == 1
         assert reject_events[0].event_type == TraceEventType.CLAIM_VERIFIED
 
+    # --- gap-4-9 / gap-4-4: durable rejection_reason + step_id ---
+
+    async def test_reject_persists_rejection_reason_on_datapoint(self, monkeypatch, mock_add_data_points, mock_cognee):
+        """reject() stamps rejection_reason on the ClaimDataPoint sent to add_data_points."""
+        engine, _, _ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.evidence.engine.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.evidence.engine.cognee", mock_cognee)
+        claim = make_claim_record()
+        await engine.record_claim(claim)
+        mock_add_data_points.calls.clear()
+        result = await engine.reject(claim.id, reason="Contradicted by tool output")
+        assert result.rejection_reason == "Contradicted by tool output"
+        assert len(mock_add_data_points.calls) == 1
+        dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert dp.rejection_reason == "Contradicted by tool output"
+        assert dp.status == "rejected"
+
+    async def test_claim_from_props_hydrates_rejection_reason_and_step_id(self):
+        """_claim_from_props reconstructs both durable fields from node props."""
+        engine, _, _ = self._make()
+        claim_id = uuid.uuid4()
+        step_id = uuid.uuid4()
+        rec = engine._claim_from_props({
+            "eb_id": str(claim_id),
+            "claim_text": "Recovered claim",
+            "status": "rejected",
+            "step_id": str(step_id),
+            "rejection_reason": "Bad evidence",
+            "gateway_id": "",
+        }, [])
+        assert rec.id == claim_id
+        assert rec.step_id == step_id
+        assert rec.rejection_reason == "Bad evidence"
+        assert rec.status == ClaimStatus.REJECTED
+
+    async def test_get_claim_verification_durable_reason_after_restart(self, monkeypatch, mock_add_data_points, mock_cognee):
+        """Restart simulation: cold cache + EMPTY trace ledger — the durable
+        graph-persisted rejection_reason is returned without any fallback."""
+        engine, graph, _ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.evidence.engine.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.evidence.engine.cognee", mock_cognee)
+        claim_id = uuid.uuid4()
+        graph.query_cypher = AsyncMock(return_value=[{
+            "claim": {
+                "eb_id": str(claim_id),
+                "claim_text": "Persisted claim",
+                "status": "rejected",
+                "rejection_reason": "Contradicted after restart",
+                "gateway_id": "",
+            },
+            "evidence": [],
+        }])
+        state = await engine.get_claim_verification(claim_id)
+        assert state.status == ClaimStatus.REJECTED
+        assert state.rejection_reason == "Contradicted after restart"
+
+    async def test_get_claim_verification_legacy_trace_fallback(self, monkeypatch, mock_add_data_points, mock_cognee):
+        """Legacy nodes persisted without rejection_reason still recover the
+        reason from the trace ledger (pre-field claims)."""
+        engine, graph, ledger = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.evidence.engine.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.evidence.engine.cognee", mock_cognee)
+        claim_id = uuid.uuid4()
+        graph.query_cypher = AsyncMock(return_value=[{
+            "claim": {
+                "eb_id": str(claim_id),
+                "claim_text": "Legacy claim",
+                "status": "rejected",
+                "gateway_id": "",
+            },
+            "evidence": [],
+        }])
+        from elephantbroker.schemas.trace import TraceEvent
+        await ledger.append_event(TraceEvent(
+            event_type=TraceEventType.CLAIM_VERIFIED,
+            claim_ids=[claim_id],
+            payload={"action": "rejected", "reason": "Legacy reason"},
+        ))
+        state = await engine.get_claim_verification(claim_id)
+        assert state.rejection_reason == "Legacy reason"
+
     async def test_check_completion_requirements_all_proofs_satisfied(self, monkeypatch, mock_add_data_points, mock_cognee):
         """check_completion_requirements returns complete=True when all proofs are satisfied."""
         engine, graph, _ = self._make()

@@ -16,10 +16,12 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControlLabel,
   IconButton,
   ListSubheader,
   MenuItem,
   Stack,
+  Switch,
   TextField,
   Tooltip,
   Typography,
@@ -39,6 +41,9 @@ import {
   relativeTime,
   useAuthority,
 } from "../home/dashboardApi";
+import { humanizeEnum } from "../../lib/format";
+import { actorDisplayName } from "../../lib/labels";
+import { errorMessage } from "../../lib/errors";
 
 export interface Actor {
   actor_id?: string;
@@ -90,7 +95,7 @@ function RegisterActorDialog(props: {
       setDisplayName("");
       setHandles([""]);
     } catch (e) {
-      setErr((e as Error).message);
+      setErr(errorMessage(e));
     } finally {
       setSaving(false);
     }
@@ -118,7 +123,7 @@ function RegisterActorDialog(props: {
               <ListSubheader key={group}>{group}</ListSubheader>,
               ...types.map((t) => (
                 <MenuItem key={t} value={t}>
-                  {t}
+                  {humanizeEnum(t)}
                 </MenuItem>
               )),
             ])}
@@ -236,7 +241,7 @@ export function EditActorDialog(props: {
       props.onSaved();
       props.onClose();
     } catch (e) {
-      setErr((e as Error).message);
+      setErr(errorMessage(e));
     } finally {
       setSaving(false);
     }
@@ -353,7 +358,7 @@ export function MergeActorsDialog(props: {
   }, [props.open]);
 
   const label = (a: Actor) =>
-    `${a.display_name || "(unnamed)"} — ${authorityLabel(
+    `${actorDisplayName(a.display_name) || "(unnamed)"} — ${authorityLabel(
       Number(a.authority_level ?? 0),
     )} · ${actorId(a).slice(0, 8)}`;
 
@@ -368,11 +373,11 @@ export function MergeActorsDialog(props: {
       props.onMerged();
       props.onClose();
     } catch (e) {
-      const msg = (e as Error).message;
+      const raw = (e as Error).message ?? "";
       setErr(
-        msg.startsWith("501")
+        raw.startsWith("501")
           ? "Actor merge is not implemented by this server build (HTTP 501)."
-          : msg,
+          : errorMessage(e),
       );
     } finally {
       setMerging(false);
@@ -433,19 +438,27 @@ export function MergeActorsDialog(props: {
               This action cannot be undone.
             </Alert>
             <Stack direction="row" spacing={1} alignItems="center">
-              <Chip size="small" label={source?.display_name || "(unnamed)"} />
+              <Chip
+                size="small"
+                label={actorDisplayName(source?.display_name) || "(unnamed)"}
+              />
               <CallMergeIcon fontSize="small" color="action" />
               <Chip
                 size="small"
                 color="primary"
-                label={target?.display_name || "(unnamed)"}
+                label={actorDisplayName(target?.display_name) || "(unnamed)"}
               />
             </Stack>
             <Typography variant="body2">
               Merging marks{" "}
-              <strong>{source?.display_name || "the duplicate"}</strong> as a
-              duplicate of{" "}
-              <strong>{target?.display_name || "the survivor"}</strong>:
+              <strong>
+                {actorDisplayName(source?.display_name) || "the duplicate"}
+              </strong>{" "}
+              as a duplicate of{" "}
+              <strong>
+                {actorDisplayName(target?.display_name) || "the survivor"}
+              </strong>
+              :
             </Typography>
             <Typography variant="body2" component="ul" sx={{ m: 0, pl: 3 }}>
               <li>
@@ -504,9 +517,7 @@ export const ActorsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [typeFilter, setTypeFilter] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"active" | "inactive" | "all">(
-    "active",
-  );
+  const [showInactive, setShowInactive] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [mergeOpen, setMergeOpen] = useState(false);
   const [editActor, setEditActor] = useState<Actor | null>(null);
@@ -515,14 +526,20 @@ export const ActorsPage: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await apiGet<any>("/dashboard/actors");
+      // Server-side active filtering: soft-deactivated actors (merged
+      // duplicates, offboarded operators) are hidden unless opted in via the
+      // "Show inactive" toggle. The backend route's tri-state `status` param
+      // carries the toggle (`all` includes inactive, `active` hides them).
+      const res = await apiGet<any>("/dashboard/actors", {
+        status: showInactive ? "all" : "active",
+      });
       setRows(Array.isArray(res) ? res : (res.items ?? res.actors ?? []));
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [showInactive]);
 
   useEffect(() => {
     void load();
@@ -536,12 +553,9 @@ export const ActorsPage: React.FC = () => {
         const t = a.actor_type ?? a.type;
         if (typeFilter && (t ?? "").toUpperCase() !== typeFilter.toUpperCase())
           return false;
-        const isActive = a.active !== false;
-        if (statusFilter === "active" && !isActive) return false;
-        if (statusFilter === "inactive" && isActive) return false;
         return true;
       }),
-    [rows, typeFilter, statusFilter],
+    [rows, typeFilter],
   );
 
   // Columns use renderCell only (stable signature across x-data-grid v6/v7).
@@ -551,7 +565,11 @@ export const ActorsPage: React.FC = () => {
       headerName: "Name",
       flex: 1,
       minWidth: 160,
-      renderCell: (p) => <span>{p.row.display_name ?? ""}</span>,
+      renderCell: (p) => (
+        <span title={p.row.display_name ?? ""}>
+          {actorDisplayName(p.row.display_name)}
+        </span>
+      ),
     },
     {
       field: "actor_type",
@@ -559,7 +577,13 @@ export const ActorsPage: React.FC = () => {
       width: 170,
       renderCell: (p) => {
         const t = p.row.actor_type ?? p.row.type;
-        return <Chip size="small" label={t ?? ""} color={actorTypeColor(t)} />;
+        return (
+          <Chip
+            size="small"
+            label={humanizeEnum(t) || "—"}
+            color={actorTypeColor(t)}
+          />
+        );
       },
     },
     {
@@ -677,23 +701,21 @@ export const ActorsPage: React.FC = () => {
             <ListSubheader key={group}>{group}</ListSubheader>,
             ...types.map((t) => (
               <MenuItem key={t} value={t}>
-                {t}
+                {humanizeEnum(t)}
               </MenuItem>
             )),
           ])}
         </TextField>
-        <TextField
-          select
-          size="small"
-          label="Status"
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value as any)}
-          sx={{ minWidth: 140 }}
-        >
-          <MenuItem value="active">Active</MenuItem>
-          <MenuItem value="inactive">Inactive</MenuItem>
-          <MenuItem value="all">All</MenuItem>
-        </TextField>
+        <FormControlLabel
+          control={
+            <Switch
+              size="small"
+              checked={showInactive}
+              onChange={(e) => setShowInactive(e.target.checked)}
+            />
+          }
+          label="Show inactive"
+        />
       </Stack>
 
       {error && <Alert severity="error">{error}</Alert>}

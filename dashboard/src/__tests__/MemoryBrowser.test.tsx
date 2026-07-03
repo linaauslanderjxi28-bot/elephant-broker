@@ -90,7 +90,9 @@ describe("MemoryBrowser page (render)", () => {
       expect(getList).toHaveBeenCalled();
     });
 
-    const call = getList.mock.calls[0]?.[0] as { resource?: string } | undefined;
+    const call = (getList.mock.calls as unknown as any[])[0]?.[0] as
+      | { resource?: string }
+      | undefined;
     expect(call?.resource).toBe("memory");
   });
 });

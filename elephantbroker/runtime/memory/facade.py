@@ -43,6 +43,42 @@ logger = logging.getLogger("elephantbroker.memory.facade")
 
 _FACTS_COLLECTION = "FactDataPoint_text"
 
+# Catalog of admin-manageable Neo4j indexes on FactDataPoint (Fix 5).
+#
+# Opt-in, DEFAULT OFF: nothing creates these at bootstrap/startup — creation
+# happens only through the explicit admin surface (``/admin/indexes`` API,
+# ``ebrun``, dashboard). Neo4j itself is the source of truth for what exists
+# (``SHOW INDEXES`` via ``fact_index_status()``) — there is no config flag
+# that can drift from reality. Index names keep the ``eb_fact_*`` prefix from
+# the original Phase 11 specs for continuity; future index types just join
+# this catalog. Ordered mapping: iteration order is presentation order.
+FACT_INDEX_SPECS: dict[str, dict[str, str]] = {
+    "eb_fact_gateway_id": {
+        "property": "gateway_id",
+        "description": "Tenant filter — every dashboard browse and module-level "
+                       "Cypher query filters on gateway_id.",
+    },
+    "eb_fact_created_at": {
+        "property": "created_at",
+        "description": "Default sort column of the dashboard memory browser; "
+                       "also used by recency-window queries.",
+    },
+    "eb_fact_confidence": {
+        "property": "confidence",
+        "description": "Confidence range filter + sort in the memory browser.",
+    },
+    "eb_fact_scope": {
+        "property": "scope",
+        "description": "Scope filter (session/actor/team/org/global) in the "
+                       "memory browser and get_by_scope queries.",
+    },
+    "eb_fact_memory_class": {
+        "property": "memory_class",
+        "description": "Memory-class filter (episodic/semantic/procedural/...) "
+                       "in the memory browser and consolidation queries.",
+    },
+}
+
 
 class DedupSkipped(Exception):
     """Raised when a store is skipped due to near-duplicate detection."""
@@ -378,7 +414,11 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 session_key=session_key,
                 payload={
                     "action": "search", "query": query[:100],
-                    "results": len(fact_list), "auto_recall": auto_recall,
+                    # overview-1: the dashboard reads ``result_count`` for the
+                    # retrieval_performed activity summary. Emit that key; keep
+                    # ``results`` for backward-compatible consumers.
+                    "result_count": len(fact_list), "results": len(fact_list),
+                    "auto_recall": auto_recall,
                 },
             )
         )
@@ -1127,38 +1167,103 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 continue
         return facts
 
-    async def ensure_fact_indexes(self) -> None:
-        """Create Neo4j indexes on FactDataPoint used by the dashboard browser.
+    # -- Fact-index management (Fix 5) ------------------------------------
+    #
+    # Index DDL, not tenant data access: the module-level "all Cypher MUST
+    # filter on gateway_id" rule does not apply to CREATE/DROP/SHOW INDEX
+    # statements — there is no node data being read or written. Note that
+    # Neo4j indexes are database-global: one index covers FactDataPoint
+    # nodes of ALL gateways on this host, so enabling an index affects (and
+    # benefits) every tenant sharing the Neo4j database.
 
-        Phase 11 (11.2): the paginated ``query_facts`` browser filters and
-        orders on ``gateway_id``, ``created_at``, ``confidence``, ``scope``
-        and ``memory_class``. Without backing indexes each browse triggers a
-        full label scan of FactDataPoint. These are idempotent
-        ``CREATE INDEX ... IF NOT EXISTS`` statements — safe to run on every
-        bootstrap. Best-effort: an index-creation failure (e.g. a Neo4j
-        deployment that rejects the syntax) is logged and swallowed so it
-        never blocks startup, exactly like the edge-creation best-effort
-        pattern in ``_try_add_edge``.
+    @staticmethod
+    def _require_fact_index_spec(name: str) -> dict[str, str]:
+        """Resolve a catalog spec or raise ``ValueError`` for unknown names.
+
+        The index name is interpolated into DDL strings (Neo4j does not
+        support parameterized index names), so the catalog whitelist is also
+        the injection guard — arbitrary caller input never reaches Cypher.
         """
-        index_specs = (
-            ("eb_fact_gateway_id", "gateway_id"),
-            ("eb_fact_created_at", "created_at"),
-            ("eb_fact_confidence", "confidence"),
-            ("eb_fact_scope", "scope"),
-            ("eb_fact_memory_class", "memory_class"),
-        )
-        for index_name, prop in index_specs:
-            cypher = (
-                f"CREATE INDEX {index_name} IF NOT EXISTS "
-                f"FOR (f:FactDataPoint) ON (f.{prop})"
+        spec = FACT_INDEX_SPECS.get(name)
+        if spec is None:
+            raise ValueError(
+                f"Unknown fact index: {name!r} "
+                f"(catalog: {', '.join(FACT_INDEX_SPECS)})"
             )
-            try:
-                await self._graph.query_cypher(cypher)
-            except Exception as exc:
-                self._log.warning(
-                    "Failed to create FactDataPoint index %s on f.%s: %s",
-                    index_name, prop, exc,
-                )
+        return spec
+
+    async def ensure_fact_index(self, name: str) -> None:
+        """Create ONE catalog index (idempotent ``CREATE INDEX IF NOT EXISTS``).
+
+        Raises ``ValueError`` for names not in ``FACT_INDEX_SPECS``. Creation
+        failures propagate to the caller: this only runs on an explicit admin
+        request, and the admin must see the failure (unlike the old
+        best-effort bootstrap variant, which swallowed errors so startup
+        could never block).
+        """
+        spec = self._require_fact_index_spec(name)
+        cypher = (
+            f"CREATE INDEX {name} IF NOT EXISTS "
+            f"FOR (f:FactDataPoint) ON (f.{spec['property']})"
+        )
+        await self._graph.query_cypher(cypher)
+        self._log.info("Created FactDataPoint index %s on f.%s", name, spec["property"])
+
+    async def drop_fact_index(self, name: str) -> None:
+        """Drop ONE catalog index (idempotent ``DROP INDEX IF EXISTS``).
+
+        Raises ``ValueError`` for names not in ``FACT_INDEX_SPECS``. Drop
+        failures propagate — same explicit-admin-operation rationale as
+        ``ensure_fact_index``.
+        """
+        spec = self._require_fact_index_spec(name)
+        await self._graph.query_cypher(f"DROP INDEX {name} IF EXISTS")
+        self._log.info("Dropped FactDataPoint index %s on f.%s", name, spec["property"])
+
+    async def fact_index_status(self) -> list[dict]:
+        """Live per-index status straight from Neo4j (``SHOW INDEXES``).
+
+        One query, filtered to catalog names (``YIELD name, state,
+        populationPercent`` — verified against Neo4j 5 syntax). Returns one
+        entry per catalog index, in catalog order::
+
+            {"name", "property", "description", "exists",
+             "state",               # ONLINE / POPULATING / FAILED, None if absent
+             "population_percent"}  # 0.0-100.0, None if absent
+
+        Neo4j is the source of truth — an index dropped out-of-band (e.g.
+        via cypher-shell) shows ``exists: False`` here with no stale flag.
+        """
+        records = await self._graph.query_cypher(
+            "SHOW INDEXES YIELD name, state, populationPercent "
+            "WHERE name IN $names "
+            "RETURN name, state, populationPercent",
+            {"names": list(FACT_INDEX_SPECS)},
+        )
+        live = {r["name"]: r for r in records}
+        statuses: list[dict] = []
+        for name, spec in FACT_INDEX_SPECS.items():
+            row = live.get(name)
+            statuses.append({
+                "name": name,
+                "property": spec["property"],
+                "description": spec["description"],
+                "exists": row is not None,
+                "state": row["state"] if row else None,
+                "population_percent": row["populationPercent"] if row else None,
+            })
+        return statuses
+
+    async def ensure_fact_indexes(self) -> None:
+        """Create ALL catalog indexes (thin loop over ``ensure_fact_index``).
+
+        Backs the "enable all" admin action. NEVER called automatically —
+        indexes are opt-in (default off) and only materialize via an explicit
+        admin API / CLI / dashboard request. A failure on any index raises
+        immediately (no best-effort swallow; the admin asked and must know).
+        """
+        for name in FACT_INDEX_SPECS:
+            await self.ensure_fact_index(name)
 
     @traced
     async def query_facts(

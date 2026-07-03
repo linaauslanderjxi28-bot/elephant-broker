@@ -152,6 +152,159 @@ class TestEbrunCLI:
         assert result.exit_code == 0
 
 
+class TestIndexesCLI:
+    """Tests for ebrun indexes commands (Fix 5 — opt-in fact indexes)."""
+
+    SAMPLE_LISTING = {"indexes": [
+        {"name": "eb_fact_gateway_id", "property": "gateway_id",
+         "description": "Tenant scoping", "exists": True,
+         "state": "ONLINE", "population_percent": 100.0},
+        {"name": "eb_fact_created_at", "property": "created_at",
+         "description": "Recency ordering", "exists": True,
+         "state": "POPULATING", "population_percent": 42.0},
+        {"name": "eb_fact_confidence", "property": "confidence",
+         "description": "Confidence filter", "exists": False,
+         "state": None, "population_percent": None},
+    ]}
+
+    def _patch_api(self, monkeypatch, response=None):
+        """Replace cli._api with a recorder; returns the call log."""
+        # Pin the runtime URL so assertions don't depend on the developer's
+        # ~/.elephantbroker/config.json or ambient EB_RUNTIME_URL.
+        monkeypatch.setenv("EB_RUNTIME_URL", "http://localhost:8420")
+        calls = []
+
+        def fake_api(method, url, actor_id, body=None, api_key=None):
+            calls.append((method, url))
+            return response if response is not None else {}
+
+        monkeypatch.setattr("elephantbroker.cli._api", fake_api)
+        return calls
+
+    def test_indexes_group_help_mentions_global_scope(self):
+        from elephantbroker.cli import cli
+        runner = CliRunner()
+        result = runner.invoke(cli, ["indexes", "--help"])
+        assert result.exit_code == 0
+        # Multi-tenant caveat must be surfaced in the CLI help.
+        assert "database-global" in result.output
+
+    def test_indexes_list_renders_table(self, monkeypatch):
+        from elephantbroker.cli import cli
+        calls = self._patch_api(monkeypatch, self.SAMPLE_LISTING)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["indexes", "list"])
+        assert result.exit_code == 0
+        assert calls == [("GET", "http://localhost:8420/admin/indexes")]
+        assert "eb_fact_gateway_id" in result.output
+        assert "ONLINE" in result.output
+        assert "POPULATING 42%" in result.output
+        assert "absent" in result.output  # exists=False renders as absent
+
+    def test_indexes_status_known_name(self, monkeypatch):
+        from elephantbroker.cli import cli
+        self._patch_api(monkeypatch, self.SAMPLE_LISTING)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["indexes", "status", "eb_fact_created_at"])
+        assert result.exit_code == 0
+        assert "eb_fact_created_at" in result.output
+        assert "POPULATING" in result.output
+
+    def test_indexes_status_unknown_name_errors(self, monkeypatch):
+        from elephantbroker.cli import cli
+        self._patch_api(monkeypatch, self.SAMPLE_LISTING)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["indexes", "status", "eb_fact_bogus"])
+        assert result.exit_code == 1
+        assert "Unknown fact index: eb_fact_bogus" in result.output
+
+    def test_indexes_enable_single(self, monkeypatch):
+        from elephantbroker.cli import cli
+        calls = self._patch_api(
+            monkeypatch, {"index": "eb_fact_scope", "status": "created"})
+        runner = CliRunner()
+        result = runner.invoke(cli, ["indexes", "enable", "eb_fact_scope"])
+        assert result.exit_code == 0
+        assert calls == [("POST", "http://localhost:8420/admin/indexes/eb_fact_scope")]
+        assert "created" in result.output
+
+    def test_indexes_enable_all_reads_catalog_then_posts_each(self, monkeypatch):
+        from elephantbroker.cli import cli
+        monkeypatch.setenv("EB_RUNTIME_URL", "http://localhost:8420")
+        calls = []
+
+        def fake_api(method, url, actor_id, body=None, api_key=None):
+            calls.append((method, url))
+            if method == "GET":
+                return self.SAMPLE_LISTING
+            return {"index": url.rsplit("/", 1)[-1], "status": "created"}
+
+        monkeypatch.setattr("elephantbroker.cli._api", fake_api)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["indexes", "enable", "--all"])
+        assert result.exit_code == 0
+        # Catalog is re-read from the runtime, never hardcoded in the CLI.
+        assert calls[0] == ("GET", "http://localhost:8420/admin/indexes")
+        assert calls[1:] == [
+            ("POST", "http://localhost:8420/admin/indexes/eb_fact_gateway_id"),
+            ("POST", "http://localhost:8420/admin/indexes/eb_fact_created_at"),
+            ("POST", "http://localhost:8420/admin/indexes/eb_fact_confidence"),
+        ]
+        assert "eb_fact_gateway_id: created" in result.output
+
+    def test_indexes_enable_requires_exactly_one_target(self, monkeypatch):
+        from elephantbroker.cli import cli
+        calls = self._patch_api(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["indexes", "enable"])
+        assert result.exit_code == 1
+        assert "exactly one" in result.output
+        result = runner.invoke(cli, ["indexes", "enable", "eb_fact_scope", "--all"])
+        assert result.exit_code == 1
+        assert "exactly one" in result.output
+        assert calls == []  # no API call may fire on invalid invocation
+
+    def test_indexes_disable_single(self, monkeypatch):
+        from elephantbroker.cli import cli
+        calls = self._patch_api(
+            monkeypatch, {"index": "eb_fact_scope", "status": "dropped"})
+        runner = CliRunner()
+        result = runner.invoke(cli, ["indexes", "disable", "eb_fact_scope"])
+        assert result.exit_code == 0
+        assert calls == [("DELETE", "http://localhost:8420/admin/indexes/eb_fact_scope")]
+        assert "dropped" in result.output
+
+    def test_indexes_disable_all(self, monkeypatch):
+        from elephantbroker.cli import cli
+        monkeypatch.setenv("EB_RUNTIME_URL", "http://localhost:8420")
+        calls = []
+
+        def fake_api(method, url, actor_id, body=None, api_key=None):
+            calls.append((method, url))
+            if method == "GET":
+                return self.SAMPLE_LISTING
+            return {"index": url.rsplit("/", 1)[-1], "status": "dropped"}
+
+        monkeypatch.setattr("elephantbroker.cli._api", fake_api)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["indexes", "disable", "--all"])
+        assert result.exit_code == 0
+        assert calls[0] == ("GET", "http://localhost:8420/admin/indexes")
+        assert [c for c in calls[1:] if c[0] == "DELETE"] == calls[1:]
+        assert len(calls[1:]) == 3
+
+    def test_indexes_rebuild(self, monkeypatch):
+        from elephantbroker.cli import cli
+        calls = self._patch_api(
+            monkeypatch, {"index": "eb_fact_memory_class", "status": "rebuilt"})
+        runner = CliRunner()
+        result = runner.invoke(cli, ["indexes", "rebuild", "eb_fact_memory_class"])
+        assert result.exit_code == 0
+        assert calls == [
+            ("POST", "http://localhost:8420/admin/indexes/eb_fact_memory_class/rebuild")]
+        assert "rebuilt" in result.output
+
+
 class TestConfigLoading:
     """Tests for YAML config loading."""
 

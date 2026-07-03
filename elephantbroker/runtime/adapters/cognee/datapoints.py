@@ -458,8 +458,10 @@ class ClaimDataPoint(DataPoint):
     claim_type: str = ""
     status: str = "unverified"
     procedure_id: str | None = None
+    step_id: str | None = None
     goal_id: str | None = None
     actor_id: str | None = None
+    rejection_reason: str | None = None
     eb_created_at: int = 0
     eb_updated_at: int = 0
     eb_id: str = ""
@@ -474,8 +476,10 @@ class ClaimDataPoint(DataPoint):
             claim_type=claim.claim_type,
             status=claim.status.value,
             procedure_id=str(claim.procedure_id) if claim.procedure_id else None,
+            step_id=str(claim.step_id) if claim.step_id else None,
             goal_id=str(claim.goal_id) if claim.goal_id else None,
             actor_id=str(claim.actor_id) if claim.actor_id else None,
+            rejection_reason=claim.rejection_reason,
             eb_created_at=_dt_to_epoch_ms(claim.created_at),
             eb_updated_at=_dt_to_epoch_ms(claim.updated_at),
             eb_id=str(claim.id),
@@ -489,10 +493,12 @@ class ClaimDataPoint(DataPoint):
             claim_type=self.claim_type,
             status=ClaimStatus(self.status),
             procedure_id=uuid.UUID(self.procedure_id) if self.procedure_id else None,
+            step_id=uuid.UUID(self.step_id) if self.step_id else None,
             goal_id=uuid.UUID(self.goal_id) if self.goal_id else None,
             actor_id=uuid.UUID(self.actor_id) if self.actor_id else None,
             created_at=_epoch_ms_to_dt(self.eb_created_at) if self.eb_created_at else datetime.now(UTC),
             updated_at=_epoch_ms_to_dt(self.eb_updated_at) if self.eb_updated_at else datetime.now(UTC),
+            rejection_reason=self.rejection_reason,
             gateway_id=self.gateway_id,
         )
 

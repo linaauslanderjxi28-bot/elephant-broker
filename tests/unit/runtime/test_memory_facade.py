@@ -2587,3 +2587,192 @@ class TestCascadePointerPreservation:
         assert len(mock_add_data_points.calls) == 1
         stored_dp = mock_add_data_points.calls[0]["data_points"][0]
         assert stored_dp.cognee_data_id == expected_data_id
+
+
+class TestFactIndexManagement:
+    """Fix 5: opt-in, per-index Neo4j fact-index management.
+
+    Indexes are DEFAULT OFF — no startup path creates them. Neo4j itself
+    (SHOW INDEXES) is the source of truth; these tests pin the exact DDL per
+    catalog name, the ValueError contract for unknown names, the SHOW INDEXES
+    status parsing (including absent indexes), and the no-automatic-callers
+    invariant.
+    """
+
+    def _make(self):
+        graph = AsyncMock()
+        graph.query_cypher = AsyncMock(return_value=[])
+        vector = AsyncMock()
+        embeddings = AsyncMock()
+        ledger = TraceLedger()
+        facade = MemoryStoreFacade(graph, vector, embeddings, ledger, dataset_name="test_ds")
+        return facade, graph
+
+    # -- catalog integrity --------------------------------------------------
+
+    def test_catalog_has_the_five_phase11_indexes_in_order(self):
+        """Catalog keeps the original eb_fact_* names (continuity) in order."""
+        from elephantbroker.runtime.memory.facade import FACT_INDEX_SPECS
+        assert list(FACT_INDEX_SPECS) == [
+            "eb_fact_gateway_id",
+            "eb_fact_created_at",
+            "eb_fact_confidence",
+            "eb_fact_scope",
+            "eb_fact_memory_class",
+        ]
+
+    def test_catalog_entries_have_property_and_description(self):
+        from elephantbroker.runtime.memory.facade import FACT_INDEX_SPECS
+        expected_props = {
+            "eb_fact_gateway_id": "gateway_id",
+            "eb_fact_created_at": "created_at",
+            "eb_fact_confidence": "confidence",
+            "eb_fact_scope": "scope",
+            "eb_fact_memory_class": "memory_class",
+        }
+        for name, spec in FACT_INDEX_SPECS.items():
+            assert spec["property"] == expected_props[name]
+            assert spec["description"]  # non-empty human description
+
+    # -- ensure_fact_index --------------------------------------------------
+
+    async def test_ensure_fact_index_issues_exact_ddl_per_name(self):
+        from elephantbroker.runtime.memory.facade import FACT_INDEX_SPECS
+        for name, spec in FACT_INDEX_SPECS.items():
+            facade, graph = self._make()
+            await facade.ensure_fact_index(name)
+            graph.query_cypher.assert_awaited_once_with(
+                f"CREATE INDEX {name} IF NOT EXISTS "
+                f"FOR (f:FactDataPoint) ON (f.{spec['property']})"
+            )
+
+    async def test_ensure_fact_index_unknown_name_raises_value_error(self):
+        facade, graph = self._make()
+        with pytest.raises(ValueError, match="Unknown fact index"):
+            await facade.ensure_fact_index("eb_fact_nope")
+        graph.query_cypher.assert_not_awaited()
+
+    async def test_ensure_fact_index_propagates_creation_failure(self):
+        """Explicit admin operation — failures must surface, not be swallowed
+        (the old bootstrap variant logged-and-swallowed; this must not)."""
+        facade, graph = self._make()
+        graph.query_cypher = AsyncMock(side_effect=RuntimeError("neo4j down"))
+        with pytest.raises(RuntimeError, match="neo4j down"):
+            await facade.ensure_fact_index("eb_fact_gateway_id")
+
+    # -- drop_fact_index ----------------------------------------------------
+
+    async def test_drop_fact_index_issues_exact_ddl_per_name(self):
+        from elephantbroker.runtime.memory.facade import FACT_INDEX_SPECS
+        for name in FACT_INDEX_SPECS:
+            facade, graph = self._make()
+            await facade.drop_fact_index(name)
+            graph.query_cypher.assert_awaited_once_with(f"DROP INDEX {name} IF EXISTS")
+
+    async def test_drop_fact_index_unknown_name_raises_value_error(self):
+        facade, graph = self._make()
+        with pytest.raises(ValueError, match="Unknown fact index"):
+            await facade.drop_fact_index("not_in_catalog")
+        graph.query_cypher.assert_not_awaited()
+
+    async def test_drop_fact_index_propagates_failure(self):
+        facade, graph = self._make()
+        graph.query_cypher = AsyncMock(side_effect=RuntimeError("boom"))
+        with pytest.raises(RuntimeError, match="boom"):
+            await facade.drop_fact_index("eb_fact_scope")
+
+    # -- fact_index_status --------------------------------------------------
+
+    async def test_fact_index_status_queries_show_indexes_once(self):
+        from elephantbroker.runtime.memory.facade import FACT_INDEX_SPECS
+        facade, graph = self._make()
+        await facade.fact_index_status()
+        graph.query_cypher.assert_awaited_once_with(
+            "SHOW INDEXES YIELD name, state, populationPercent "
+            "WHERE name IN $names "
+            "RETURN name, state, populationPercent",
+            {"names": list(FACT_INDEX_SPECS)},
+        )
+
+    async def test_fact_index_status_parses_rows_and_absent_indexes(self):
+        """Live SHOW INDEXES rows map to exists/state/population_percent;
+        catalog entries with no row report exists=False and None fields."""
+        facade, graph = self._make()
+        graph.query_cypher = AsyncMock(return_value=[
+            {"name": "eb_fact_gateway_id", "state": "ONLINE", "populationPercent": 100.0},
+            {"name": "eb_fact_created_at", "state": "POPULATING", "populationPercent": 42.5},
+        ])
+        statuses = await facade.fact_index_status()
+        by_name = {s["name"]: s for s in statuses}
+        assert len(statuses) == 5  # one entry per catalog index, always
+
+        online = by_name["eb_fact_gateway_id"]
+        assert online["exists"] is True
+        assert online["state"] == "ONLINE"
+        assert online["population_percent"] == 100.0
+        assert online["property"] == "gateway_id"
+        assert online["description"]
+
+        populating = by_name["eb_fact_created_at"]
+        assert populating["exists"] is True
+        assert populating["state"] == "POPULATING"
+        assert populating["population_percent"] == 42.5
+
+        for absent in ("eb_fact_confidence", "eb_fact_scope", "eb_fact_memory_class"):
+            assert by_name[absent]["exists"] is False
+            assert by_name[absent]["state"] is None
+            assert by_name[absent]["population_percent"] is None
+
+    async def test_fact_index_status_preserves_catalog_order(self):
+        from elephantbroker.runtime.memory.facade import FACT_INDEX_SPECS
+        facade, _ = self._make()
+        statuses = await facade.fact_index_status()
+        assert [s["name"] for s in statuses] == list(FACT_INDEX_SPECS)
+
+    # -- ensure_fact_indexes (enable-all loop) --------------------------------
+
+    async def test_ensure_fact_indexes_creates_all_catalog_indexes(self):
+        from elephantbroker.runtime.memory.facade import FACT_INDEX_SPECS
+        facade, graph = self._make()
+        await facade.ensure_fact_indexes()
+        issued = [c.args[0] for c in graph.query_cypher.await_args_list]
+        assert issued == [
+            f"CREATE INDEX {name} IF NOT EXISTS "
+            f"FOR (f:FactDataPoint) ON (f.{spec['property']})"
+            for name, spec in FACT_INDEX_SPECS.items()
+        ]
+
+    async def test_ensure_fact_indexes_raises_on_first_failure(self):
+        """No best-effort swallow: the loop stops and raises immediately."""
+        facade, graph = self._make()
+        graph.query_cypher = AsyncMock(side_effect=[None, RuntimeError("mid-loop")])
+        with pytest.raises(RuntimeError, match="mid-loop"):
+            await facade.ensure_fact_indexes()
+        assert graph.query_cypher.await_count == 2
+
+    # -- opt-in invariant: NO automatic callers ------------------------------
+
+    def test_no_startup_path_references_index_creation(self):
+        """FEATURE INVARIANT: indexes are opt-in, DEFAULT OFF. Walk all
+        runtime/api/pipeline sources and assert the ONLY modules referencing
+        ensure_fact_index are the facade (definition) and the admin routes
+        (explicit admin surface) — never the container, app lifespan, or any
+        other startup/bootstrap path."""
+        import pathlib
+
+        import elephantbroker
+
+        pkg_root = pathlib.Path(elephantbroker.__file__).parent
+        allowed = {
+            pkg_root / "runtime" / "memory" / "facade.py",
+            pkg_root / "api" / "routes" / "admin.py",
+        }
+        offenders = [
+            str(path)
+            for path in pkg_root.rglob("*.py")
+            if path not in allowed
+            and "ensure_fact_index" in path.read_text(encoding="utf-8")
+        ]
+        assert offenders == [], (
+            f"Index creation referenced outside the opt-in admin surface: {offenders}"
+        )

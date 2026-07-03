@@ -26,13 +26,19 @@ def _mock_registry(actor: ActorRef | None = None):
     return reg
 
 
-def _actor(authority: int = 0, org_id: str | None = None, team_ids: list | None = None) -> ActorRef:
+def _actor(
+    authority: int = 0,
+    org_id: str | None = None,
+    team_ids: list | None = None,
+    active: bool = True,
+) -> ActorRef:
     return ActorRef(
         type=ActorType.HUMAN_COORDINATOR,
         display_name="test",
         authority_level=authority,
         org_id=uuid.UUID(org_id) if org_id else None,
         team_ids=[uuid.UUID(t) for t in (team_ids or [])],
+        active=active,
     )
 
 
@@ -131,6 +137,18 @@ class TestAuthorityChecks:
         result = await check_authority(reg, auth_store, actor.id, "add_team_member", target_team_id=other_team)
         assert result.authority_level == 70
 
+    async def test_inactive_actor_denied_even_with_sysadmin_level(self, auth_store):
+        """A soft-deactivated actor (merged duplicate / offboarded operator)
+        never authorizes, regardless of authority level — defense in depth
+        alongside SuperTokens session revocation in ``set_actor_status``."""
+        actor = _actor(authority=90, active=False)
+        reg = _mock_registry(actor)
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc_info:
+            await check_authority(reg, auth_store, actor.id, "create_actor_goal")
+        assert exc_info.value.status_code == 403
+        assert "deactivated" in exc_info.value.detail
+
     async def test_custom_authority_rule_applied(self, auth_store):
         await auth_store.set_rule("create_org", {"min_authority_level": 50})
         actor = _actor(authority=50)
@@ -208,6 +226,23 @@ class TestAuthorityTraceEvents:
         assert payload["reason"] == "team_mismatch"
         assert payload["target_team"] == target_team
         assert actor_team in payload["actor_teams"]
+
+    async def test_inactive_denial_emits_trace(self, auth_store):
+        from elephantbroker.runtime.trace.ledger import TraceLedger
+        from elephantbroker.schemas.trace import TraceEventType
+        from fastapi import HTTPException
+
+        actor = _actor(authority=90, active=False)
+        reg = _mock_registry(actor)
+        ledger = TraceLedger()
+        with pytest.raises(HTTPException) as exc_info:
+            await check_authority(reg, auth_store, actor.id, "create_org", trace_ledger=ledger)
+        assert exc_info.value.status_code == 403
+        events = [e for e in ledger._events if e.event_type == TraceEventType.AUTHORITY_CHECK_FAILED]
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["action"] == "create_org"
+        assert payload["reason"] == "actor_inactive"
 
     async def test_actor_not_found_emits_trace(self, auth_store):
         from elephantbroker.runtime.trace.ledger import TraceLedger

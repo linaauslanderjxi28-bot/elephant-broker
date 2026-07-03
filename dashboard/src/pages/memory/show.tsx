@@ -44,6 +44,9 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { formatDistanceToNow } from "date-fns";
 
+import { errorMessage } from "../../lib/errors";
+import { humanizeEnum } from "../../lib/format";
+import { actorDisplayName } from "../../lib/labels";
 import {
   AUTH_DELETE,
   AUTH_EDIT,
@@ -77,43 +80,58 @@ function relativeAge(iso?: string | null): string {
   }
 }
 
-// Server should resolve human-readable labels; this is a defensive fallback so
-// the page still reads well if only raw edges arrive.
+// Turn a raw graph edge into a human sentence + (only when resolvable) a nav
+// target. The backend frequently returns a generic `target_type` of `__Node__`
+// (Cognee tags every node with that label, and `labels(t)[0]` can pick it),
+// which used to leave every connection as un-clickable dead text
+// (memory-browse-4). We therefore resolve the destination from the *relation
+// type* — which reliably implies the target kind — and only fall back to
+// `target_type` for unknown relations; a row is a link ONLY when it resolves to
+// a real page, never a dead link.
 function edgeSentence(edge: FactEdge): { text: string; nav?: string } {
-  const label = edge.target_label || edge.target_id;
-  const conf = (edge.target_properties?.confidence as number | undefined);
+  const raw = edge.target_label || edge.target_id || "";
+  const label = actorDisplayName(raw) || raw;
+  const id = edge.target_id || "";
+  const conf = edge.target_properties?.confidence as number | undefined;
   const confSuffix = conf !== undefined ? ` (conf: ${Number(conf).toFixed(2)})` : "";
-  const isActor = edge.target_type?.startsWith("Actor");
-  const isGoal = edge.target_type?.startsWith("Goal");
-  const isFact = edge.target_type?.startsWith("Fact");
-  const nav = isActor
-    ? `/actors/${edge.target_id}`
-    : isGoal
-      ? `/goals`
-      : isFact
-        ? `/memory/${edge.target_id}`
-        : undefined;
+
+  const actorNav = id ? `/actors/${id}` : undefined;
+  const factNav = id ? `/memory/${id}` : undefined;
+  const goalNav = id ? `/goals?highlight=${encodeURIComponent(id)}` : undefined;
+
   switch (edge.relation_type) {
     case "CREATED_BY":
-      return { text: `Created by ${label}`, nav };
+      return { text: `Created by ${label}`, nav: actorNav };
     case "ABOUT_ACTOR":
-      return { text: `About ${label}`, nav };
+      return { text: `About ${label}`, nav: actorNav };
     case "SERVES_GOAL":
-      return { text: `Related to goal ${label}`, nav };
+      return { text: `Related to goal ${label}`, nav: goalNav };
     case "SUPERSEDES":
       return {
         text:
           edge.direction === "outgoing"
             ? `Replaced ${label}${confSuffix}`
             : `Superseded by ${label}${confSuffix}`,
-        nav,
+        nav: factNav,
       };
     case "CONTRADICTS":
-      return { text: `Contradicts ${label}`, nav };
+      return { text: `Contradicts ${label}`, nav: factNav };
     case "SUPPORTS":
-      return { text: `Evidence for claim ${label}`, nav };
-    default:
-      return { text: `${edge.relation_type}: ${label}`, nav };
+      // Claims have no standalone page — render as text, never a dead link.
+      return { text: `Evidence for claim ${label}` };
+    default: {
+      // Unknown relation: only offer a link when `target_type` names a concrete,
+      // routable kind; otherwise show plain humanized text.
+      const tt = edge.target_type ?? "";
+      const nav = tt.startsWith("Actor")
+        ? actorNav
+        : tt.startsWith("Goal")
+          ? goalNav
+          : tt.startsWith("Fact")
+            ? factNav
+            : undefined;
+      return { text: `${humanizeEnum(edge.relation_type)}: ${label}`, nav };
+    }
   }
 }
 
@@ -135,7 +153,17 @@ export const MemoryShow: FC = () => {
   const { data, isLoading, isError, refetch } = useCustom<FactDetailResponse>({
     url: `${apiUrl}/dashboard/memory/${id}/detail`,
     method: "get",
-    queryOptions: { enabled: !!id },
+    queryOptions: {
+      enabled: !!id,
+      // memory-browse-9: an invalid/unknown fact id used to spin for ~15s while
+      // react-query retried a 404 three times. Fail fast on any 4xx; still allow
+      // a couple of retries for transient network / 5xx errors.
+      retry: (failureCount, err) => {
+        const status = (err as { statusCode?: number })?.statusCode;
+        if (status !== undefined && status >= 400 && status < 500) return false;
+        return failureCount < 2;
+      },
+    },
   });
 
   const detail = data?.data;
@@ -168,6 +196,20 @@ export const MemoryShow: FC = () => {
     open?.({ type: "success", message, key: `fd-${Date.now()}` });
   const notifyErr = (message: string) =>
     open?.({ type: "error", message, key: `fd-err-${Date.now()}` });
+  // A no-op verify (no new evidence, nothing to promote) is neither a success
+  // nor an error. Refine-MUI forwards `type` verbatim to notistack's `variant`,
+  // which renders "info" as a neutral blue toast; Refine-core's param union is
+  // narrower, so widen through a typed local before the (safe) cast (gap-4-8).
+  const notifyInfo = (message: string) => {
+    const type: "success" | "error" | "progress" | "info" = "info";
+    open?.({ type: type as "success", message, key: `fd-info-${Date.now()}` });
+  };
+
+  // Every mutation below surfaces exactly ONE toast via notifyOk/notifyErr.
+  // Refine's useCustomMutation ALSO auto-fires its own success/error toast
+  // (raw `Error (status code: N)` + backend detail) unless told not to — that
+  // duplicate was the second overlapping error surface in gap-4-5. Suppress it.
+  const SILENT = { successNotification: false, errorNotification: false } as const;
 
   const saveEdit = () => {
     customMutate(
@@ -175,6 +217,7 @@ export const MemoryShow: FC = () => {
         url: `${apiUrl}/memory/${id}`,
         method: "patch",
         values: { text: draftText, confidence: draftConfidence },
+        ...SILENT,
       },
       {
         onSuccess: () => {
@@ -182,20 +225,20 @@ export const MemoryShow: FC = () => {
           setEditing(false);
           refetch();
         },
-        onError: () => notifyErr("Update failed"),
+        onError: (err) => notifyErr(errorMessage(err)),
       },
     );
   };
 
   const doDelete = () => {
     customMutate(
-      { url: `${apiUrl}/memory/${id}`, method: "delete", values: {} },
+      { url: `${apiUrl}/memory/${id}`, method: "delete", values: {}, ...SILENT },
       {
         onSuccess: () => {
           notifyOk("Fact deleted");
           navigate("/memory");
         },
-        onError: () => notifyErr("Delete failed"),
+        onError: (err) => notifyErr(errorMessage(err)),
       },
     );
   };
@@ -214,23 +257,24 @@ export const MemoryShow: FC = () => {
         url: `${apiUrl}/memory/${id}`,
         method: "patch",
         values: { archived: nextArchived },
+        ...SILENT,
       },
       {
         onSuccess: () => {
           notifyOk(nextArchived ? "Fact archived" : "Fact unarchived");
           refetch();
         },
-        onError: () => notifyErr("Archive update failed"),
+        onError: (err) => notifyErr(errorMessage(err)),
         onSettled: () => setArchiveBusy(false),
       },
     );
   };
 
   // --- Claims review (POST /claims/{id}/verify | /claims/{id}/reject) ----
-  const verifyClaim = (claimId: string) => {
+  const verifyClaim = (claimId: string, priorStatus: string) => {
     setClaimBusyId(claimId);
     customMutate(
-      { url: `${apiUrl}/claims/${claimId}/verify`, method: "post", values: {} },
+      { url: `${apiUrl}/claims/${claimId}/verify`, method: "post", values: {}, ...SILENT },
       {
         onSuccess: (res) => {
           const status = (res?.data as { status?: string } | undefined)?.status;
@@ -239,9 +283,18 @@ export const MemoryShow: FC = () => {
           } else {
             refetch();
           }
-          notifyOk("Claim verified");
+          // The backend only promotes a claim when it has (new) supporting
+          // evidence; re-verifying an evidence-less or already-settled claim is
+          // a no-op (EvidenceEngine.verify leaves the status untouched). Only
+          // announce success on a real transition; otherwise say nothing
+          // happened instead of a misleading "verified" (gap-4-8).
+          if (status && status !== priorStatus) {
+            notifyOk(`Claim ${humanizeEnum(status).toLowerCase()}`);
+          } else {
+            notifyInfo("No change — this claim has no new evidence to verify.");
+          }
         },
-        onError: () => notifyErr("Verify failed"),
+        onError: (err) => notifyErr(errorMessage(err)),
         onSettled: () => setClaimBusyId(null),
       },
     );
@@ -261,6 +314,7 @@ export const MemoryShow: FC = () => {
           reason,
           ...(identity?.id ? { rejector_actor_id: identity.id } : {}),
         },
+        ...SILENT,
       },
       {
         onSuccess: (res) => {
@@ -271,7 +325,7 @@ export const MemoryShow: FC = () => {
           setRejectTargetId(null);
           setRejectReason("");
         },
-        onError: () => notifyErr("Reject failed"),
+        onError: (err) => notifyErr(errorMessage(err)),
         onSettled: () => setClaimBusyId(null),
       },
     );
@@ -522,7 +576,7 @@ export const MemoryShow: FC = () => {
                     <Typography variant="body2">{c.claim_text}</Typography>
                     <Chip
                       size="small"
-                      label={status}
+                      label={humanizeEnum(status)}
                       color={CLAIM_STATUS_COLORS[status] ?? "default"}
                     />
                     <Typography variant="caption" color="text.secondary">
@@ -537,7 +591,7 @@ export const MemoryShow: FC = () => {
                           variant="outlined"
                           color="success"
                           disabled={busy}
-                          onClick={() => verifyClaim(c.claim_id)}
+                          onClick={() => verifyClaim(c.claim_id, status)}
                         >
                           Verify
                         </Button>

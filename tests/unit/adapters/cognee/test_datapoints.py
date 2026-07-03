@@ -352,6 +352,31 @@ class TestClaimDataPoint:
         assert restored.goal_id == goal_id
         assert restored.status == ClaimStatus.SUPERVISOR_VERIFIED
 
+    def test_round_trip_rejection_reason_and_step_id(self):
+        """gap-4-9 / gap-4-4: rejection_reason + step_id survive the round trip."""
+        step_id = uuid.uuid4()
+        claim = ClaimRecord(
+            claim_text="Rejected claim",
+            status=ClaimStatus.REJECTED,
+            step_id=step_id,
+            rejection_reason="Contradicted by tool output",
+        )
+        dp = ClaimDataPoint.from_schema(claim)
+        assert dp.step_id == str(step_id)
+        assert dp.rejection_reason == "Contradicted by tool output"
+        restored = dp.to_schema()
+        assert restored.step_id == step_id
+        assert restored.rejection_reason == "Contradicted by tool output"
+
+    def test_rejection_reason_and_step_id_default_none(self):
+        claim = ClaimRecord(claim_text="Plain claim")
+        dp = ClaimDataPoint.from_schema(claim)
+        assert dp.step_id is None
+        assert dp.rejection_reason is None
+        restored = dp.to_schema()
+        assert restored.step_id is None
+        assert restored.rejection_reason is None
+
 
 # ---------------------------------------------------------------------------
 # EvidenceDataPoint

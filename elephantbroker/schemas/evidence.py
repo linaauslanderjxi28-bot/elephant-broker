@@ -41,6 +41,7 @@ class ClaimRecord(BaseModel):
     actor_id: uuid.UUID | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    rejection_reason: str | None = None
     gateway_id: str = ""
 
 

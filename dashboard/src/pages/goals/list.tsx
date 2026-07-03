@@ -4,7 +4,7 @@
 // Session goals (Redis, ephemeral, monitored per active session). Persistent
 // goals load root nodes and lazy-load children through the hierarchy endpoint.
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigation } from "@refinedev/core";
 import {
   Alert,
@@ -41,6 +41,12 @@ import {
   scopesForAuthority,
   useAuthority,
 } from "../home/dashboardApi";
+import {
+  normalizeActiveSessions,
+  type SelectOption,
+} from "../../lib/apiNormalize";
+import { errorMessage } from "../../lib/errors";
+import { humanizeEnum } from "../../lib/format";
 
 interface GoalState {
   goal_id?: string;
@@ -151,7 +157,7 @@ function AddSubgoalDialog(props: {
       setCriteria("");
       setOwners("");
     } catch (e) {
-      setErr((e as Error).message);
+      setErr(errorMessage(e));
     } finally {
       setSaving(false);
     }
@@ -229,7 +235,7 @@ function AddBlockerDialog(props: {
       props.onClose();
       setText("");
     } catch (e) {
-      setErr((e as Error).message);
+      setErr(errorMessage(e));
     } finally {
       setSaving(false);
     }
@@ -335,7 +341,7 @@ function GoalRow(props: {
         // away from "active" disappears from the list on refresh.
         props.onChanged();
       } catch (e) {
-        setRowErr((e as Error).message);
+        setRowErr(errorMessage(e));
       } finally {
         setBusy(false);
       }
@@ -494,12 +500,32 @@ function CreateGoalDialog(props: {
 }) {
   const authority = useAuthority();
   const scopes = scopesForAuthority(authority);
+  // The backend Scope enum values are lowercase ("global"/"organization"/…,
+  // schemas/base.py). scopesForAuthority returns SCREAMING labels, so map to
+  // the enum values we actually send — otherwise CreatePersistentGoalRequest's
+  // Scope(body.scope) coercion 422s (goals-procedures-3). Key the memo on the
+  // list content (scopes is a fresh array each render) so the seeding effect
+  // below doesn't re-fire needlessly.
+  const scopeKey = scopes.join(",");
+  const scopeValues = useMemo(
+    () => scopeKey.split(",").filter(Boolean).map((s) => s.toLowerCase()),
+    [scopeKey],
+  );
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [scope, setScope] = useState(scopes[0] || "ACTOR");
+  // Do NOT hardcode a default before authority (and thus the allowed scope
+  // list) has resolved — a pre-load default of "actor" would stick even for an
+  // admin (goals-procedures-11). Seed reactively from the resolved scopes.
+  const [scope, setScope] = useState("");
   const [criteria, setCriteria] = useState("");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!scope || !scopeValues.includes(scope)) {
+      setScope(scopeValues[0] ?? "");
+    }
+  }, [scopeValues, scope]);
 
   const submit = async () => {
     setSaving(true);
@@ -520,7 +546,7 @@ function CreateGoalDialog(props: {
       setDescription("");
       setCriteria("");
     } catch (e) {
-      setErr((e as Error).message);
+      setErr(errorMessage(e));
     } finally {
       setSaving(false);
     }
@@ -551,9 +577,9 @@ function CreateGoalDialog(props: {
             value={scope}
             onChange={(e) => setScope(e.target.value)}
           >
-            {scopes.map((s) => (
-              <MenuItem key={s} value={s}>
-                {s}
+            {scopeValues.map((v) => (
+              <MenuItem key={v} value={v}>
+                {humanizeEnum(v)}
               </MenuItem>
             ))}
           </TextField>
@@ -590,9 +616,10 @@ export const GoalsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [query, setQuery] = useState("");
 
   // Session
-  const [sessions, setSessions] = useState<string[]>([]);
+  const [sessions, setSessions] = useState<SelectOption[]>([]);
   const [selectedSession, setSelectedSession] = useState("");
   const [sessionGoals, setSessionGoals] = useState<GoalState[]>([]);
 
@@ -606,11 +633,32 @@ export const GoalsPage: React.FC = () => {
         : (res.items ?? res.goals ?? []);
       setRoots(items.filter((g) => !g.parent_goal_id));
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
   }, []);
+
+  // Client-side filter + newest-first sort of the persistent roots
+  // (goals-procedures-12). Note: /admin/goals only ever returns status="active"
+  // goals (backend hard-filter — see goals-procedures-7 cross-file need), so a
+  // status filter is intentionally omitted until the backend exposes non-active
+  // goals.
+  const visibleRoots = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const filtered = q
+      ? roots.filter(
+          (g) =>
+            (g.title || "").toLowerCase().includes(q) ||
+            (g.description || "").toLowerCase().includes(q),
+        )
+      : roots;
+    return [...filtered].sort((a, b) => {
+      const ta = a.created_at ? Date.parse(a.created_at) : 0;
+      const tb = b.created_at ? Date.parse(b.created_at) : 0;
+      return (Number.isNaN(tb) ? 0 : tb) - (Number.isNaN(ta) ? 0 : ta);
+    });
+  }, [roots, query]);
 
   useEffect(() => {
     void loadRoots();
@@ -621,7 +669,10 @@ export const GoalsPage: React.FC = () => {
     void (async () => {
       try {
         const res = await apiGet<any>("/dashboard/sessions/active");
-        setSessions(res.sessions ?? res.items ?? []);
+        // The endpoint returns session OBJECTS, not strings — projecting them
+        // straight into MenuItem children white-screened the whole dashboard
+        // (goals-procedures-1). Normalize to { value, label } first.
+        setSessions(normalizeActiveSessions(res));
       } catch {
         setSessions([]);
       }
@@ -668,25 +719,51 @@ export const GoalsPage: React.FC = () => {
 
       {tab === 0 && (
         <>
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && (
+            <Alert severity="error" sx={{ mb: 1 }}>
+              {error}
+            </Alert>
+          )}
           {loading ? (
             <CircularProgress />
           ) : roots.length === 0 ? (
-            <Typography color="text.secondary">
-              No persistent goals.
-            </Typography>
+            <Box sx={{ py: 4, textAlign: "center" }}>
+              <Typography color="text.secondary" gutterBottom>
+                No persistent goals yet.
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                {authority >= 50
+                  ? "Use “Create Goal” to add a durable, hierarchical goal."
+                  : "Durable goals appear here once a team lead or admin creates them."}
+              </Typography>
+            </Box>
           ) : (
-            <List>
-              {roots.map((g) => (
-                <GoalRow
-                  key={goalId(g)}
-                  goal={g}
-                  depth={0}
-                  onView={(path) => push(path)}
-                  onChanged={loadRoots}
-                />
-              ))}
-            </List>
+            <>
+              <TextField
+                size="small"
+                placeholder="Filter goals by title or description…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                sx={{ mb: 1, minWidth: 320 }}
+              />
+              {visibleRoots.length === 0 ? (
+                <Typography color="text.secondary" sx={{ mt: 2 }}>
+                  No goals match “{query.trim()}”.
+                </Typography>
+              ) : (
+                <List>
+                  {visibleRoots.map((g) => (
+                    <GoalRow
+                      key={goalId(g)}
+                      goal={g}
+                      depth={0}
+                      onView={(path) => push(path)}
+                      onChanged={loadRoots}
+                    />
+                  ))}
+                </List>
+              )}
+            </>
           )}
         </>
       )}
@@ -705,9 +782,9 @@ export const GoalsPage: React.FC = () => {
                 No active sessions
               </MenuItem>
             )}
-            {sessions.map((s) => (
-              <MenuItem key={s} value={s}>
-                {s}
+            {sessions.map((opt) => (
+              <MenuItem key={opt.value} value={opt.value}>
+                {opt.label}
               </MenuItem>
             ))}
           </TextField>

@@ -14,8 +14,10 @@ class OpenClawGatewaySimulator:
         headers = {}
         if gateway_id:
             headers["X-EB-Gateway-ID"] = gateway_id
+        # 180s (not 30s) to comfortably exceed a real cognify/ingest round-trip
+        # on a slow local model; fixes context_lifecycle ReadTimeout aborts.
         self.client = httpx.AsyncClient(
-            base_url=base_url, timeout=30.0, headers=headers)
+            base_url=base_url, timeout=180.0, headers=headers)
         self.session_key = session_key
         self.session_id = str(uuid.uuid4())
         self.gateway_id = gateway_id
@@ -25,8 +27,11 @@ class OpenClawGatewaySimulator:
             "session_key": self.session_key, "session_id": self.session_id})
 
     async def simulate_before_agent_start(self, prompt: str) -> list[dict]:
+        # Thread session_id so the RETRIEVAL_PERFORMED trace is scoped to this
+        # session_id and visible to the session_id-scoped summary/timeline.
         r = await self.client.post("/memory/search", json={
-            "query": prompt, "session_key": self.session_key, "max_results": 10,
+            "query": prompt, "session_key": self.session_key,
+            "session_id": self.session_id, "max_results": 10,
             "auto_recall": True})
         r.raise_for_status()
         return r.json()
@@ -37,13 +42,28 @@ class OpenClawGatewaySimulator:
             "session_id": self.session_id, "profile_name": "coding"})
 
     async def simulate_tool_memory_search(self, query: str) -> list[dict]:
-        r = await self.client.post("/memory/search", json={"query": query})
+        # Thread session_id/session_key so the RETRIEVAL_PERFORMED trace is
+        # scoped to this session and visible to the session_id-scoped summary.
+        r = await self.client.post("/memory/search", json={
+            "query": query, "session_key": self.session_key,
+            "session_id": self.session_id})
         r.raise_for_status()
         return r.json()
 
     async def simulate_tool_memory_store(self, text: str, category: str = "general"):
+        # Stamp the scenario session on the fact so it is (a) findable by the
+        # session_id-scoped /memory/search and (b) removed by clean_scenario_graph
+        # (session_key starts with "scenario:") — otherwise facts accumulate across
+        # runs and every re-run dedup-skips these stores.
         r = await self.client.post("/memory/store", json={
-            "fact": {"text": text, "category": category}})
+            "fact": {"text": text, "category": category},
+            "session_key": self.session_key,
+            "session_id": self.session_id})
+        # 409 near_duplicate_detected is the backend's intended dedup-skip
+        # outcome, not an error — return its body so near-duplicate stores and
+        # subsequent scenario steps proceed. Still raise on other 4xx/5xx.
+        if r.status_code == 409:
+            return r.json()
         r.raise_for_status()
         return r.json()
 
@@ -142,8 +162,16 @@ class OpenClawGatewaySimulator:
         return r.json()
 
     async def simulate_procedure_activate(self, procedure_id: str):
-        """Simulate POST /procedures/{procedure_id}/activate."""
-        r = await self.client.post(f"/procedures/{procedure_id}/activate", json={})
+        """Simulate POST /procedures/{procedure_id}/activate.
+
+        Pass the scenario session so the ProcedureExecution carries session_id —
+        without it check_step's PROCEDURE_STEP_PASSED event is stamped session_id=None
+        and is invisible to the session_id-scoped trace summary.
+        """
+        r = await self.client.post(f"/procedures/{procedure_id}/activate", json={
+            "session_key": self.session_key,
+            "session_id": str(self.session_id) if self.session_id else "",
+        })
         return r.json()
 
     async def simulate_procedure_complete_step(self, execution_id: str, step_id: str, proof_value: str | None = None):

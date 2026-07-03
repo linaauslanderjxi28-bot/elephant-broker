@@ -19,6 +19,8 @@ Usage:
     ebrun config set actor-id <uuid>
     ebrun config set api-key eb_key_xxxx
     ebrun auth create-key --label "my-workstation"
+    ebrun indexes list
+    ebrun indexes enable eb_fact_gateway_id
 """
 from __future__ import annotations
 
@@ -547,6 +549,121 @@ def goal_list(ctx: click.Context, scope: str | None, org_id: str | None) -> None
     if params:
         url += "?" + "&".join(params)
     result = _api("GET", url, ctx.obj["actor_id"])
+    click.echo(json.dumps(result, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Indexes (Fix 5 — opt-in Neo4j fact indexes)
+# ---------------------------------------------------------------------------
+
+def _format_index_state(idx: dict) -> str:
+    """Render one index's live Neo4j state for table/detail output.
+
+    absent (not created) / ONLINE / POPULATING <pct>% / FAILED.
+    """
+    if not idx.get("exists"):
+        return "absent"
+    state = idx.get("state") or "unknown"
+    pct = idx.get("population_percent")
+    if state == "POPULATING" and pct is not None:
+        return f"POPULATING {pct:.0f}%"
+    return state
+
+
+@cli.group("indexes")
+def indexes_group() -> None:
+    """Fact index management (opt-in, DEFAULT OFF).
+
+    Neo4j indexes on FactDataPoint properties. Nothing creates them
+    automatically — enable them explicitly per index (or --all). Neo4j is
+    the source of truth: state is read live via SHOW INDEXES.
+
+    NOTE: Neo4j indexes are database-global — enabling one affects EVERY
+    gateway sharing the Neo4j database on this host.
+    """
+
+
+@indexes_group.command("list")
+@click.pass_context
+def indexes_list(ctx: click.Context) -> None:
+    """List all catalog fact indexes with live Neo4j state."""
+    result = _api("GET", f"{ctx.obj['runtime_url']}/admin/indexes", ctx.obj["actor_id"])
+    indexes = result.get("indexes", [])
+    rows = [("NAME", "PROPERTY", "STATE", "DESCRIPTION")]
+    for idx in indexes:
+        rows.append((idx.get("name", ""), idx.get("property", ""),
+                     _format_index_state(idx), idx.get("description", "")))
+    widths = [max(len(row[col]) for row in rows) for col in range(3)]
+    for row in rows:
+        click.echo(f"{row[0]:<{widths[0]}}  {row[1]:<{widths[1]}}  "
+                   f"{row[2]:<{widths[2]}}  {row[3]}")
+
+
+@indexes_group.command("status")
+@click.argument("name")
+@click.pass_context
+def indexes_status(ctx: click.Context, name: str) -> None:
+    """Show one fact index's detail (live from Neo4j)."""
+    result = _api("GET", f"{ctx.obj['runtime_url']}/admin/indexes", ctx.obj["actor_id"])
+    indexes = result.get("indexes", [])
+    for idx in indexes:
+        if idx.get("name") == name:
+            click.echo(json.dumps(idx, indent=2))
+            return
+    catalog = ", ".join(i.get("name", "") for i in indexes)
+    click.echo(f"Unknown fact index: {name} (catalog: {catalog})")
+    sys.exit(1)
+
+
+@indexes_group.command("enable")
+@click.argument("name", required=False)
+@click.option("--all", "enable_all", is_flag=True, help="Enable ALL catalog indexes")
+@click.pass_context
+def indexes_enable(ctx: click.Context, name: str | None, enable_all: bool) -> None:
+    """Enable (create) a fact index — Neo4j back-fills in the background."""
+    if enable_all == bool(name):
+        click.echo("Provide exactly one of NAME or --all")
+        sys.exit(1)
+    url = ctx.obj["runtime_url"]
+    if enable_all:
+        # Re-read the catalog from the runtime (server-side FACT_INDEX_SPECS
+        # is authoritative — never hardcode index names in the CLI).
+        listing = _api("GET", f"{url}/admin/indexes", ctx.obj["actor_id"])
+        for idx in listing.get("indexes", []):
+            result = _api("POST", f"{url}/admin/indexes/{idx['name']}", ctx.obj["actor_id"])
+            click.echo(f"{result['index']}: {result['status']}")
+        return
+    result = _api("POST", f"{url}/admin/indexes/{name}", ctx.obj["actor_id"])
+    click.echo(json.dumps(result, indent=2))
+
+
+@indexes_group.command("disable")
+@click.argument("name", required=False)
+@click.option("--all", "disable_all", is_flag=True, help="Disable ALL catalog indexes")
+@click.pass_context
+def indexes_disable(ctx: click.Context, name: str | None, disable_all: bool) -> None:
+    """Disable (drop) a fact index."""
+    if disable_all == bool(name):
+        click.echo("Provide exactly one of NAME or --all")
+        sys.exit(1)
+    url = ctx.obj["runtime_url"]
+    if disable_all:
+        listing = _api("GET", f"{url}/admin/indexes", ctx.obj["actor_id"])
+        for idx in listing.get("indexes", []):
+            result = _api("DELETE", f"{url}/admin/indexes/{idx['name']}", ctx.obj["actor_id"])
+            click.echo(f"{result['index']}: {result['status']}")
+        return
+    result = _api("DELETE", f"{url}/admin/indexes/{name}", ctx.obj["actor_id"])
+    click.echo(json.dumps(result, indent=2))
+
+
+@indexes_group.command("rebuild")
+@click.argument("name")
+@click.pass_context
+def indexes_rebuild(ctx: click.Context, name: str) -> None:
+    """Rebuild a fact index (drop then re-create; back-fills in background)."""
+    result = _api("POST", f"{ctx.obj['runtime_url']}/admin/indexes/{name}/rebuild",
+                  ctx.obj["actor_id"])
     click.echo(json.dumps(result, indent=2))
 
 

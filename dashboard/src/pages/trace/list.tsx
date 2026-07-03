@@ -17,6 +17,7 @@
 // agent; the in-page check below is the courtesy fallback.
 
 import React, { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { usePermissions } from "@refinedev/core";
 import {
   Alert,
@@ -257,14 +258,41 @@ export const TraceListPage: React.FC = () => {
   const authority = perms?.authorityLevel ?? 0;
   const canView = authority >= 70;
 
-  // Filter state.
+  // Filter + pagination state — seeded from the URL so a deep link, reload, or
+  // Back navigation restores the exact view (consolidation-trace-9/-10). The
+  // effect below mirrors state back to the URL (one-way, replace); only
+  // non-default values are encoded to keep the query key stable.
+  const [searchParams, setSearchParams] = useSearchParams();
+
   const [eventTypes, setEventTypes] = useState<EventTypeInfo[]>([]);
-  const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
-  const [sessionKey, setSessionKey] = useState("");
-  const [sessionId, setSessionId] = useState("");
-  const [range, setRange] = useState<RangeKey>("24h");
-  const [limit, setLimit] = useState(100);
+  const [selectedTypes, setSelectedTypes] = useState<string[]>(() => {
+    const csv = searchParams.get("types");
+    return csv ? csv.split(",").filter(Boolean) : [];
+  });
+  const [sessionKey, setSessionKey] = useState(
+    () => searchParams.get("session_key") ?? "",
+  );
+  const [sessionId, setSessionId] = useState(
+    () => searchParams.get("session_id") ?? "",
+  );
+  const [range, setRange] = useState<RangeKey>(() => {
+    const r = searchParams.get("range");
+    const valid = r === "all" || (TIME_RANGES as readonly string[]).includes(r ?? "");
+    return valid ? (r as RangeKey) : "24h";
+  });
+  const [limit, setLimit] = useState(() => {
+    const l = Number(searchParams.get("limit"));
+    return LIMIT_OPTIONS.includes(l) ? l : 100;
+  });
+  const [offset, setOffset] = useState(() => {
+    const o = Number(searchParams.get("offset"));
+    return Number.isFinite(o) && o > 0 ? Math.floor(o) : 0;
+  });
   const [refreshTick, setRefreshTick] = useState(0);
+
+  // A filter edit invalidates the current page — always jump back to offset 0
+  // so a narrower filter can't strand the operator on a now-empty later page.
+  const resetOffset = () => setOffset(0);
 
   // Results state.
   const [events, setEvents] = useState<TraceEvent[]>([]);
@@ -281,6 +309,19 @@ export const TraceListPage: React.FC = () => {
     for (const et of eventTypes) map[et.type] = et.description;
     return map;
   }, [eventTypes]);
+
+  // Mirror the filter/pagination state to the URL (only non-defaults, replace
+  // to avoid spamming history) so it survives reload / Back / deep-link.
+  useEffect(() => {
+    const next = new URLSearchParams();
+    if (selectedTypes.length > 0) next.set("types", selectedTypes.join(","));
+    if (sessionKey.trim()) next.set("session_key", sessionKey.trim());
+    if (sessionId.trim()) next.set("session_id", sessionId.trim());
+    if (range !== "24h") next.set("range", range);
+    if (limit !== 100) next.set("limit", String(limit));
+    if (offset > 0) next.set("offset", String(offset));
+    setSearchParams(next, { replace: true });
+  }, [selectedTypes, sessionKey, sessionId, range, limit, offset, setSearchParams]);
 
   // Load the event-type reference list once (feeds the multi-select).
   useEffect(() => {
@@ -308,6 +349,7 @@ export const TraceListPage: React.FC = () => {
       setError(null);
       try {
         const body: Record<string, unknown> = { limit };
+        if (offset > 0) body.offset = offset;
         if (selectedTypes.length > 0) body.event_types = selectedTypes;
         if (sessionKey.trim()) body.session_key = sessionKey.trim();
         if (sessionIdTrimmed) body.session_id = sessionIdTrimmed;
@@ -346,6 +388,7 @@ export const TraceListPage: React.FC = () => {
     sessionIdInvalid,
     range,
     limit,
+    offset,
     refreshTick,
   ]);
 
@@ -399,20 +442,30 @@ export const TraceListPage: React.FC = () => {
             limitTags={3}
             options={eventTypes.map((et) => et.type)}
             value={selectedTypes}
-            onChange={(_, v) => setSelectedTypes(v)}
+            onChange={(_, v) => {
+              setSelectedTypes(v);
+              resetOffset();
+            }}
             sx={{ minWidth: 320, flex: 1 }}
-            renderOption={(props, option) => (
-              <li {...props}>
-                <Box>
-                  <Typography variant="body2">{option}</Typography>
-                  {typeDescriptions[option] && (
-                    <Typography variant="caption" color="text.secondary">
-                      {typeDescriptions[option]}
-                    </Typography>
-                  )}
-                </Box>
-              </li>
-            )}
+            renderOption={(props, option) => {
+              // React 18 forbids spreading a `key` in with the rest of the
+              // props — MUI's `renderOption` props include one. Pull it out and
+              // pass it explicitly to silence the console error
+              // (consolidation-trace-11).
+              const { key, ...optionProps } = props;
+              return (
+                <li key={key} {...optionProps}>
+                  <Box>
+                    <Typography variant="body2">{option}</Typography>
+                    {typeDescriptions[option] && (
+                      <Typography variant="caption" color="text.secondary">
+                        {typeDescriptions[option]}
+                      </Typography>
+                    )}
+                  </Box>
+                </li>
+              );
+            }}
             renderInput={(params) => (
               <TextField
                 {...params}
@@ -425,14 +478,20 @@ export const TraceListPage: React.FC = () => {
             size="small"
             label="Session key"
             value={sessionKey}
-            onChange={(e) => setSessionKey(e.target.value)}
+            onChange={(e) => {
+              setSessionKey(e.target.value);
+              resetOffset();
+            }}
             sx={{ minWidth: 200 }}
           />
           <TextField
             size="small"
             label="Session ID (UUID)"
             value={sessionId}
-            onChange={(e) => setSessionId(e.target.value)}
+            onChange={(e) => {
+              setSessionId(e.target.value);
+              resetOffset();
+            }}
             error={sessionIdInvalid}
             helperText={sessionIdInvalid ? "Not a valid UUID" : undefined}
             sx={{ minWidth: 280 }}
@@ -441,7 +500,12 @@ export const TraceListPage: React.FC = () => {
             size="small"
             exclusive
             value={range}
-            onChange={(_, v) => v && setRange(v as RangeKey)}
+            onChange={(_, v) => {
+              if (v) {
+                setRange(v as RangeKey);
+                resetOffset();
+              }
+            }}
           >
             {TIME_RANGES.map((r) => (
               <ToggleButton key={r} value={r}>
@@ -455,7 +519,10 @@ export const TraceListPage: React.FC = () => {
             size="small"
             label="Limit"
             value={limit}
-            onChange={(e) => setLimit(Number(e.target.value))}
+            onChange={(e) => {
+              setLimit(Number(e.target.value));
+              resetOffset();
+            }}
             sx={{ minWidth: 100 }}
           >
             {LIMIT_OPTIONS.map((n) => (
@@ -508,7 +575,10 @@ export const TraceListPage: React.FC = () => {
                   </TableCell>
                   <TableCell sx={{ wordBreak: "break-all" }}>
                     <Typography variant="body2">
-                      {e.session_key ??
+                      {/* `??` kept the empty-string session_key (rendering a
+                          blank cell); `||` falls through to the id / em-dash
+                          placeholder (consolidation-trace-8). */}
+                      {e.session_key ||
                         (e.session_id ? e.session_id.slice(0, 8) : "—")}
                     </Typography>
                   </TableCell>
@@ -534,14 +604,36 @@ export const TraceListPage: React.FC = () => {
         </Paper>
       )}
 
-      <Typography
-        variant="caption"
-        color="text.secondary"
-        sx={{ display: "block", mt: 1 }}
+      {/* Offset/limit pagination — the backend /trace/query honours `offset`
+          (consolidation-trace-10). "Next" is enabled only when the current page
+          filled the limit (a full page implies there may be more). */}
+      <Stack
+        direction="row"
+        alignItems="center"
+        spacing={1}
+        sx={{ mt: 1 }}
       >
-        {events.length} event{events.length === 1 ? "" : "s"}
-        {events.length >= limit ? ` (limit ${limit} reached)` : ""}
-      </Typography>
+        <Button
+          size="small"
+          disabled={offset === 0 || loading}
+          onClick={() => setOffset((o) => Math.max(0, o - limit))}
+        >
+          Prev
+        </Button>
+        <Button
+          size="small"
+          disabled={events.length < limit || loading}
+          onClick={() => setOffset((o) => o + limit)}
+        >
+          Next
+        </Button>
+        <Typography variant="caption" color="text.secondary">
+          {events.length === 0
+            ? "No events"
+            : `Showing ${offset + 1}–${offset + events.length}`}
+          {events.length >= limit ? ` (page size ${limit})` : ""}
+        </Typography>
+      </Stack>
 
       <EventDetailDrawer eventId={detailId} onClose={() => setDetailId(null)} />
     </Box>
