@@ -44,6 +44,7 @@ from elephantbroker.schemas.dashboard import (
     ActorSummary,
     ComponentHealth,
     DashboardOverview,
+    ErrorSummary,
     FactDetailResponse,
     FactEdge,
     FactUsageSummary,
@@ -56,6 +57,9 @@ from elephantbroker.schemas.dashboard import (
     KnowledgeGraphResponse,
     LinkedClaim,
     MemoryBrowseRequest,
+    MetricSeries,
+    MetricSnapshot,
+    MetricsSnapshotResponse,
     MemoryStatsResponse,
     OrganizationSummary,
     ProcedureDetailResponse,
@@ -275,6 +279,17 @@ _FEED_NOISE_EVENT_TYPES: frozenset[str] = frozenset({
 })
 
 
+# Friendly display labels for the live component-probe keys, used when a probe
+# in "error" is surfaced as a ``health_reasons`` line (see overview()).
+_COMPONENT_LABELS: dict[str, str] = {
+    "neo4j": "graph store",
+    "qdrant": "vector store",
+    "redis": "cache",
+    "llm": "LLM",
+    "embedding": "embeddings",
+}
+
+
 # --- Effective-config secret masking (authority >= 90 view) ----------------
 # Mask only genuine credentials. A naive substring match ("token" in
 # "max_tokens", "api_key" in "api_keys_db_path") over-masks numeric limits and
@@ -392,6 +407,7 @@ async def overview(request: Request, time_range: str = Query("24h")):
     guard_near_misses = 0
     errors = 0
     recent_events: list[RecentEvent] = []
+    error_events: list[ErrorSummary] = []
     if ledger is not None:
         from elephantbroker.schemas.trace import TraceQuery
 
@@ -412,6 +428,17 @@ async def overview(request: Request, time_range: str = Query("24h")):
                 guard_near_misses += 1
             elif et == "degraded_operation":
                 errors += 1
+                # Collect the drill-down projection in the SAME pass that
+                # counts errors — no second ledger scan (overview-health).
+                ep = e.payload or {}
+                error_events.append(
+                    ErrorSummary(
+                        component=str(ep.get("component", "") or ""),
+                        error=str(ep.get("error", "") or ""),
+                        timestamp=e.timestamp,
+                        session_key=e.session_key,
+                    )
+                )
         # Feed: drop low-level/internal noise so one search is one row, not six
         # (overview-3). Period counters above still see the full stream.
         feed_events = [
@@ -437,6 +464,36 @@ async def overview(request: Request, time_range: str = Query("24h")):
     else:
         system_health = "healthy"
 
+    # --- Health reasons (why the status is what it is) ---
+    # Built from the SAME signals system_health is derived from so the two
+    # never disagree: the degraded_operation count + each failing component's
+    # message (incl. reranker, which is NOT a live probe), the guard-trigger
+    # count, and any live probe currently in "error". Empty when healthy.
+    health_reasons: list[str] = []
+    if errors > 0:
+        health_reasons.append(
+            f"{errors} error{'' if errors == 1 else 's'} in the last {tr}"
+        )
+    seen_error_components: set[tuple[str, str]] = set()
+    for ev in error_events:
+        key = (ev.component, ev.error)
+        if key in seen_error_components:
+            continue
+        seen_error_components.add(key)
+        label = ev.component or "runtime"
+        health_reasons.append(f"{label}: {ev.error}" if ev.error else label)
+    if guard_triggers > 0:
+        health_reasons.append(
+            f"{guard_triggers} guard trigger"
+            f"{'' if guard_triggers == 1 else 's'} in the last {tr}"
+        )
+    for name, comp in components.items():
+        if comp.status == "error":
+            health_reasons.append(f"{_COMPONENT_LABELS.get(name, name)}: connection error")
+
+    # Cap the drill-down list at the most recent 20 (newest first).
+    recent_errors = sorted(error_events, key=lambda x: x.timestamp, reverse=True)[:20]
+
     return DashboardOverview(
         time_range=tr,
         total_facts=total_facts,
@@ -452,6 +509,8 @@ async def overview(request: Request, time_range: str = Query("24h")):
         errors_in_period=errors,
         system_health=system_health,
         components=components,
+        health_reasons=health_reasons,
+        recent_errors=recent_errors,
         recent_events=recent_events,
     ).model_dump(mode="json")
 
@@ -524,6 +583,188 @@ async def config_effective(request: Request):
         logger.warning("dashboard: config dump failed: %s", exc)
         return {"config": {}, "note": "config dump failed"}
     return {"config": _mask_config(dumped)}
+
+
+# ---------------------------------------------------------------------------
+# System metrics — gateway-scoped Prometheus registry snapshot
+# ---------------------------------------------------------------------------
+# The Stats page reads the SAME in-process Prometheus registry that ``GET
+# /metrics`` (api/routes/metrics.py) serves as text — but that raw endpoint is
+# unauthenticated and returns EVERY tenant's series, so the browser must never
+# be pointed at it. This route reads the registry directly, filters to the
+# request-stamped ``gateway_id`` (dropping the label from the output), and shapes
+# a typed JSON projection behind the same READ authority gate as its neighbours.
+
+# Curated headline allow-list (~highest-signal metrics for the Stats page).
+# Names are the EXPOSED Prometheus series names — for counters that is the
+# ``_total`` sample name (prometheus_client strips ``_total`` from the family
+# name; ``_family_public_name`` re-adds it). ``?names=`` overrides this default.
+_HEADLINE_METRICS: tuple[str, ...] = (
+    # Memory
+    "eb_facts_stored_total",
+    "eb_facts_superseded_total",
+    "eb_dedup_checks_total",
+    # Retrieval
+    "eb_retrieval_total",
+    "eb_retrieval_duration_seconds",
+    # Guards
+    "eb_guard_checks_total",
+    "eb_guard_near_misses_total",
+    "eb_guard_llm_escalations_total",
+    "eb_guard_check_duration_seconds",
+    # Working set + rerank
+    "eb_working_set_builds_total",
+    "eb_working_set_build_duration_seconds",
+    "eb_rerank_calls_total",
+    "eb_rerank_fallbacks_total",
+    "eb_rerank_duration_seconds",
+    # LLM
+    "eb_llm_calls_total",
+    "eb_llm_tokens_used_total",
+    "eb_llm_duration_seconds",
+    # Lifecycle
+    "eb_lifecycle_duration_seconds",
+    # Compaction + consolidation
+    "eb_compaction_triggered_total",
+    "eb_consolidation_runs_total",
+    # Gauges
+    "eb_session_active",
+    "eb_backend_health",
+    "eb_bootstrap_mode_active",
+)
+
+
+def _family_public_name(family) -> str:
+    """The exposed Prometheus series base name for a metric family.
+
+    prometheus_client strips a trailing ``_total`` from a counter's family name;
+    re-add it so the name we surface matches what ``/metrics`` prints and what
+    operators query in PromQL. Gauges/histograms keep their family name.
+    """
+    if family.type == "counter":
+        return f"{family.name}_total"
+    return family.name
+
+
+def _resolve_metric_names(names: str | None) -> set[str]:
+    """Parse the optional ``?names=`` CSV override; default to the headline set."""
+    if not names:
+        return set(_HEADLINE_METRICS)
+    requested = {n.strip() for n in names.split(",") if n.strip()}
+    return requested or set(_HEADLINE_METRICS)
+
+
+def _strip_labels(labels, *drop: str) -> dict[str, str]:
+    """Return sample labels as a plain dict minus ``drop`` (always incl. gateway_id)."""
+    skip = {"gateway_id", *drop}
+    return {k: str(v) for k, v in labels.items() if k not in skip}
+
+
+def _metric_snapshot(family, gw: str) -> MetricSnapshot | None:
+    """Aggregate one metric family to the caller's gateway, or None if empty.
+
+    Only samples whose ``gateway_id`` label equals ``gw`` are included (missing
+    label is treated as ``""`` — consistent with the other routes when no gateway
+    is stamped). ``gateway_id`` is dropped from every surfaced series so a tenant
+    never sees the label, and cross-tenant series are never returned. Non
+    counter/gauge/histogram families (summary/info) are skipped.
+    """
+    mtype = family.type
+    if mtype not in ("counter", "gauge", "histogram"):
+        return None
+    series: list[MetricSeries] = []
+    if mtype == "counter":
+        for s in family.samples:
+            # The ``_total`` sample carries the value; skip the ``_created`` twin.
+            if not s.name.endswith("_total"):
+                continue
+            if s.labels.get("gateway_id", "") != gw:
+                continue
+            series.append(MetricSeries(labels=_strip_labels(s.labels), value=float(s.value)))
+    elif mtype == "gauge":
+        for s in family.samples:
+            if s.name != family.name:
+                continue
+            if s.labels.get("gateway_id", "") != gw:
+                continue
+            series.append(MetricSeries(labels=_strip_labels(s.labels), value=float(s.value)))
+    else:  # histogram — fold _sum/_count/_bucket into one series per label set
+        agg: dict[tuple, dict] = {}
+        for s in family.samples:
+            if s.labels.get("gateway_id", "") != gw:
+                continue
+            if s.name.endswith("_bucket"):
+                base = _strip_labels(s.labels, "le")
+                entry = agg.setdefault(tuple(sorted(base.items())), {"labels": base, "buckets": {}})
+                entry["buckets"][str(s.labels.get("le", ""))] = float(s.value)
+            elif s.name.endswith("_sum"):
+                base = _strip_labels(s.labels)
+                entry = agg.setdefault(tuple(sorted(base.items())), {"labels": base, "buckets": {}})
+                entry["sum"] = float(s.value)
+            elif s.name.endswith("_count"):
+                base = _strip_labels(s.labels)
+                entry = agg.setdefault(tuple(sorted(base.items())), {"labels": base, "buckets": {}})
+                entry["count"] = float(s.value)
+            # skip _created
+        for entry in agg.values():
+            series.append(
+                MetricSeries(
+                    labels=entry["labels"],
+                    sum=entry.get("sum"),
+                    count=entry.get("count"),
+                    buckets=entry.get("buckets") or None,
+                )
+            )
+    if not series:
+        return None
+    return MetricSnapshot(
+        name=_family_public_name(family),
+        type=mtype,
+        help=str(family.documentation or ""),
+        series=series,
+    )
+
+
+@router.get("/metrics", dependencies=[READ])
+async def metrics(request: Request, names: str | None = Query(None)):
+    """Gateway-scoped JSON snapshot of the in-process Prometheus registry.
+
+    Reads the same registry ``/metrics`` serves as text, but scoped to the
+    caller's ``gateway_id`` and behind READ authority. Returns the curated
+    headline allow-list by default; ``?names=a,b,c`` overrides it. Degrades to
+    ``{available: false, ...}`` (HTTP 200) when ``prometheus_client`` is absent.
+    """
+    from elephantbroker.runtime import metrics as runtime_metrics
+
+    if not runtime_metrics.METRICS_AVAILABLE:
+        return MetricsSnapshotResponse(
+            available=False,
+            note="prometheus_client is not installed; runtime metrics are disabled.",
+        ).model_dump(mode="json", exclude_none=True)
+
+    gw = _gateway_id(request)
+    wanted = _resolve_metric_names(names)
+
+    from prometheus_client import REGISTRY
+
+    snapshots: list[MetricSnapshot] = []
+    try:
+        for family in REGISTRY.collect():
+            # Match on the exposed name OR the raw family name so a caller may
+            # pass either ``eb_facts_stored_total`` or ``eb_facts_stored``.
+            if _family_public_name(family) not in wanted and family.name not in wanted:
+                continue
+            snap = _metric_snapshot(family, gw)
+            if snap is not None:
+                snapshots.append(snap)
+    except Exception as exc:  # noqa: BLE001 - never fail the dashboard on a scrape error
+        logger.warning("dashboard: metrics registry collect failed: %s", exc)
+
+    return MetricsSnapshotResponse(
+        available=True,
+        generated_at=datetime.now(UTC),
+        metrics=snapshots,
+    ).model_dump(mode="json", exclude_none=True)
 
 
 # ---------------------------------------------------------------------------

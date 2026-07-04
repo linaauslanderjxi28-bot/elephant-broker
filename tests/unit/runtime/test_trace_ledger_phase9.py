@@ -4,8 +4,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
+from opentelemetry import trace as otel_trace
+
+from elephantbroker.runtime.observability import get_tracer, setup_tracing
 from elephantbroker.runtime.trace.ledger import TraceLedger
-from elephantbroker.schemas.config import TraceConfig
+from elephantbroker.schemas.config import InfraConfig, TraceConfig
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
 
@@ -61,3 +64,49 @@ class TestTraceLedgerOtelBridge:
         # Should not raise
         ev = await ledger.append_event(TraceEvent(event_type=TraceEventType.INPUT_RECEIVED))
         assert ev is not None
+
+
+class TestTraceSpanCorrelationStamp:
+    """AREA C: each TraceEvent + its OTLP LogRecord carries the active span's
+    trace_id/span_id so ClickHouse log rows and Jaeger spans can be correlated.
+    """
+
+    async def test_active_span_stamps_event_and_logrecord(self):
+        """With a started span active, the appended event is stamped with a valid
+        trace_id (032x hex) / span_id (016x hex), and the emitted LogRecord carries
+        the SAME ids as ints.
+        """
+        setup_tracing(InfraConfig())  # fresh provider so a real span context exists
+        mock_logger = MagicMock()
+        ledger = TraceLedger(otel_logger=mock_logger)
+
+        tracer = get_tracer("test_correlation")
+        with tracer.start_as_current_span("unit-span") as span:
+            span_context = span.get_span_context()
+            event = await ledger.append_event(
+                TraceEvent(event_type=TraceEventType.CONSOLIDATION_STARTED)
+            )
+
+        # Event hex ids match the active span context.
+        assert event.trace_id == format(span_context.trace_id, "032x")
+        assert event.span_id == format(span_context.span_id, "016x")
+        assert len(event.trace_id) == 32
+        assert len(event.span_id) == 16
+
+        # Emitted LogRecord carries the same ids as ints.
+        mock_logger.emit.assert_called_once()
+        record = mock_logger.emit.call_args.args[0]
+        assert record.trace_id == span_context.trace_id
+        assert record.span_id == span_context.span_id
+        assert int(record.trace_flags) == int(span_context.trace_flags)
+
+    async def test_no_active_span_leaves_ids_none(self):
+        """With no active span, trace_id/span_id stay None and nothing raises."""
+        # Detach any ambient span so get_current_span() returns the invalid span.
+        with otel_trace.use_span(otel_trace.INVALID_SPAN, end_on_exit=False):
+            ledger = TraceLedger(otel_logger=None)
+            event = await ledger.append_event(
+                TraceEvent(event_type=TraceEventType.INPUT_RECEIVED)
+            )
+        assert event.trace_id is None
+        assert event.span_id is None

@@ -63,6 +63,11 @@ class TraceLedger(ITraceLedger):
             event.agent_key = self._agent_key
         if self._agent_id and not event.agent_id:
             event.agent_id = self._agent_id
+        # OTEL correlation stamp — capture the active span's trace_id/span_id
+        # onto the event (hex) BEFORE storing/emitting so in-memory reads and the
+        # durable ClickHouse log row share the same ids as the Jaeger span. No-op
+        # when no valid span context is active; never raises (see _stamp_span_context).
+        self._stamp_span_context(event)
         self._events.append(event)
         self._events_by_id[event.id] = event
         self._evict_stale()
@@ -90,16 +95,65 @@ class TraceLedger(ITraceLedger):
                 evicted = self._events.pop(0)
                 self._events_by_id.pop(evicted.id, None)
 
+    def _stamp_span_context(self, event: TraceEvent) -> None:
+        """Stamp the active OTEL span's trace_id/span_id onto the event (hex).
+
+        Reads ``opentelemetry.trace.get_current_span().get_span_context()``; when
+        the context is valid (non-zero trace_id), formats trace_id as 032x and
+        span_id as 016x hex and sets them on the event. A missing/invalid span
+        context (or a missing opentelemetry install) is a silent no-op — this
+        must never raise or block trace recording, matching the try/except-swallow
+        discipline in _emit_otel_log.
+        """
+        try:
+            from opentelemetry.trace import get_current_span
+
+            span_context = get_current_span().get_span_context()
+            if span_context is None or not span_context.is_valid or span_context.trace_id == 0:
+                return
+            event.trace_id = format(span_context.trace_id, "032x")
+            event.span_id = format(span_context.span_id, "016x")
+        except Exception:
+            pass  # Never let correlation stamping block trace recording
+
     def _emit_otel_log(self, event: TraceEvent) -> None:
         """Emit a TraceEvent as an OTEL LogRecord for durable storage."""
         try:
-            from opentelemetry.sdk._logs import LogRecord
+            try:
+                from opentelemetry.sdk._logs import LogRecord
+            except ImportError:
+                # opentelemetry-sdk >= ~1.40 no longer re-exports LogRecord at the
+                # package top level; it lives in the internal module. Fall back so
+                # the durable export path (and its correlation ids) stays alive.
+                from opentelemetry.sdk._logs._internal import LogRecord
             from opentelemetry.trace import StatusCode  # noqa: F401 — used for severity
         except ImportError:
             return
 
+        # Correlation ids for the LogRecord (ints, as OTEL expects). Derived from
+        # the hex stamped on the event by _stamp_span_context so the ClickHouse row
+        # and the Jaeger span carry identical trace/span ids. trace_flags is read
+        # live from the active span context (guarded; defaults to 0 = unsampled).
+        record_trace_id: int | None = None
+        record_span_id: int | None = None
+        record_trace_flags = 0
+        try:
+            if event.trace_id and event.span_id:
+                record_trace_id = int(event.trace_id, 16)
+                record_span_id = int(event.span_id, 16)
+                from opentelemetry.trace import get_current_span
+
+                span_context = get_current_span().get_span_context()
+                if span_context is not None and span_context.is_valid:
+                    record_trace_flags = int(span_context.trace_flags)
+        except Exception:
+            record_trace_id = record_span_id = None  # correlation is best-effort
+
         self._otel_logger.emit(LogRecord(
             body=event.model_dump_json(),
+            trace_id=record_trace_id,
+            span_id=record_span_id,
+            trace_flags=record_trace_flags,
             attributes={
                 "event_type": event.event_type.value,
                 "session_id": str(event.session_id) if event.session_id else "",

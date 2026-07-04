@@ -449,7 +449,7 @@ max_concurrent_sessions: 100
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
 | `default_profile` | `str` | `"coding"` | `EB_DEFAULT_PROFILE` | -- | Which profile (coding/research/managerial/worker/personal_assistant) governs scoring weights, retrieval policy, compaction policy, guard strictness, and autorecall when no profile is specified | Wrong profile name causes fallback or error at bootstrap; wrong profile type yields suboptimal scoring weights and retrieval behavior | `coding` / `coding` / `coding` (or per-deployment) |
 | `tier` | `BusinessTier` | `BusinessTier.FULL` | `EB_TIER` | enum (`memory_only`/`context_only`/`full`) | Business tier selecting which runtime modules are wired. `memory_only` = MemoryStoreFacade + ingest pipelines only (no working set, no context engine). `context_only` = ContextEngine + working set only (no memory store). `full` = both | Wrong value rejected at `from_yaml()` with `ValidationError` (caught by `elephantbroker config validate`); silent tier mismatch is impossible | `full` / `full` / per-deployment (`memory_only` for memory-only product) |
-| `enable_trace_ledger` | `bool` | `True` | `EB_ENABLE_TRACE_LEDGER` | -- | Enables/disables TraceLedger in-memory event recording and OTEL trace export | Disabling loses all trace/audit visibility; only disable for benchmarks | `true` / `true` / `true` |
+| `enable_trace_ledger` | `bool` | `True` | `EB_ENABLE_TRACE_LEDGER` | -- | Selects the /trace **read** source only; never gates writes/export (the in-memory ledger always keeps writing + exporting to OTEL). `true` = /trace reads the in-memory recent ring buffer (dev/testing; lost on restart). `false` = /trace reads durable history back from ClickHouse so timelines/sessions survive restart (requires `clickhouse.enabled`; falls back to the in-memory ledger if ClickHouse is disabled/unavailable, surfacing an honest source indicator) | Setting `false` without ClickHouse deployed = /trace silently falls back to the in-memory ledger (no error, but no durable read-back) | `true` / `true` / `false` (prod, with ClickHouse) |
 | `max_concurrent_sessions` | `int` | `100` | `EB_MAX_CONCURRENT_SESSIONS` | `ge=1` | Limits concurrent sessions the runtime will accept | Too low causes session rejections under load; too high risks OOM from Redis/Neo4j connection pressure | `10` / `50` / `100`-`500` |
 | `consolidation_min_retention_seconds` | `int` | `172800` (48h) | `EB_CONSOLIDATION_MIN_RETENTION_SECONDS` | `ge=3600` | Minimum age (seconds) a fact must have before consolidation pipeline can decay/archive it | Too low causes premature fact decay (data loss); too high means stale facts linger forever | `3600` / `86400` / `172800` |
 
@@ -1745,12 +1745,14 @@ def setup_tracing(config: InfraConfig, gateway_id: str = "local") -> TracerProvi
     provider = TracerProvider(resource=resource)
     if config.otel_endpoint:
         exporter = OTLPSpanExporter(endpoint=config.otel_endpoint)
-        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
 ```
 
 - Requires `opentelemetry-exporter-otlp-proto-grpc` pip package (optional install)
 - `EB_OTEL_ENDPOINT` env var controls whether export is active (no endpoint = no-op spans)
+- Span export uses `BatchSpanProcessor` (background thread, non-blocking) — mirrors the log path's `BatchLogRecordProcessor`; the provider is returned so a shutdown flush can drain the batch buffer before the pod exits
+- Each `TraceEvent` and its OTLP log record are stamped with the active span's `trace_id`/`span_id`, so ClickHouse logs and Jaeger spans can be correlated later
 - FastAPI auto-instrumented via `FastAPIInstrumentor.instrument_app(app)` in `create_app()`
 - OTEL log export (TraceLedger events to ClickHouse) requires both `EB_OTEL_ENDPOINT` and `EB_TRACE_OTEL_LOGS_ENABLED=true`
 
@@ -4452,7 +4454,9 @@ python -m tests.scenarios.runner --live \
 
 All metrics are defined in `elephantbroker/runtime/metrics.py`. Metrics are conditionally available -- if `prometheus_client` is not installed, all metrics become no-ops via `METRICS_AVAILABLE = False`. Every metric includes a `gateway_id` label for multi-gateway isolation. Access via `MetricsContext(gateway_id)` which auto-injects the label.
 
-**Endpoint:** `GET /metrics` (served by `elephantbroker/api/routes/metrics.py`)
+**Endpoint:** `GET /metrics` (served by `elephantbroker/api/routes/metrics.py`) — raw Prometheus text for external scrapers. This endpoint is unauthenticated and returns **every** gateway's series, so it must never be exposed to a browser/dashboard.
+
+**Dashboard endpoint:** `GET /dashboard/metrics` (served by `elephantbroker/api/routes/dashboard.py`) — the Stats page consumes this instead. It reads the same in-process registry, but is behind the dashboard READ authority gate and filters to the caller's `gateway_id` (stripping the label from the output), returning a typed JSON projection (`MetricsSnapshotResponse`). It surfaces a curated headline allow-list by default; pass `?names=a,b,c` to override. When `prometheus_client` is absent it returns `{ "available": false, ... }` (HTTP 200).
 
 #### Core Memory & Storage (Phase 3-4)
 
@@ -4638,7 +4642,7 @@ Called from `RuntimeContainer.from_config()` during boot.
 | `service.name` | `"elephantbroker"` |
 | `gateway.id` | Value of `config.gateway.gateway_id` (default: `"local"`) |
 
-**Span processor:** `SimpleSpanProcessor` with `OTLPSpanExporter(endpoint=config.otel_endpoint)`.
+**Span processor:** `BatchSpanProcessor` with `OTLPSpanExporter(endpoint=config.otel_endpoint)` — batches and exports spans on a background thread so export never blocks the request path.
 
 **Dependency:** `opentelemetry-exporter-otlp-proto-grpc` (optional -- logs a warning if not installed).
 
@@ -4782,6 +4786,7 @@ Defined in `elephantbroker/runtime/trace/ledger.py`.
 - **Circular buffer eviction:** When `memory_max_events` is exceeded, the oldest events are popped. Events older than `memory_ttl_seconds` are also evicted on each append (lazy GC).
 - **Gateway auto-enrichment:** When constructed with `gateway_id`, any appended event without a `gateway_id` gets it set automatically.
 - **OTEL log bridge:** When `otel_logs_enabled=true` and `EB_OTEL_ENDPOINT` is set, each appended event is also emitted as an OTEL LogRecord (JSON body with `event_type`, `session_id`, `session_key`, `gateway_id`, `agent_key` as attributes). Failures are silently swallowed to never block trace recording.
+- **Trace↔span correlation stamp:** When an OTEL span is active, each `TraceEvent` and its emitted LogRecord carry the span's `trace_id`/`span_id`, so ClickHouse logs and Jaeger spans can be correlated later.
 
 #### TraceLedger constructor
 
@@ -5823,11 +5828,11 @@ No Neo4j JVM or server configuration:
 - No WAL configuration
 - No snapshot/backup configuration
 
-###### 2.7 OTEL Span Processor
+###### 2.7 OTEL Span Processor — RESOLVED
 
-**File:** `elephantbroker/runtime/observability.py` (line 50)
+**File:** `elephantbroker/runtime/observability.py`
 
-Uses `SimpleSpanProcessor` which exports spans synchronously (blocks the request thread). Production should use `BatchSpanProcessor` with configurable `max_queue_size`, `schedule_delay_millis`, and `max_export_batch_size`.
+Previously used `SimpleSpanProcessor`, which exported spans synchronously and blocked the request thread. Now uses `BatchSpanProcessor`, which batches and exports spans on a background thread (non-blocking), mirroring the log path's `BatchLogRecordProcessor`. The provider is returned so a shutdown flush can drain the batch buffer before the pod exits.
 
 ---
 

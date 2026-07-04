@@ -22,11 +22,13 @@ import {
   CircularProgress,
   Link as MuiLink,
   Stack,
+  Divider,
   Table,
   TableBody,
   TableCell,
   TableHead,
   TableRow,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
@@ -41,6 +43,8 @@ import {
   SCOPE_LABELS,
   type MemoryClass,
   type MemoryStatsResponse,
+  type MetricSnapshot,
+  type MetricsSnapshotResponse,
   type Scope,
 } from "./types";
 
@@ -72,6 +76,233 @@ function StatCard({
         </Typography>
       </CardContent>
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Runtime metrics section (GET /dashboard/metrics)
+// ---------------------------------------------------------------------------
+// The curated headline counters/gauges surfaced by the backend allow-list,
+// grouped by domain. Only metrics actually present for the caller's gateway are
+// rendered (a metric with no series is omitted by the backend), so an empty
+// group is skipped rather than shown as a row of zeros. Names are the EXPOSED
+// Prometheus series names (matching MetricSnapshot.name).
+const METRIC_COUNTER_GROUPS: {
+  group: string;
+  metrics: { name: string; label: string }[];
+}[] = [
+  {
+    group: "Memory",
+    metrics: [
+      { name: "eb_facts_stored_total", label: "Facts stored" },
+      { name: "eb_facts_superseded_total", label: "Facts superseded" },
+      { name: "eb_dedup_checks_total", label: "Dedup checks" },
+    ],
+  },
+  {
+    group: "Retrieval",
+    metrics: [{ name: "eb_retrieval_total", label: "Retrievals" }],
+  },
+  {
+    group: "Guards",
+    metrics: [
+      { name: "eb_guard_checks_total", label: "Guard checks" },
+      { name: "eb_guard_near_misses_total", label: "Near misses" },
+      { name: "eb_guard_llm_escalations_total", label: "LLM escalations" },
+    ],
+  },
+  {
+    group: "Working set",
+    metrics: [
+      { name: "eb_working_set_builds_total", label: "Working-set builds" },
+      { name: "eb_rerank_calls_total", label: "Rerank calls" },
+      { name: "eb_rerank_fallbacks_total", label: "Rerank fallbacks" },
+    ],
+  },
+  {
+    group: "LLM",
+    metrics: [
+      { name: "eb_llm_calls_total", label: "LLM calls" },
+      { name: "eb_llm_tokens_used_total", label: "Tokens used" },
+    ],
+  },
+  {
+    group: "Consolidation",
+    metrics: [
+      { name: "eb_compaction_triggered_total", label: "Compactions" },
+      { name: "eb_consolidation_runs_total", label: "Consolidation runs" },
+    ],
+  },
+];
+
+// Histogram families surfaced as an avg-latency row (avg = _sum / _count, in ms).
+const METRIC_LATENCY: { name: string; label: string }[] = [
+  { name: "eb_retrieval_duration_seconds", label: "Retrieval" },
+  { name: "eb_guard_check_duration_seconds", label: "Guard check" },
+  { name: "eb_working_set_build_duration_seconds", label: "Working set" },
+  { name: "eb_rerank_duration_seconds", label: "Rerank" },
+  { name: "eb_llm_duration_seconds", label: "LLM" },
+  { name: "eb_lifecycle_duration_seconds", label: "Lifecycle" },
+];
+
+const metricByName = (metrics: MetricSnapshot[], name: string): MetricSnapshot | undefined =>
+  metrics.find((m) => m.name === name);
+
+/** Sum every series value of a counter/gauge family (across its label sets). */
+const seriesTotal = (m?: MetricSnapshot): number =>
+  (m?.series ?? []).reduce((acc, s) => acc + (s.value ?? 0), 0);
+
+/** Mean observation of a histogram family in milliseconds, or null if no counts. */
+const histogramAvgMs = (m?: MetricSnapshot): number | null => {
+  let sum = 0;
+  let count = 0;
+  for (const s of m?.series ?? []) {
+    sum += s.sum ?? 0;
+    count += s.count ?? 0;
+  }
+  return count > 0 ? (sum / count) * 1000 : null;
+};
+
+/**
+ * Runtime Metrics — the gateway-scoped Prometheus registry projection served by
+ * `GET /dashboard/metrics`. These are process counters/gauges/histograms that are
+ * CUMULATIVE SINCE PROCESS START and reset on restart, so the section is labelled
+ * distinctly from the Neo4j current-state totals above it. Degrades to a subtle
+ * note when `prometheus_client` is absent ({ available: false }).
+ */
+function RuntimeMetricsSection({ apiUrl }: { apiUrl: string }) {
+  const { data, isLoading } = useCustom<MetricsSnapshotResponse>({
+    url: `${apiUrl}/dashboard/metrics`,
+    method: "get",
+  });
+
+  const snap = data?.data;
+
+  if (isLoading || !snap) {
+    return null;
+  }
+
+  // Degraded path: prometheus_client absent -> no registry to project.
+  if (snap.available === false) {
+    return (
+      <Box sx={{ mt: 1 }}>
+        <Divider sx={{ mb: 2 }} />
+        <Typography variant="caption" color="text.secondary">
+          Prometheus metrics unavailable{snap.note ? ` — ${snap.note}` : "."}
+        </Typography>
+      </Box>
+    );
+  }
+
+  const metrics = snap.metrics ?? [];
+
+  // Gauges (current instantaneous values, not cumulative counters).
+  const sessions = metricByName(metrics, "eb_session_active");
+  const bootstrap = metricByName(metrics, "eb_bootstrap_mode_active");
+  const health = metricByName(metrics, "eb_backend_health");
+
+  const latencies = METRIC_LATENCY.map((l) => ({
+    ...l,
+    avg: histogramAvgMs(metricByName(metrics, l.name)),
+  })).filter((l) => l.avg !== null);
+
+  return (
+    <Box>
+      <Divider sx={{ mb: 2 }} />
+      <Typography variant="subtitle1" gutterBottom>
+        Runtime Metrics
+      </Typography>
+      <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 2 }}>
+        Cumulative since process start (resets on restart) — distinct from the
+        graph-store current-state totals above.
+        {snap.generated_at
+          ? ` Snapshot at ${new Date(snap.generated_at).toLocaleString()}.`
+          : ""}
+      </Typography>
+
+      <Stack spacing={3}>
+        {/* Counter groups — one row of tiles per domain, empty groups skipped. */}
+        {METRIC_COUNTER_GROUPS.map((g) => {
+          const present = g.metrics
+            .map((m) => ({ label: m.label, metric: metricByName(metrics, m.name) }))
+            .filter((m) => m.metric !== undefined);
+          if (present.length === 0) return null;
+          return (
+            <Box key={g.group}>
+              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                {g.group}
+              </Typography>
+              <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
+                {present.map((m) => (
+                  <Tooltip key={m.label} title={m.metric?.help ?? ""}>
+                    <span>
+                      <StatCard label={m.label} value={seriesTotal(m.metric).toLocaleString()} />
+                    </span>
+                  </Tooltip>
+                ))}
+              </Stack>
+            </Box>
+          );
+        })}
+
+        {/* Average latencies derived from histogram _sum / _count. */}
+        {latencies.length > 0 && (
+          <Box>
+            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+              Average latency
+            </Typography>
+            <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
+              {latencies.map((l) => (
+                <StatCard key={l.name} label={l.label} value={`${(l.avg as number).toFixed(1)} ms`} />
+              ))}
+            </Stack>
+          </Box>
+        )}
+
+        {/* Gauges — instantaneous health/liveness readings. */}
+        {(sessions || bootstrap || health) && (
+          <Box>
+            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+              Live gauges
+            </Typography>
+            <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap alignItems="center">
+              {sessions && (
+                <StatCard label="Active sessions" value={seriesTotal(sessions).toLocaleString()} />
+              )}
+              {bootstrap && (
+                <StatCard
+                  label="Bootstrap mode"
+                  value={seriesTotal(bootstrap) > 0 ? "On" : "Off"}
+                />
+              )}
+              {health && health.series.length > 0 && (
+                <Card variant="outlined">
+                  <CardContent>
+                    <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                      {health.series.map((s, i) => {
+                        const up = (s.value ?? 0) > 0;
+                        return (
+                          <Chip
+                            key={`${s.labels.component ?? i}`}
+                            size="small"
+                            label={humanizeEnum(s.labels.component ?? "component")}
+                            color={up ? "success" : "error"}
+                            variant={up ? "filled" : "outlined"}
+                          />
+                        );
+                      })}
+                    </Stack>
+                    <Typography variant="caption" color="text.secondary">
+                      Backend health
+                    </Typography>
+                  </CardContent>
+                </Card>
+              )}
+            </Stack>
+          </Box>
+        )}
+      </Stack>
+    </Box>
   );
 }
 
@@ -308,6 +539,13 @@ export const MemoryStats: FC = () => {
           </Accordion>
         </Stack>
       )}
+
+      {/* Runtime metrics — cumulative process counters/gauges from the Prometheus
+          registry, gateway-scoped. Rendered independently of the memory-stats
+          load (own fetch + loading/degraded handling). */}
+      <Box sx={{ mt: 3 }}>
+        <RuntimeMetricsSection apiUrl={apiUrl} />
+      </Box>
 
       <Box sx={{ mt: 2 }}>
         <Typography variant="caption" color="text.secondary" component="div">

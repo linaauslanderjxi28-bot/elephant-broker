@@ -13,9 +13,16 @@ import {
   Alert,
   Box,
   Card,
+  CardActionArea,
   CardContent,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  IconButton,
+  Link,
   List,
   ListItem,
   ListItemButton,
@@ -23,12 +30,16 @@ import {
   Stack,
   ToggleButton,
   ToggleButtonGroup,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
+import CloseIcon from "@mui/icons-material/Close";
+import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import {
   apiGet,
+  apiSend,
   COMPONENT_LABELS,
   eventChipColor,
   relativeTime,
@@ -93,6 +104,13 @@ interface RecentEvent {
   event_type: string;
   session_key: string | null;
 }
+/** Mirror of schemas/dashboard.py ErrorSummary — one degraded_operation event. */
+interface ErrorSummary {
+  component: string;
+  error: string;
+  timestamp: string;
+  session_key: string | null;
+}
 interface Overview {
   time_range: string;
   total_facts: number;
@@ -107,6 +125,10 @@ interface Overview {
   guard_near_misses_in_period: number;
   errors_in_period: number;
   system_health: string;
+  // Human-readable reasons behind system_health; [] when healthy.
+  health_reasons: string[];
+  // Up to 20 most-recent degraded_operation events in the window, newest first.
+  recent_errors: ErrorSummary[];
   components: Record<string, ComponentHealth>;
   recent_events: RecentEvent[];
 }
@@ -115,6 +137,9 @@ function StatusCard(props: {
   label: string;
   value: number | string;
   tone?: "ok" | "warn" | "error";
+  // When provided, the whole card becomes an actionable button (cursor + hover
+  // affordance). Omitted => the card stays inert, exactly as before.
+  onClick?: () => void;
 }) {
   const color =
     props.tone === "error"
@@ -122,22 +147,173 @@ function StatusCard(props: {
       : props.tone === "warn"
         ? "warning.main"
         : "success.main";
+  const inner = (
+    <CardContent>
+      <Stack direction="row" alignItems="center" spacing={1}>
+        <Box
+          sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: color }}
+        />
+        <Typography variant="body2" color="text.secondary">
+          {props.label}
+        </Typography>
+      </Stack>
+      <Typography variant="h4" sx={{ mt: 1 }}>
+        {props.value}
+      </Typography>
+    </CardContent>
+  );
   return (
     <Card variant="outlined" sx={{ height: "100%" }}>
-      <CardContent>
-        <Stack direction="row" alignItems="center" spacing={1}>
-          <Box
-            sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: color }}
-          />
-          <Typography variant="body2" color="text.secondary">
-            {props.label}
-          </Typography>
-        </Stack>
-        <Typography variant="h4" sx={{ mt: 1 }}>
-          {props.value}
-        </Typography>
-      </CardContent>
+      {props.onClick ? (
+        <CardActionArea onClick={props.onClick} sx={{ height: "100%" }}>
+          {inner}
+        </CardActionArea>
+      ) : (
+        inner
+      )}
     </Card>
+  );
+}
+
+/**
+ * Drill-down dialog for the "Errors (range)" tile. Renders the recent
+ * degraded_operation events already on the overview payload (component chip +
+ * raw message + relative time + session). If the list is empty (e.g. a slim
+ * payload), it lazily falls back to POST /trace/query — gateway-scoped
+ * server-side, behind the same READ auth. A "View all in Trace Explorer" link
+ * jumps to /trace pre-filtered to degraded_operation events.
+ */
+function ErrorsDialog(props: {
+  open: boolean;
+  onClose: () => void;
+  errors: ErrorSummary[];
+  timeRange: string;
+  onViewAll: () => void;
+}) {
+  const { open, onClose, errors, timeRange, onViewAll } = props;
+  const [fetched, setFetched] = useState<ErrorSummary[] | null>(null);
+  const [fetching, setFetching] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
+  const needsFallback = open && errors.length === 0;
+
+  useEffect(() => {
+    if (!needsFallback) return;
+    let cancelled = false;
+    setFetching(true);
+    setFetchError(null);
+    // The overview window is a simple lookback; mirror the trace page and pass a
+    // generous limit — the server caps and gateway-scopes the result.
+    const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
+    apiSend<any[]>("POST", "/trace/query", {
+      event_types: ["degraded_operation"],
+      from_timestamp: since,
+      limit: 20,
+    })
+      .then((rows) => {
+        if (cancelled) return;
+        const mapped: ErrorSummary[] = (Array.isArray(rows) ? rows : []).map(
+          (e) => ({
+            component: String((e?.payload?.component ?? "") || ""),
+            error: String((e?.payload?.error ?? "") || ""),
+            timestamp: e?.timestamp,
+            session_key: e?.session_key ?? null,
+          }),
+        );
+        mapped.sort(
+          (a, b) =>
+            new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+        );
+        setFetched(mapped);
+      })
+      .catch((e) => {
+        if (!cancelled) setFetchError((e as Error).message);
+      })
+      .finally(() => {
+        if (!cancelled) setFetching(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [needsFallback]);
+
+  const rows = errors.length > 0 ? errors : (fetched ?? []);
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ pr: 6 }}>
+        Errors (last {timeRange})
+        <IconButton
+          aria-label="Close"
+          onClick={onClose}
+          size="small"
+          sx={{ position: "absolute", right: 8, top: 8 }}
+        >
+          <CloseIcon fontSize="small" />
+        </IconButton>
+      </DialogTitle>
+      <DialogContent dividers>
+        {fetchError && (
+          <Alert severity="error" sx={{ mb: 1 }}>
+            {fetchError}
+          </Alert>
+        )}
+        {fetching && rows.length === 0 ? (
+          <Box sx={{ display: "flex", justifyContent: "center", p: 2 }}>
+            <CircularProgress size={24} />
+          </Box>
+        ) : rows.length === 0 ? (
+          <Typography variant="body2" color="text.secondary">
+            No error details available.
+          </Typography>
+        ) : (
+          <List dense disablePadding>
+            {rows.map((ev, i) => (
+              <ListItem
+                key={i}
+                alignItems="flex-start"
+                divider={i < rows.length - 1}
+                sx={{ px: 0 }}
+              >
+                <ListItemText
+                  primary={
+                    <Stack
+                      direction="row"
+                      spacing={1}
+                      alignItems="center"
+                      flexWrap="wrap"
+                    >
+                      {ev.component && (
+                        <Chip size="small" color="error" label={ev.component} />
+                      )}
+                      <Typography variant="body2" sx={{ wordBreak: "break-word" }}>
+                        {ev.error || "Unknown error"}
+                      </Typography>
+                    </Stack>
+                  }
+                  secondary={
+                    <>
+                      {relativeTime(ev.timestamp)}
+                      {ev.session_key ? ` · ${ev.session_key}` : ""}
+                    </>
+                  }
+                />
+              </ListItem>
+            ))}
+          </List>
+        )}
+        <Divider sx={{ my: 1.5 }} />
+        <Link
+          component="button"
+          type="button"
+          onClick={onViewAll}
+          sx={{ display: "inline-flex", alignItems: "center", gap: 0.5 }}
+        >
+          View all in Trace Explorer
+          <OpenInNewIcon sx={{ fontSize: 16 }} />
+        </Link>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -146,6 +322,7 @@ export const HomePage: React.FC = () => {
   const [data, setData] = useState<Overview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [errorsOpen, setErrorsOpen] = useState(false);
   const { push } = useNavigation();
   const { data: perms, isLoading: permsLoading } = usePermissions<{
     authorityLevel?: number;
@@ -249,8 +426,28 @@ export const HomePage: React.FC = () => {
               label={`Errors (${range})`}
               value={data.errors_in_period}
               tone={data.errors_in_period > 0 ? "error" : "ok"}
+              // Actionable only when there's something to drill into; the tile
+              // stays inert (no cursor/hover) at zero.
+              onClick={
+                data.errors_in_period > 0
+                  ? () => setErrorsOpen(true)
+                  : undefined
+              }
             />
           </Box>
+
+          <ErrorsDialog
+            open={errorsOpen}
+            onClose={() => setErrorsOpen(false)}
+            errors={data.recent_errors || []}
+            timeRange={data.time_range || range}
+            onViewAll={() => {
+              setErrorsOpen(false);
+              // Match trace/list.tsx's URL filter shape: `types` is a CSV of
+              // event_type values it splits on load.
+              push("/trace?types=degraded_operation");
+            }}
+          />
 
           <Stack
             direction="row"
@@ -260,18 +457,47 @@ export const HomePage: React.FC = () => {
           >
             <Typography variant="h6">System health</Typography>
             {data.system_health && (
-              <Chip
-                size="small"
-                label={humanizeEnum(data.system_health)}
-                color={systemHealthColor(data.system_health)}
-                variant={
-                  systemHealthColor(data.system_health) === "success"
-                    ? "outlined"
-                    : "filled"
+              <Tooltip
+                title={
+                  (data.health_reasons || []).length > 0
+                    ? (data.health_reasons || []).join("; ")
+                    : ""
                 }
-              />
+                arrow
+              >
+                <Chip
+                  size="small"
+                  label={humanizeEnum(data.system_health)}
+                  color={systemHealthColor(data.system_health)}
+                  variant={
+                    systemHealthColor(data.system_health) === "success"
+                      ? "outlined"
+                      : "filled"
+                  }
+                />
+              </Tooltip>
             )}
           </Stack>
+          {/* Spell out WHY the status isn't healthy — a caption list built from
+              the same signals the backend derived system_health from. Nothing
+              shown when healthy (health_reasons is empty). */}
+          {(data.health_reasons || []).length > 0 && (
+            <Stack spacing={0.25} sx={{ mb: 1 }}>
+              {(data.health_reasons || []).map((reason, i) => (
+                <Typography
+                  key={i}
+                  variant="caption"
+                  color="text.secondary"
+                >
+                  {/* Status prefix on the first line only, so a multi-reason
+                      list reads as "Degraded — reason / reason" not a repeated
+                      "Degraded —" wall. */}
+                  {i === 0 ? `${humanizeEnum(data.system_health)} — ` : ""}
+                  {reason}
+                </Typography>
+              ))}
+            </Stack>
+          )}
           <Box
             sx={{
               display: "grid",

@@ -102,10 +102,13 @@ infra:
     otel_logs_enabled: false            # env: EB_TRACE_OTEL_LOGS_ENABLED — bridge trace events to OTEL log exporter (requires otel_endpoint set)
 
   # ClickHouse — durable cross-session analytics for trace events.
-  # When enabled, trace events flow OTEL Collector → ClickHouse for querying via /trace API.
+  # When enabled, trace events flow OTEL Collector → ClickHouse. Those durable events
+  # become queryable via the /trace API only when enable_trace_ledger=false (which switches
+  # the /trace read source from the in-memory ledger to a ClickHouse read-back); with
+  # enable_trace_ledger=true the API still reads the in-memory ring buffer.
   # Required for Phase 9 consolidation Stage 7 (procedure pattern detection from history).
   clickhouse:
-    enabled: false                      # env: EB_CLICKHOUSE_ENABLED — (off) without this, /trace queries are limited to in-memory ring buffer only
+    enabled: false                      # env: EB_CLICKHOUSE_ENABLED — (off) trace events are not durably stored; /trace read-back has nothing to query and falls back to the in-memory ring buffer
     host: "localhost"                   # env: EB_CLICKHOUSE_HOST
     port: 8123                          # env: EB_CLICKHOUSE_PORT
     database: "otel"                    # env: EB_CLICKHOUSE_DATABASE
@@ -460,7 +463,11 @@ default_profile: "coding"               # env: EB_DEFAULT_PROFILE — which prof
                                         # options: coding, research, managerial, worker, personal_assistant
 tier: "full"                            # env: EB_TIER — business tier selecting which interfaces are wired
                                         # options: memory_only, context_only, full (default)
-enable_trace_ledger: true               # env: EB_ENABLE_TRACE_LEDGER — disable only for benchmarks; losing trace events removes all forensic visibility
+enable_trace_ledger: true               # env: EB_ENABLE_TRACE_LEDGER — selects the /trace READ source only (never gates writes/export).
+                                        # true (default) = /trace reads the in-memory recent ring buffer (dev/testing; lost on restart).
+                                        # false = /trace reads durable history back from ClickHouse (production; timelines/sessions survive restart;
+                                        # requires clickhouse.enabled — falls back to the in-memory ledger if ClickHouse is unavailable).
+                                        # The in-memory ledger ALWAYS keeps writing + exporting to OTEL regardless of this flag.
 # (the master guard switch lives at `guards.enabled` above — env: EB_GUARDS_ENABLED)
 max_concurrent_sessions: 100            # env: EB_MAX_CONCURRENT_SESSIONS — rejection threshold; raise carefully (Redis/Neo4j connection pressure scales with this)
 consolidation_min_retention_seconds: 172800   # env: EB_CONSOLIDATION_MIN_RETENTION_SECONDS — (48h) min age before consolidation pipeline can decay/archive a fact

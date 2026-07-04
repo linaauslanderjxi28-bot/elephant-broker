@@ -212,6 +212,37 @@ class TestPhase5Wiring:
             await RuntimeContainer.from_config(config, BusinessTier.FULL)
             mock_tracing.assert_called_once_with(config.infra, config.gateway.gateway_id)
 
+    async def test_from_config_retains_tracer_provider(self):
+        """AREA D: from_config must capture setup_tracing()'s return onto
+        container.tracer_provider so close() can flush the BatchSpanProcessor
+        buffer on SIGTERM. Discarding the return value silently drops spans
+        queued on the batch background thread at pod exit."""
+        config = ElephantBrokerConfig()
+        sentinel = MagicMock(name="tracer_provider")
+        with patch(
+            "elephantbroker.runtime.container.setup_tracing", return_value=sentinel
+        ):
+            container = await RuntimeContainer.from_config(config, BusinessTier.FULL)
+        assert container.tracer_provider is sentinel
+
+    async def test_close_shuts_down_tracer_provider(self):
+        """AREA D: close() must call tracer_provider.shutdown() so the
+        BatchSpanProcessor drains its buffer before the pod exits — mirrors the
+        otel_logger_provider shutdown path."""
+        config = ElephantBrokerConfig()
+        container = await RuntimeContainer.from_config(config, BusinessTier.FULL)
+        container.tracer_provider = MagicMock()
+        await container.close()
+        container.tracer_provider.shutdown.assert_called_once_with()
+
+    async def test_close_tolerates_missing_tracer_provider(self):
+        """AREA D: close() must not raise when tracer_provider is None (e.g.
+        setup_tracing failed) — graceful shutdown."""
+        config = ElephantBrokerConfig()
+        container = await RuntimeContainer.from_config(config, BusinessTier.FULL)
+        container.tracer_provider = None
+        await container.close()  # must not raise
+
     async def test_configure_cognee_failure_aborts_container(self):
         """G7 (TF-FN-005): configure_cognee() failures must propagate from RuntimeContainer.from_config.
 

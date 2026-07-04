@@ -216,6 +216,57 @@ export interface MemoryStatsResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime metrics (GET /dashboard/metrics)
+// ---------------------------------------------------------------------------
+// Gateway-scoped JSON projection of the in-process Prometheus registry, mirroring
+// the Pydantic schemas in elephantbroker/schemas/dashboard.py (MetricSeries /
+// MetricSnapshot / MetricsSnapshotResponse). The backend strips `gateway_id`
+// from every series label and emits fields with `exclude_none`, so counter/gauge
+// series carry only {labels, value} while histogram series carry only
+// {labels, sum, count, buckets}. A metric with no series for the caller's gateway
+// is omitted from the array entirely. Values are cumulative since process start
+// (they reset on restart) — NOT the Neo4j current-state totals shown elsewhere.
+
+export type MetricType = "counter" | "gauge" | "histogram";
+
+/** One labelled series within a metric family (gateway_id already stripped). */
+export interface MetricSeries {
+  /** Secondary labels only (e.g. memory_class, profile_name); gateway_id removed. */
+  labels: Record<string, string>;
+  /** Counters / gauges — the current sample value. */
+  value?: number;
+  /** Histograms — observation sum (paired with `count` for avg = sum/count). */
+  sum?: number;
+  /** Histograms — observation count. */
+  count?: number;
+  /** Histograms — cumulative counts keyed by upper bound (`le`), e.g. "+Inf". */
+  buckets?: Record<string, number>;
+}
+
+/** One Prometheus metric family, aggregated to the caller's gateway. */
+export interface MetricSnapshot {
+  /** Exposed series name, e.g. "eb_facts_stored_total". */
+  name: string;
+  type: MetricType;
+  help?: string;
+  series: MetricSeries[];
+}
+
+/**
+ * `GET /dashboard/metrics` response. When `prometheus_client` is absent the
+ * backend degrades to `{ available: false, note }` (HTTP 200, no `generated_at`
+ * and no `metrics`), so the FE treats missing/empty `metrics` as "none".
+ */
+export interface MetricsSnapshotResponse {
+  available: boolean;
+  /** ISO-8601 UTC snapshot time; absent on the degraded response. */
+  generated_at?: string;
+  /** Truthful note (e.g. why metrics are disabled). */
+  note?: string;
+  metrics?: MetricSnapshot[];
+}
+
+// ---------------------------------------------------------------------------
 // Knowledge graph (GET /dashboard/memory/graph)
 // ---------------------------------------------------------------------------
 

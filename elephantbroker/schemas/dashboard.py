@@ -37,6 +37,17 @@ class RecentEvent(BaseModel):
     session_key: str | None = None
 
 
+class ErrorSummary(BaseModel):
+    """A single ``degraded_operation`` event, projected for the overview
+    error drill-down. Lets the FE render the failing component + message
+    without a second ``POST /trace/query`` round-trip."""
+
+    component: str = ""  # payload.component, e.g. "reranker", "vector"
+    error: str = ""  # payload.error, the raw failure message
+    timestamp: datetime
+    session_key: str | None = None
+
+
 class DashboardOverview(BaseModel):
     """Aggregate landing-page view (counts + health + recent activity)."""
 
@@ -66,6 +77,14 @@ class DashboardOverview(BaseModel):
     # System health
     system_health: str = "healthy"  # "healthy" | "degraded" | "unhealthy"
     components: dict[str, ComponentHealth] = Field(default_factory=dict)
+    # Human-readable reasons behind ``system_health`` — built from the SAME
+    # signals the status is computed from (error count + the degraded
+    # component/message, guard triggers, and any probe in "error"). Lets the
+    # UI explain *why* the status is what it is. Empty when healthy.
+    health_reasons: list[str] = Field(default_factory=list)
+    # Last N (cap 20) degraded_operation events in the window, so the FE
+    # error drill-down renders without a second round-trip.
+    recent_errors: list[ErrorSummary] = Field(default_factory=list)
 
     # Recent activity (last 10)
     recent_events: list[RecentEvent] = Field(default_factory=list)
@@ -77,6 +96,53 @@ class GatewayInfo(BaseModel):
     gateway_id: str
     org_id: str | None = None
     is_current: bool = False
+
+
+# ---------------------------------------------------------------------------
+# System metrics — Prometheus registry snapshot (Stats page)
+# ---------------------------------------------------------------------------
+
+
+class MetricSeries(BaseModel):
+    """A single labelled time-series within a metric family.
+
+    ``labels`` carries the secondary labels only — ``gateway_id`` is stripped
+    (the caller's tenant is fixed by the request, never surfaced), and for
+    histograms the per-bucket ``le`` label is folded into ``buckets``. Which of
+    the value fields is populated depends on the parent ``MetricSnapshot.type``:
+    counters/gauges set ``value``; histograms set ``sum`` + ``count`` (so the FE
+    can render avg = sum/count) plus cumulative ``buckets`` keyed by upper bound.
+    """
+
+    labels: dict[str, str] = Field(default_factory=dict)
+    value: float | None = None  # counters / gauges
+    sum: float | None = None  # histograms
+    count: float | None = None  # histograms
+    buckets: dict[str, float] | None = None  # histogram le -> cumulative count
+
+
+class MetricSnapshot(BaseModel):
+    """One Prometheus metric family, aggregated to the caller's gateway."""
+
+    name: str  # exposed series name, e.g. "eb_facts_stored_total"
+    type: str  # "counter" | "gauge" | "histogram"
+    help: str = ""
+    series: list[MetricSeries] = Field(default_factory=list)
+
+
+class MetricsSnapshotResponse(BaseModel):
+    """Gateway-scoped JSON projection of the in-process Prometheus registry.
+
+    Consumed by the dashboard Stats page. When ``prometheus_client`` is absent
+    the runtime declares no metrics — ``available`` is ``False`` and ``metrics``
+    is empty (HTTP 200, matching the graceful-degradation style of the other
+    dashboard routes). Never exposes another tenant's series.
+    """
+
+    available: bool = True
+    generated_at: datetime | None = None
+    note: str | None = None
+    metrics: list[MetricSnapshot] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

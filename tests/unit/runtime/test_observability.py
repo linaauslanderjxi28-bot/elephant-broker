@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from elephantbroker.runtime.observability import (
@@ -79,7 +79,7 @@ class TestOTELInstrumentation:
 
     def test_setup_tracing_with_endpoint_attaches_exporter(self):
         """G1 (#315): when `otel_endpoint` is set, `setup_tracing` constructs an
-        OTLPSpanExporter with that endpoint and attaches it via SimpleSpanProcessor.
+        OTLPSpanExporter with that endpoint and attaches it via a span processor.
 
         We patch the exporter class at its source module so we don't need the real
         package installed; asserting the class was called with the right endpoint
@@ -91,6 +91,27 @@ class TestOTELInstrumentation:
             provider = setup_tracing(InfraConfig(otel_endpoint="http://localhost:4317"))
         assert isinstance(provider, TracerProvider)
         mock_exporter.assert_called_once_with(endpoint="http://localhost:4317")
+
+    def test_setup_tracing_uses_batch_span_processor(self):
+        """AREA D: span export runs on a background thread — `setup_tracing`
+        attaches the OTLPSpanExporter via a BatchSpanProcessor (non-blocking),
+        NOT the request-blocking SimpleSpanProcessor.
+
+        Patch the exporter so no real endpoint is needed; then walk the provider's
+        active span processor to assert a BatchSpanProcessor is attached.
+        """
+        with patch(
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter"
+        ):
+            provider = setup_tracing(InfraConfig(otel_endpoint="http://localhost:4317"))
+        try:
+            processors = getattr(
+                provider._active_span_processor, "_span_processors", ()
+            )
+            assert any(isinstance(p, BatchSpanProcessor) for p in processors)
+            assert not any(isinstance(p, SimpleSpanProcessor) for p in processors)
+        finally:
+            provider.shutdown()
 
     def test_setup_tracing_resource_has_gateway_id(self):
         """G2 (#580): the TracerProvider's Resource carries gateway.id + service.name

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import StatusCode, Tracer
 
 from elephantbroker.schemas.config import InfraConfig
@@ -50,7 +50,16 @@ def setup_tracing(config: InfraConfig, gateway_id: str = "") -> TracerProvider:
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
             exporter = OTLPSpanExporter(endpoint=config.otel_endpoint)
-            provider.add_span_processor(SimpleSpanProcessor(exporter))
+            # BatchSpanProcessor batches + exports spans on a background thread,
+            # so span export never blocks the request path (mirrors the log
+            # path's BatchLogRecordProcessor at ~:95). The provider is retained
+            # in the module global ``_provider`` and returned to the caller;
+            # ``RuntimeContainer.from_config`` stashes it on ``tracer_provider``
+            # and ``close()`` calls ``provider.shutdown()`` on SIGTERM to drain
+            # this batch buffer before the pod exits (AREA D — mirrors the
+            # otel_logger_provider shutdown at #1181). Without that shutdown the
+            # buffered spans would be dropped at exit.
+            provider.add_span_processor(BatchSpanProcessor(exporter))
         except ImportError:
             logging.getLogger("elephantbroker.observability").warning(
                 "OTEL endpoint configured (%s) but opentelemetry-exporter-otlp-proto-grpc "

@@ -1,6 +1,11 @@
 """OtelTraceQueryClient — queries ClickHouse for cross-session trace analytics.
 
-Used by Stage 7 to detect repeated tool call sequences across sessions.
+Used by Stage 7 to detect repeated tool call sequences across sessions, and by
+the ``/trace`` routes to read back durable TraceEvent history when
+``EB_ENABLE_TRACE_LEDGER`` is disabled (see ``query_events`` / ``list_sessions`` /
+``session_timeline`` / ``session_summary`` / ``get_event`` below). Reconstruction
+parses each row's ``Body`` (written by ``TraceLedger._emit_otel_log`` as
+``event.model_dump_json()``) back into a ``TraceEvent``.
 Graceful degradation: returns empty results when ClickHouse not configured.
 
 F6 (TODO-3-611): when ClickHouse is unavailable (missing dependency, failed
@@ -14,10 +19,16 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from elephantbroker.schemas.trace import TraceEvent, TraceEventType
+from elephantbroker.schemas.trace import (
+    SessionListItem,
+    TraceEvent,
+    TraceEventType,
+    TraceQuery,
+)
 
 if TYPE_CHECKING:
     from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
@@ -271,6 +282,240 @@ class OtelTraceQueryClient:
                 except Exception:
                     pass
             return None
+
+    # ------------------------------------------------------------------
+    # /trace durable read-back (EB_ENABLE_TRACE_LEDGER=false read source)
+    # ------------------------------------------------------------------
+    #
+    # These mirror the ``get_activity_stats`` query style: parameterized,
+    # gateway-scoped (the ``gateway_id`` filter is MANDATORY on every query so a
+    # tenant never reads another tenant's events), and guarded by ``self._client``
+    # for graceful degradation (return empty / None, never raise). Each row's
+    # ``Body`` is the ``event.model_dump_json()`` the ledger wrote in
+    # ``_emit_otel_log``; reconstruction parses it straight back into a
+    # ``TraceEvent``. Ordered newest-first (``Timestamp DESC``) to match the
+    # in-memory ledger's ``query_trace`` pagination ordering.
+
+    def _rows_to_events(self, rows) -> list[TraceEvent]:
+        """Parse ``Body`` JSON from each row back into a ``TraceEvent``.
+
+        Rows whose Body is empty or unparseable are skipped (defensive: a
+        durable store may hold non-EB log records or a truncated Body) so one
+        bad row never fails the whole read.
+        """
+        events: list[TraceEvent] = []
+        for row in rows:
+            body = row[0]
+            if not body:
+                continue
+            try:
+                events.append(TraceEvent.model_validate_json(body))
+            except Exception:
+                logger.debug("skipping unparseable otel_logs Body row", exc_info=True)
+                continue
+        return events
+
+    @staticmethod
+    def _coerce_utc(ts):
+        """ClickHouse returns naive UTC datetimes — tag them so downstream
+        Pydantic/serialization stays tz-aware (mirrors ``get_activity_stats``)."""
+        if isinstance(ts, datetime) and ts.tzinfo is None:
+            return ts.replace(tzinfo=UTC)
+        return ts
+
+    async def _emit_query_degraded(self, operation: str, exc: Exception, gateway_id: str) -> None:
+        """Degraded-op signal for a read-back query failure (metric + trace event).
+
+        Same shape as the inline emit in ``get_tool_sequences`` /
+        ``get_activity_stats`` so operators see *which* read-back path degraded.
+        """
+        logger.warning("ClickHouse %s failed", operation, exc_info=True)
+        if self._metrics is not None:
+            try:
+                self._metrics.inc_degraded_op(component=_COMPONENT, operation=operation)
+            except Exception:
+                pass
+        if self._trace is not None:
+            try:
+                await self._trace.append_event(TraceEvent(
+                    event_type=TraceEventType.DEGRADED_OPERATION,
+                    payload={
+                        "component": _COMPONENT,
+                        "operation": operation,
+                        "reason": f"query_failed: {str(exc)[:120]}",
+                        "gateway_id": gateway_id,
+                    },
+                ))
+            except Exception:
+                pass
+
+    async def query_events(self, query: TraceQuery) -> list[TraceEvent]:
+        """Reconstruct full TraceEvents from ``otel_logs`` (newest-first).
+
+        Filters by ``gateway_id`` (MANDATORY) plus any of session_id /
+        session_key / event_types / from_timestamp / to_timestamp present on the
+        query, honoring ``limit``/``offset``. ``actor_ids`` are not indexed in
+        LogAttributes, so when present they are filtered in Python after
+        reconstruction (rare on /trace; the dashboard filters by
+        session/event_type/gateway). Returns ``[]`` when the durable store is
+        unavailable; never raises.
+        """
+        gw = query.gateway_id or ""
+        if not self._client:
+            await self._emit_init_failure_event(gw)
+            return []
+
+        conditions = ["LogAttributes['gateway_id'] = %(gw)s"]
+        params: dict = {"gw": gw, "limit": int(query.limit), "offset": int(query.offset)}
+        if query.session_id is not None:
+            conditions.append("LogAttributes['session_id'] = %(session_id)s")
+            params["session_id"] = str(query.session_id)
+        if query.session_key is not None:
+            conditions.append("LogAttributes['session_key'] = %(session_key)s")
+            params["session_key"] = query.session_key
+        if query.event_types:
+            conditions.append("LogAttributes['event_type'] IN %(event_types)s")
+            params["event_types"] = [et.value for et in query.event_types]
+        if query.from_timestamp is not None:
+            conditions.append("Timestamp >= %(from_ts)s")
+            params["from_ts"] = query.from_timestamp.isoformat()
+        if query.to_timestamp is not None:
+            conditions.append("Timestamp <= %(to_ts)s")
+            params["to_ts"] = query.to_timestamp.isoformat()
+        where = " AND ".join(conditions)
+
+        try:
+            result = self._client.query(
+                f"""
+                SELECT Body
+                FROM {self._table}
+                WHERE {where}
+                ORDER BY Timestamp DESC
+                LIMIT %(limit)s OFFSET %(offset)s
+                """,
+                parameters=params,
+            )
+            events = self._rows_to_events(result.result_rows)
+            if query.actor_ids:
+                wanted = set(query.actor_ids)
+                events = [e for e in events if wanted.intersection(e.actor_ids)]
+            return events
+        except Exception as exc:
+            await self._emit_query_degraded("query_events", exc, gw)
+            return []
+
+    async def get_event(self, gateway_id: str, event_id: uuid.UUID) -> TraceEvent | None:
+        """Fetch a single reconstructed event by id (gateway-scoped).
+
+        Backs ``GET /trace/{event_id}``. The gateway filter is in the SQL WHERE,
+        so a cross-gateway id resolves to ``None`` (→ 404 at the route).
+        """
+        if not self._client:
+            await self._emit_init_failure_event(gateway_id)
+            return None
+        try:
+            result = self._client.query(
+                f"""
+                SELECT Body
+                FROM {self._table}
+                WHERE LogAttributes['gateway_id'] = %(gw)s
+                  AND JSONExtractString(Body, 'id') = %(id)s
+                ORDER BY Timestamp DESC
+                LIMIT 1
+                """,
+                parameters={"gw": gateway_id, "id": str(event_id)},
+            )
+            events = self._rows_to_events(result.result_rows)
+            return events[0] if events else None
+        except Exception as exc:
+            await self._emit_query_degraded("get_event_query", exc, gateway_id)
+            return None
+
+    async def session_timeline(
+        self,
+        gateway_id: str,
+        session_id: uuid.UUID,
+        limit: int = 10000,
+    ) -> list[TraceEvent]:
+        """All events for a session (gateway-scoped) — the route groups them
+        into turns via ``group_events_by_turn``."""
+        return await self.query_events(TraceQuery(
+            session_id=session_id, gateway_id=gateway_id, limit=limit,
+        ))
+
+    async def session_summary(
+        self,
+        gateway_id: str,
+        session_id: uuid.UUID,
+        limit: int = 10000,
+    ) -> list[TraceEvent]:
+        """All events for a session (gateway-scoped) — the route aggregates them
+        into a ``SessionSummary``."""
+        return await self.query_events(TraceQuery(
+            session_id=session_id, gateway_id=gateway_id, limit=limit,
+        ))
+
+    async def list_sessions(
+        self,
+        gateway_id: str,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[SessionListItem]:
+        """Group durable events into per-session entries, most-recent first.
+
+        Groups by ``session_id`` (from LogAttributes) with first/last event
+        timestamps and per-session counts — the durable analogue of the ledger's
+        ``list_sessions`` scan. ``since`` optionally bounds the window. Returns
+        ``[]`` when the durable store is unavailable; never raises.
+        """
+        if not self._client:
+            await self._emit_init_failure_event(gateway_id)
+            return []
+
+        conditions = [
+            "LogAttributes['gateway_id'] = %(gw)s",
+            "LogAttributes['session_id'] != ''",
+        ]
+        params: dict = {"gw": gateway_id, "limit": int(limit)}
+        if since is not None:
+            conditions.append("Timestamp >= %(since)s")
+            params["since"] = since.isoformat()
+        where = " AND ".join(conditions)
+
+        try:
+            result = self._client.query(
+                f"""
+                SELECT
+                    LogAttributes['session_id'] AS session_id,
+                    max(LogAttributes['session_key']) AS session_key,
+                    min(Timestamp) AS first_at,
+                    max(Timestamp) AS last_at,
+                    count() AS event_count
+                FROM {self._table}
+                WHERE {where}
+                GROUP BY session_id
+                ORDER BY last_at DESC
+                LIMIT %(limit)s
+                """,
+                parameters=params,
+            )
+            items: list[SessionListItem] = []
+            for row in result.result_rows:
+                try:
+                    sid = uuid.UUID(str(row[0]))
+                except (ValueError, TypeError):
+                    continue
+                items.append(SessionListItem(
+                    session_id=sid,
+                    session_key=row[1] or "",
+                    first_event_at=self._coerce_utc(row[2]),
+                    last_event_at=self._coerce_utc(row[3]),
+                    event_count=int(row[4] or 0),
+                ))
+            return items
+        except Exception as exc:
+            await self._emit_query_degraded("list_sessions_query", exc, gateway_id)
+            return []
 
     def close(self) -> None:
         """Close ClickHouse connection."""

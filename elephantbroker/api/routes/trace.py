@@ -2,17 +2,63 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import time
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from elephantbroker.api.deps import get_container, get_trace_ledger
 from elephantbroker.api.routes.trace_event_descriptions import TRACE_EVENT_DESCRIPTIONS
-from elephantbroker.schemas.trace import SessionSummary, TraceEventType, TraceQuery
+from elephantbroker.schemas.trace import (
+    SessionListResponse,
+    SessionSummary,
+    TraceEventType,
+    TraceQuery,
+)
+
+logger = logging.getLogger("elephantbroker.api.routes.trace")
 
 router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# EB_ENABLE_TRACE_LEDGER — /trace READ-SOURCE selector
+# ---------------------------------------------------------------------------
+#
+# The flag ONLY chooses where these routes READ from; it NEVER gates the
+# ledger's write/export path (append_event -> _emit_otel_log keeps feeding
+# ClickHouse regardless). Default (flag True / unset) → the in-memory
+# TraceLedger (historical behaviour). Flag False → durable ClickHouse read-back
+# via OtelTraceQueryClient — but only when that client is ``available``;
+# otherwise we fall back to the ledger with a one-line warning so a mis-set flag
+# can never break the endpoint (graceful degradation). Every response carries an
+# ``X-EB-Trace-Source`` header so the source is honest without changing any
+# existing response body shape (several routes return bare lists).
+_TRACE_SOURCE_HEADER = "X-EB-Trace-Source"
+
+
+def _resolve_trace_source(request: Request):
+    """Return ``(use_clickhouse, trace_query_client)`` for the /trace read path.
+
+    See the module note above. When the flag is False but ClickHouse is
+    unavailable, logs a warning and returns ``(False, None)`` so the caller uses
+    the in-memory ledger.
+    """
+    container = get_container(request)
+    cfg = getattr(container, "config", None)
+    enabled = getattr(cfg, "enable_trace_ledger", True) if cfg is not None else True
+    if enabled:
+        return False, None
+    qc = getattr(container, "trace_query_client", None)
+    if qc is not None and getattr(qc, "available", False):
+        return True, qc
+    logger.warning(
+        "EB_ENABLE_TRACE_LEDGER=false but the ClickHouse trace query client is "
+        "unavailable — falling back to the in-memory trace ledger for /trace reads"
+    )
+    return False, None
 
 # ---------------------------------------------------------------------------
 # PT-1: per-gateway sliding-window rate limiting
@@ -121,17 +167,27 @@ async def _enforce_rate_limit(request: Request, endpoint: str) -> None:
 
 
 @router.get("/")
-async def list_traces(request: Request, session_id: uuid.UUID | None = None, limit: int = 100):
+async def list_traces(
+    request: Request,
+    response: Response,
+    session_id: uuid.UUID | None = None,
+    limit: int = 100,
+):
     await _enforce_rate_limit(request, "list")
-    ledger = get_trace_ledger(request)
     gw_id = getattr(request.state, "gateway_id", None)
     query = TraceQuery(session_id=session_id, limit=limit, gateway_id=gw_id)
-    events = await ledger.query_trace(query)
+    use_ch, qc = _resolve_trace_source(request)
+    if use_ch:
+        events = await qc.query_events(query)
+        response.headers[_TRACE_SOURCE_HEADER] = "clickhouse"
+    else:
+        events = await get_trace_ledger(request).query_trace(query)
+        response.headers[_TRACE_SOURCE_HEADER] = "ledger"
     return [e.model_dump(mode="json") for e in events]
 
 
 @router.post("/query")
-async def query_traces(query: TraceQuery, request: Request):
+async def query_traces(query: TraceQuery, request: Request, response: Response):
     # Enforce gateway isolation: the middleware-provided gateway_id always wins
     # over any caller-supplied value in the request body. `is not None` is
     # required here (not truthiness): post-Bucket-A the default gateway_id is
@@ -139,23 +195,35 @@ async def query_traces(query: TraceQuery, request: Request):
     # override, allowing a caller to read another tenant's trace events by
     # posting {"gateway_id": "victim-tenant"}. GatewayIdentityMiddleware always
     # sets request.state.gateway_id to a string (possibly ""), so this check
-    # only short-circuits when the middleware isn't wired at all.
+    # only short-circuits when the middleware isn't wired at all. Both read
+    # sources honor this override: the ledger filters on query.gateway_id, and
+    # the ClickHouse read-back stamps it as the MANDATORY %(gw)s filter.
     await _enforce_rate_limit(request, "query")
     gw_id = getattr(request.state, "gateway_id", None)
     if gw_id is not None:
         query.gateway_id = gw_id
-    ledger = get_trace_ledger(request)
-    events = await ledger.query_trace(query)
+    use_ch, qc = _resolve_trace_source(request)
+    if use_ch:
+        events = await qc.query_events(query)
+        response.headers[_TRACE_SOURCE_HEADER] = "clickhouse"
+    else:
+        events = await get_trace_ledger(request).query_trace(query)
+        response.headers[_TRACE_SOURCE_HEADER] = "ledger"
     return [e.model_dump(mode="json") for e in events]
 
 
 @router.get("/session/{session_id}/timeline")
-async def session_timeline(session_id: uuid.UUID, request: Request):
+async def session_timeline(session_id: uuid.UUID, request: Request, response: Response):
     await _enforce_rate_limit(request, "timeline")
-    ledger = get_trace_ledger(request)
     gw_id = getattr(request.state, "gateway_id", None)
-    query = TraceQuery(session_id=session_id, limit=10000, gateway_id=gw_id)
-    events = await ledger.query_trace(query)
+    use_ch, qc = _resolve_trace_source(request)
+    if use_ch:
+        events = await qc.session_timeline(gateway_id=gw_id, session_id=session_id)
+        response.headers[_TRACE_SOURCE_HEADER] = "clickhouse"
+    else:
+        query = TraceQuery(session_id=session_id, limit=10000, gateway_id=gw_id)
+        events = await get_trace_ledger(request).query_trace(query)
+        response.headers[_TRACE_SOURCE_HEADER] = "ledger"
     groups = group_events_by_turn(events)
     return groups
 
@@ -164,17 +232,26 @@ async def session_timeline(session_id: uuid.UUID, request: Request):
 async def session_summary(
     session_id: uuid.UUID,
     request: Request,
+    response: Response,
     no_cache: bool = Query(default=False, description="Bypass the Redis TTL cache"),
 ):
     await _enforce_rate_limit(request, "summary")
 
+    use_ch, qc = _resolve_trace_source(request)
+    source = "clickhouse" if use_ch else "ledger"
+    response.headers[_TRACE_SOURCE_HEADER] = source
+
     # PT-2: serve from the gateway-scoped Redis TTL cache unless bypassed. The
     # cache key uses RedisKeyBuilder's gateway prefix so tenants never collide.
+    # The read source is part of the key so a ledger-cached summary is never
+    # served for a ClickHouse read (and vice-versa) if the flag differs across
+    # restarts sharing one Redis.
     container = get_container(request)
     redis = getattr(container, "redis", None)
     keys = getattr(container, "redis_keys", None)
     cache_key = (
-        f"{keys.prefix}:cache:session_summary:{session_id}" if keys is not None else None
+        f"{keys.prefix}:cache:session_summary:{source}:{session_id}"
+        if keys is not None else None
     )
 
     if not no_cache and redis is not None and cache_key:
@@ -185,10 +262,12 @@ async def session_summary(
         except Exception:
             pass  # fall through to a fresh scan on any cache-read failure
 
-    ledger = get_trace_ledger(request)
     gw_id = getattr(request.state, "gateway_id", None)
-    query = TraceQuery(session_id=session_id, limit=10000, gateway_id=gw_id)
-    events = await ledger.query_trace(query)
+    if use_ch:
+        events = await qc.session_summary(gateway_id=gw_id, session_id=session_id)
+    else:
+        query = TraceQuery(session_id=session_id, limit=10000, gateway_id=gw_id)
+        events = await get_trace_ledger(request).query_trace(query)
 
     event_counts: dict[str, int] = {}
     for e in events:
@@ -239,14 +318,30 @@ async def session_summary(
 @router.get("/sessions")
 async def list_sessions(
     request: Request,
+    response: Response,
     limit: int = Query(default=100, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
     """List all sessions for the current gateway, sorted by most recent activity."""
     await _enforce_rate_limit(request, "sessions")
-    ledger = get_trace_ledger(request)
     gateway_id = getattr(request.state, "gateway_id", None)
-    result = await ledger.list_sessions(gateway_id=gateway_id, limit=limit, offset=offset)
+    use_ch, qc = _resolve_trace_source(request)
+    if use_ch:
+        # The ClickHouse read-back returns a flat list ordered most-recent-first;
+        # fetch offset+limit rows and slice to page. total_count is the count of
+        # fetched rows (capped at offset+limit) — sufficient for the admin
+        # dashboard; exact global counts would need a second aggregate query.
+        items = await qc.list_sessions(gateway_id=gateway_id, limit=offset + limit)
+        result = SessionListResponse(
+            sessions=items[offset: offset + limit],
+            total_count=len(items),
+        )
+        response.headers[_TRACE_SOURCE_HEADER] = "clickhouse"
+    else:
+        result = await get_trace_ledger(request).list_sessions(
+            gateway_id=gateway_id, limit=limit, offset=offset
+        )
+        response.headers[_TRACE_SOURCE_HEADER] = "ledger"
     return result.model_dump(mode="json")
 
 
@@ -265,11 +360,23 @@ async def list_event_types(request: Request):
 
 
 @router.get("/{event_id}")
-async def get_trace_event(event_id: uuid.UUID, request: Request):
+async def get_trace_event(event_id: uuid.UUID, request: Request, response: Response):
     await _enforce_rate_limit(request, "event")
-    ledger = get_trace_ledger(request)
     gw_id = getattr(request.state, "gateway_id", None)
+    use_ch, qc = _resolve_trace_source(request)
+    if use_ch:
+        # The ClickHouse read-back scopes the fetch to gw_id in its SQL WHERE, so
+        # a cross-gateway id resolves to None → 404 (same isolation the ledger
+        # path enforces below in Python).
+        event = await qc.get_event(gateway_id=gw_id, event_id=event_id)
+        response.headers[_TRACE_SOURCE_HEADER] = "clickhouse"
+        if event is None:
+            raise HTTPException(status_code=404, detail="Event not found")
+        return event.model_dump(mode="json")
+
+    ledger = get_trace_ledger(request)
     events = await ledger.get_evidence_chain(event_id)
+    response.headers[_TRACE_SOURCE_HEADER] = "ledger"
     # `is not None` is required here — see POST /query above. Under the
     # post-Bucket-A "" middleware default, a truthiness check would bypass
     # this filter entirely and leak evidence chains across gateways.

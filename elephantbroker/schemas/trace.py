@@ -92,6 +92,13 @@ class TraceEvent(BaseModel):
     agent_id: str | None = None
     agent_key: str | None = None
     session_key: str | None = None
+    # OTEL correlation stamp: the active span's trace_id (032x hex) / span_id
+    # (016x hex) captured at append time, so durable log rows (ClickHouse) and
+    # spans (Jaeger) carry the same ids and can be joined later. Both stay None
+    # when no valid span context is active at append time (additive, backward-
+    # compatible).
+    trace_id: str | None = None
+    span_id: str | None = None
 
 
 class TraceQuery(BaseModel):

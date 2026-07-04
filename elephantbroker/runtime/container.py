@@ -205,6 +205,12 @@ class RuntimeContainer:
         # provider so close() can call provider.shutdown() and flush the
         # BatchLogRecordProcessor buffer before SIGTERM drops the pod.
         self.otel_logger_provider = None
+        # OTEL TracerProvider — held for shutdown (AREA D). `setup_tracing()`
+        # returns the provider; container retains it so close() can call
+        # provider.shutdown() and drain the BatchSpanProcessor buffer before
+        # SIGTERM drops the pod. Mirrors the otel_logger_provider path — without
+        # it, spans buffered on the batch background thread are dropped at exit.
+        self.tracer_provider = None
         # Durable trace-analytics query client (ClickHouse via clickhouse_connect).
         # Shared by the Stage-7 consolidation analytics AND the dashboard
         # stats/activity endpoints (memory-stats-1) — the durable, cross-session
@@ -385,7 +391,11 @@ class RuntimeContainer:
             c.ingest_buffer = None
 
         # --- OTEL tracing ---
-        setup_tracing(config.infra, gw_id)
+        # AREA D: retain the TracerProvider so close() can shut it down and
+        # flush the BatchSpanProcessor buffer on SIGTERM. Without capturing it,
+        # spans queued on the batch background thread are silently dropped at
+        # pod exit — a data-loss regression versus the prior SimpleSpanProcessor.
+        c.tracer_provider = setup_tracing(config.infra, gw_id)
 
         # --- Foundational (no adapter deps) ---
         # TraceLedger with optional OTEL log bridge (Phase 9)
@@ -1017,3 +1027,14 @@ class RuntimeContainer:
                 self.otel_logger_provider.shutdown()
             except Exception as exc:
                 logger.debug("Close failed for otel_logger_provider: %s", exc)
+        # OTEL TracerProvider shutdown (AREA D). Drains the BatchSpanProcessor
+        # buffer so spans queued on the batch background thread in the last ~5s
+        # of the pod's lifetime actually reach the collector instead of being
+        # dropped when the process exits. Mirrors the otel_logger_provider path
+        # above — provider.shutdown() force-flushes then stops the exporter.
+        if self.tracer_provider:
+            logger.info("Closing adapter: %s", "tracer_provider")
+            try:
+                self.tracer_provider.shutdown()
+            except Exception as exc:
+                logger.debug("Close failed for tracer_provider: %s", exc)

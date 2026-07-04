@@ -575,6 +575,21 @@ prompt instructions, and the complete `openclaw.json` config example.
 | 6333, 6334 | Qdrant | Internal only |
 | 6379 | Redis | Internal only |
 
+### Observability stack (optional)
+
+Wired only when the OTEL/ClickHouse/Jaeger/Grafana profile is enabled.
+
+| Port | Service | Expose to |
+|------|---------|-----------|
+| 4317 | OTEL Collector (OTLP gRPC) | Runtime |
+| 8123 | ClickHouse (HTTP) | Runtime, Collector |
+| 9000 | ClickHouse (native) | Collector |
+| 16686 | Jaeger UI | Developers |
+| 14250 | Jaeger (collector) | OTEL Collector |
+| 13000 | Grafana UI | Developers |
+
+> **Note:** The Jaeger UI (16686) and Grafana UI (13000) ship with **no authentication** and are intended for development use.
+
 ## Updating the Runtime
 
 ### DB VM (runtime + HITL)

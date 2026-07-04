@@ -115,6 +115,61 @@ class TestDashboardOverview:
         assert r.status_code == 200
         assert r.json()["time_range"] == "24h"
 
+    async def test_overview_healthy_has_empty_health_reasons(self, admin_client):
+        r = await admin_client.get("/dashboard/overview")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["system_health"] == "healthy"
+        assert body["health_reasons"] == []
+        assert body["recent_errors"] == []
+
+    async def test_overview_surfaces_degraded_reasons_and_errors(
+        self, admin_client, container
+    ):
+        """A reranker degraded_operation + a guard trigger must degrade health,
+        name the failing component in health_reasons, and carry the raw error in
+        the recent_errors drill-down — all from the single ledger scan."""
+        from elephantbroker.schemas.trace import TraceEvent, TraceEventType
+
+        await container.trace_ledger.append_event(
+            TraceEvent(
+                event_type=TraceEventType.DEGRADED_OPERATION,
+                gateway_id="",
+                session_key="agent:main:main",
+                payload={
+                    "component": "reranker",
+                    "error": "All connection attempts failed",
+                },
+            )
+        )
+        await container.trace_ledger.append_event(
+            TraceEvent(
+                event_type=TraceEventType.GUARD_TRIGGERED,
+                gateway_id="",
+                payload={"action": "delete", "outcome": "blocked"},
+            )
+        )
+
+        r = await admin_client.get("/dashboard/overview")
+        assert r.status_code == 200
+        body = r.json()
+
+        # No live probe is in "error" here, so degraded (not unhealthy).
+        assert body["system_health"] == "degraded"
+        assert body["errors_in_period"] == 1
+        assert body["guard_triggers_in_period"] == 1
+
+        reasons = body["health_reasons"]
+        assert "1 error in the last 24h" in reasons
+        assert "reranker: All connection attempts failed" in reasons
+        assert "1 guard trigger in the last 24h" in reasons
+
+        errs = body["recent_errors"]
+        assert len(errs) == 1
+        assert errs[0]["component"] == "reranker"
+        assert errs[0]["error"] == "All connection attempts failed"
+        assert errs[0]["session_key"] == "agent:main:main"
+
     async def test_gateways_shape(self, admin_client):
         r = await admin_client.get("/dashboard/gateways")
         assert r.status_code == 200
@@ -903,5 +958,168 @@ class TestSavedViews:
         r = await admin_client.delete("/dashboard/saved-views/v1")
         assert r.status_code == 200
         assert r.json()["status"] == "deleted"
+
+
+# ---------------------------------------------------------------------------
+# System metrics — gateway-scoped Prometheus registry snapshot
+# ---------------------------------------------------------------------------
+# The middleware default gateway is "" in the test env (no config), so a
+# falsy default lets the X-EB-Gateway-ID header pass through unrejected and be
+# stamped onto request.state — letting these tests act as a specific tenant.
+GW_A = "gw-alpha"
+GW_B = "gw-beta"
+
+
+def _fake_metrics_registry():
+    """A fresh CollectorRegistry with real EB-shaped metrics across two gateways.
+
+    ``GW_A`` is the caller; ``GW_B`` is a second tenant whose series must never
+    leak. ``eb_gdpr_deletes_total`` is off the headline allow-list — it verifies
+    default filtering + the ``?names=`` override.
+    """
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+
+    reg = CollectorRegistry()
+    facts = Counter(
+        "eb_facts_stored_total", "Facts stored",
+        ["gateway_id", "memory_class", "profile_name"], registry=reg,
+    )
+    guard = Counter(
+        "eb_guard_checks_total", "Guard checks", ["gateway_id", "outcome"], registry=reg,
+    )
+    gdpr = Counter("eb_gdpr_deletes_total", "GDPR deletions", ["gateway_id"], registry=reg)
+    sess = Gauge(
+        "eb_session_active", "Active sessions", ["gateway_id", "profile_name"], registry=reg,
+    )
+    dur = Histogram(
+        "eb_retrieval_duration_seconds", "Retrieval latency",
+        ["gateway_id", "auto_recall", "profile_name"], registry=reg,
+    )
+
+    # Caller tenant (GW_A)
+    facts.labels(GW_A, "semantic", "coding").inc(2)
+    guard.labels(GW_A, "allow").inc(5)
+    gdpr.labels(GW_A).inc(1)
+    sess.labels(GW_A, "coding").set(3)
+    dur.labels(GW_A, "true", "coding").observe(0.3)
+
+    # Other tenant (GW_B) — must be filtered out entirely
+    facts.labels(GW_B, "episodic", "research").inc(9)
+    guard.labels(GW_B, "block").inc(7)
+    gdpr.labels(GW_B).inc(4)
+    sess.labels(GW_B, "research").set(11)
+    dur.labels(GW_B, "false", "research").observe(1.2)
+    return reg
+
+
+def _patch_registry(monkeypatch):
+    """Point the in-process REGISTRY at a synthetic two-gateway registry."""
+    import prometheus_client
+
+    reg = _fake_metrics_registry()
+    monkeypatch.setattr(prometheus_client.REGISTRY, "collect", reg.collect)
+    return reg
+
+
+def _by_name(body: dict) -> dict:
+    return {m["name"]: m for m in body["metrics"]}
+
+
+class TestDashboardMetrics:
+    async def test_shape_and_available(self, admin_client, monkeypatch):
+        _patch_registry(monkeypatch)
+        r = await admin_client.get("/dashboard/metrics", headers={"X-EB-Gateway-ID": GW_A})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["available"] is True
+        assert "generated_at" in body
+        assert isinstance(body["metrics"], list) and body["metrics"]
+        for m in body["metrics"]:
+            assert set(m).issuperset({"name", "type", "help", "series"})
+            for s in m["series"]:
+                # gateway_id is NEVER surfaced in the series labels.
+                assert "gateway_id" not in s["labels"]
+
+    async def test_counter_and_gauge_values_surface(self, admin_client, monkeypatch):
+        _patch_registry(monkeypatch)
+        r = await admin_client.get("/dashboard/metrics", headers={"X-EB-Gateway-ID": GW_A})
+        metrics = _by_name(r.json())
+
+        facts = metrics["eb_facts_stored_total"]
+        assert facts["type"] == "counter"
+        assert len(facts["series"]) == 1
+        assert facts["series"][0]["value"] == 2.0
+        assert facts["series"][0]["labels"]["memory_class"] == "semantic"
+
+        sess = metrics["eb_session_active"]
+        assert sess["type"] == "gauge"
+        assert sess["series"][0]["value"] == 3.0
+
+    async def test_histogram_sum_count_buckets_surface(self, admin_client, monkeypatch):
+        _patch_registry(monkeypatch)
+        r = await admin_client.get("/dashboard/metrics", headers={"X-EB-Gateway-ID": GW_A})
+        dur = _by_name(r.json())["eb_retrieval_duration_seconds"]
+        assert dur["type"] == "histogram"
+        s = dur["series"][0]
+        assert s["count"] == 1.0
+        assert abs(s["sum"] - 0.3) < 1e-9
+        assert isinstance(s["buckets"], dict) and s["buckets"]
+        # Cumulative bucket at +Inf equals the observation count.
+        assert s["buckets"]["+Inf"] == 1.0
+        assert "value" not in s  # exclude_none drops the counter/gauge field
+
+    async def test_gateway_isolation_only_caller_series(self, admin_client, monkeypatch):
+        _patch_registry(monkeypatch)
+        r = await admin_client.get("/dashboard/metrics", headers={"X-EB-Gateway-ID": GW_A})
+        metrics = _by_name(r.json())
+
+        # GW_A guard=allow(5); GW_B guard=block(7) must be absent.
+        guard = metrics["eb_guard_checks_total"]
+        outcomes = {s["labels"]["outcome"]: s["value"] for s in guard["series"]}
+        assert outcomes == {"allow": 5.0}
+
+        # GW_A facts=2; GW_B facts=9 must be absent — one series, value 2.
+        facts = metrics["eb_facts_stored_total"]
+        assert [s["value"] for s in facts["series"]] == [2.0]
+
+        # Nowhere in the payload does GW_B's data appear.
+        for m in metrics.values():
+            for s in m["series"]:
+                assert "research" not in s["labels"].values()
+
+    async def test_other_gateway_caller_sees_only_its_own(self, admin_client, monkeypatch):
+        _patch_registry(monkeypatch)
+        r = await admin_client.get("/dashboard/metrics", headers={"X-EB-Gateway-ID": GW_B})
+        guard = _by_name(r.json())["eb_guard_checks_total"]
+        outcomes = {s["labels"]["outcome"]: s["value"] for s in guard["series"]}
+        assert outcomes == {"block": 7.0}
+
+    async def test_default_allowlist_excludes_offlist_metric(self, admin_client, monkeypatch):
+        _patch_registry(monkeypatch)
+        r = await admin_client.get("/dashboard/metrics", headers={"X-EB-Gateway-ID": GW_A})
+        names = set(_by_name(r.json()))
+        assert "eb_facts_stored_total" in names  # headline
+        assert "eb_gdpr_deletes_total" not in names  # off the allow-list
+
+    async def test_names_override_filters(self, admin_client, monkeypatch):
+        _patch_registry(monkeypatch)
+        r = await admin_client.get(
+            "/dashboard/metrics?names=eb_guard_checks_total,eb_gdpr_deletes_total",
+            headers={"X-EB-Gateway-ID": GW_A},
+        )
+        names = set(_by_name(r.json()))
+        assert names == {"eb_guard_checks_total", "eb_gdpr_deletes_total"}
+
+    async def test_metrics_unavailable_returns_available_false(self, admin_client, monkeypatch):
+        # Simulate prometheus_client being absent at runtime.
+        monkeypatch.setattr(
+            "elephantbroker.runtime.metrics.METRICS_AVAILABLE", False
+        )
+        r = await admin_client.get("/dashboard/metrics", headers={"X-EB-Gateway-ID": GW_A})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["available"] is False
+        assert body["metrics"] == []
+        assert "note" in body
 
 
