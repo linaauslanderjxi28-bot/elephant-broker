@@ -1,0 +1,8 @@
+{
+  "agent_name": "agy-cli-agent",
+  "dataset": "elephantbroker",
+  "eb_service_url": "http://localhost:8420",
+  "eb_gateway_id": "gw-enterprise-prod",
+  "auth_token_env": "EB_AUTH_TOKEN",
+  "agent_key": "agy-cli-agent"
+}

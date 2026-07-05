@@ -1,0 +1,7 @@
+export EB_RUNTIME_URL="${EB_RUNTIME_URL:-http://localhost:8420}"
+export EB_GATEWAY_ID="${EB_GATEWAY_ID:-gw-enterprise-prod}"
+export COGNEE_PLUGIN_DATASET="${COGNEE_PLUGIN_DATASET:-elephantbroker}"
+export EB_AGENT_NAME="${EB_AGENT_NAME:-opencode-agent}"
+export COGNEE_AGENT_NAME="${COGNEE_AGENT_NAME:-$EB_AGENT_NAME}"
+export EB_AGENT_KEY="${EB_AGENT_KEY:-$EB_AGENT_NAME}"
+export EB_AUTH_TOKEN="${EB_AUTH_TOKEN:?set EB_AUTH_TOKEN in the runtime launcher or shell}"

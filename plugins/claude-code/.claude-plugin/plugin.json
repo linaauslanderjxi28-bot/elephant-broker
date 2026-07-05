@@ -1,0 +1,9 @@
+{
+  "name": "elephantbroker-memory",
+  "description": "ElephantBroker memory plugin for Claude Code — session-aware storage, EB-native recall, and persistent learning across sessions.",
+  "version": "0.3.0",
+  "author": {
+    "name": "ElephantBroker"
+  },
+  "keywords": ["elephantbroker", "memory", "claude-code", "session", "recall"]
+}

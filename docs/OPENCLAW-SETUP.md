@@ -57,8 +57,8 @@ the lockfiles committed in the repo.
 git clone https://github.com/elephant-broker/elephant-broker.git /opt/elephantbroker
 
 # Symlink plugins — OpenClaw loads the compiled bundle from dist/index.js
-ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
-ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
+ln -s /opt/elephantbroker/plugins/openclaw/memory ~/.openclaw/extensions/elephantbroker-memory
+ln -s /opt/elephantbroker/plugins/openclaw/context ~/.openclaw/extensions/elephantbroker-context
 
 # Install dependencies + build the bundle. `npm ci` reads the committed
 # package-lock.json and installs EXACTLY those versions (errors out if the
@@ -732,7 +732,7 @@ EB tools to document (24 total):
 ### Reference Templates
 
 Reference templates showing the EB-specific sections are in the repo at:
-- `openclaw-plugins/elephantbroker-memory/workspace/AGENTS.md` — EB memory section template (splice into existing AGENTS.MD)
-- `openclaw-plugins/elephantbroker-memory/workspace/TOOLS.md` — EB tool documentation template (add to existing TOOLS.MD)
+- `plugins/openclaw/memory/workspace/AGENTS.md` — EB memory section template (splice into existing AGENTS.MD)
+- `plugins/openclaw/memory/workspace/TOOLS.md` — EB tool documentation template (add to existing TOOLS.MD)
 
 These are **templates for the EB sections only**, not complete file replacements.

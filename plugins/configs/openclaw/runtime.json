@@ -1,0 +1,9 @@
+{
+  "eb_runtime_url": "http://localhost:8420",
+  "eb_gateway_id": "gw-enterprise-prod",
+  "auth_token_env": "EB_AUTH_TOKEN",
+  "dataset": "elephantbroker",
+  "agent_name": "openclaw-agent",
+  "agent_key": "openclaw-agent",
+  "implementation": "openclaw-plugin/dist/index.js"
+}

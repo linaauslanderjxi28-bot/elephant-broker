@@ -1,0 +1,5 @@
+{
+  "name": "elephantbroker-memory",
+  "version": "0.2.0",
+  "description": "ElephantBroker memory plugin for Antigravity CLI — session-aware recall, durable storage, and lifecycle sync."
+}

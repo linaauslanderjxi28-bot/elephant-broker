@@ -1,0 +1,93 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session-start.py"],
+            "timeout": 15,
+            "statusMessage": "Initializing ElephantBroker memory..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session-context-lookup.py"],
+            "timeout": 25,
+            "statusMessage": "Searching ElephantBroker memory..."
+          },
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/store-user-prompt.py"],
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Agent|Read|Write|Edit|Grep|Glob",
+        "if": "Bash(!*cognee*)|Agent(*)|Read(*)|Write(*)|Edit(*)|Grep(*)|Glob(*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/store-to-session.py"],
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/store-to-session.py", "--stop"],
+            "async": true
+          },
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/clear-transcript-context.py"],
+            "timeout": 5,
+            "statusMessage": "Clearing Claude context..."
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/pre-compact.py"],
+            "timeout": 15,
+            "statusMessage": "Building memory anchor..."
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/sync-session-to-graph.py", "--session-end"]
+          }
+        ]
+      }
+    ]
+  }
+}
