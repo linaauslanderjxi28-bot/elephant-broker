@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +10,8 @@ from unittest.mock import patch
 
 def load_plugin_module():
     path = Path(__file__).with_name("__init__.py")
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     spec = importlib.util.spec_from_file_location("hermes_elephantbroker_plugin", path)
     if spec is None or spec.loader is None:
         raise RuntimeError("could not load Hermes plugin")
@@ -65,6 +68,7 @@ class TestProviderContract(unittest.TestCase):
         provider._session_key = "session"
         provider._session_id = "00000000-0000-4000-8000-000000000000"
         provider._agent_context = "primary"
+        provider._active = True
 
         class ExistingThread:
             def is_alive(self) -> bool:
@@ -85,7 +89,8 @@ class TestProviderContract(unittest.TestCase):
                 started.append(self.name)
 
         provider._sync_thread = ExistingThread()
-        with patch.object(module.threading, "Thread", NewThread):
+        writer = sys.modules["elephantbroker_hermes_writer"]
+        with patch.object(writer.threading, "Thread", NewThread):
             provider.sync_turn("user", "assistant")
 
         self.assertEqual(started, ["eb-sync-turn"])
