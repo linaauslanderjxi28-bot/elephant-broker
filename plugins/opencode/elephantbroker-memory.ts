@@ -58,6 +58,9 @@ type TextMessagePart = {
   text: string;
 };
 
+type EBLogLevel = "info" | "warn" | "error";
+type EBLogger = (level: EBLogLevel, message: string, extra?: Record<string, unknown>) => void;
+
 function isTextMessagePart(part: unknown): part is TextMessagePart {
   if (!part || typeof part !== "object") return false;
   const candidate = part as Record<string, unknown>;
@@ -318,7 +321,18 @@ class EBClient {
 // Plugin
 // ---------------------------------------------------------------------------
 
-export const ElephantBrokerMemory: Plugin = async () => {
+export const ElephantBrokerMemory: Plugin = async ({ client } = {}) => {
+  const log: EBLogger = (level, message, extra) => {
+    const appLog = client?.app?.log;
+    if (appLog) {
+      void appLog({ body: { service: "elephantbroker", level, message, extra } }).catch(() => {});
+      return;
+    }
+    const line = `[EB] ${message}`;
+    if (level === "error") console.error(line, extra ?? "");
+    else if (level === "warn") console.warn(line, extra ?? "");
+    else console.info(line, extra ?? "");
+  };
   const baseUrl = process.env.EB_RUNTIME_URL ?? "http://localhost:8420";
   const gatewayId = process.env.EB_GATEWAY_ID ?? "";
   const profileName = process.env.EB_PROFILE ?? "coding";
@@ -328,10 +342,10 @@ export const ElephantBrokerMemory: Plugin = async () => {
   const gatewayShortName = process.env.EB_GATEWAY_SHORT_NAME ?? "";
 
   if (!gatewayId) {
-    console.warn("[EB] EB_GATEWAY_ID not set — plugin loaded but inactive");
+    log("warn", "EB_GATEWAY_ID not set; plugin loaded but inactive");
   }
 
-  const client = new EBClient(baseUrl, gatewayId, profileName, agentKey, agentId, actorId, gatewayShortName);
+  const ebClient = new EBClient(baseUrl, gatewayId, profileName, agentKey, agentId, actorId, gatewayShortName);
 
   // ---------------------------------------------------------------------------
   // Conversation auto-capture buffer
@@ -355,24 +369,24 @@ export const ElephantBrokerMemory: Plugin = async () => {
       while (messageBuffer.length > 0) {
         const batch = messageBuffer.splice(0);
         const messages = batch.map((msg) => ({ role: msg.role, content: msg.text }));
-        const ingested = await client.ingestTurn(messages);
+          const ingested = await ebClient.ingestTurn(messages);
         if (ingested) continue;
 
         for (const msg of batch) {
           try {
-            await client.store(
+              await ebClient.store(
               `[${msg.role}] ${msg.text}`,
               { category: "conversation", scope: "session" },
             );
           } catch {
-            const stored = await client.ingestMessages([{ role: msg.role, content: msg.text }]);
-            if (!stored) console.error("[EB] message capture failed");
+            const stored = await ebClient.ingestMessages([{ role: msg.role, content: msg.text }]);
+            if (!stored) log("error", "message capture failed");
           }
         }
       }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
-      console.error("[EB] flush failed:", message);
+      log("error", "flush failed", { error: message });
     } finally {
       flushRunning = false;
     }
@@ -399,7 +413,7 @@ export const ElephantBrokerMemory: Plugin = async () => {
         async execute(args) {
           if (!gatewayId) return "EB_GATEWAY_ID not configured. Set EB_GATEWAY_ID and EB_RUNTIME_URL env vars.";
           try {
-            const results = await client.search(args.query, {
+            const results = await ebClient.search(args.query, {
               max_results: Math.min(args.max_results ?? 5, 20),
               min_score: args.min_score ?? 0,
               entity_type: args.entity_type,
@@ -436,7 +450,7 @@ export const ElephantBrokerMemory: Plugin = async () => {
         async execute(args) {
           if (!gatewayId) return "EB_GATEWAY_ID not configured. Set EB_GATEWAY_ID and EB_RUNTIME_URL env vars.";
           try {
-            const results = await client.searchGlobal(args.query, {
+            const results = await ebClient.searchGlobal(args.query, {
               max_results: Math.min(args.max_results ?? 20, 30),
               min_score: args.min_score ?? 0,
               session_key: args.session_key,
@@ -477,7 +491,7 @@ export const ElephantBrokerMemory: Plugin = async () => {
         async execute(args) {
           if (!gatewayId) return "EB_GATEWAY_ID not configured.";
           try {
-            const result = await client.store(args.text, {
+            const result = await ebClient.store(args.text, {
               category: args.category,
               scope: args.scope,
               goal_ids: args.goal_ids,
@@ -504,7 +518,7 @@ export const ElephantBrokerMemory: Plugin = async () => {
         async execute(args) {
           if (!gatewayId) return "EB_GATEWAY_ID not configured.";
           try {
-            const result = await client.store(args.text, {
+            const result = await ebClient.store(args.text, {
               category: "decision",
               scope: args.scope,
               decision_status: args.decision_status,
@@ -526,7 +540,7 @@ export const ElephantBrokerMemory: Plugin = async () => {
         async execute(args) {
           if (!gatewayId) return "EB_GATEWAY_ID not configured.";
           try {
-            const fact = await client.getById(args.id);
+            const fact = await ebClient.getById(args.id);
             if (!fact) return `Fact not found: ${args.id}`;
             return [
               `ID: ${fact.id}`,
@@ -553,7 +567,7 @@ export const ElephantBrokerMemory: Plugin = async () => {
         async execute(args) {
           if (!gatewayId) return "EB_GATEWAY_ID not configured.";
           try {
-            const ok = await client.forget(args.id);
+            const ok = await ebClient.forget(args.id);
             return ok ? `Memory ${args.id} deleted.` : `Failed to delete memory ${args.id} (not found or permission denied).`;
           } catch (e: unknown) {
             return `Memory delete failed: ${e instanceof Error ? e.message : String(e)}`;
@@ -589,7 +603,7 @@ export const ElephantBrokerMemory: Plugin = async () => {
           if (args.archived !== undefined) updates.archived = args.archived;
           if (Object.keys(updates).length === 0) return "Nothing to update.";
           try {
-            const result = await client.update(args.id, updates);
+            const result = await ebClient.update(args.id, updates);
             if (!result) return `Fact not found: ${args.id}`;
             return `Memory ${args.id} updated successfully.`;
           } catch (e: unknown) {
@@ -610,7 +624,7 @@ export const ElephantBrokerMemory: Plugin = async () => {
         async execute(args) {
           if (!gatewayId) return "EB_GATEWAY_ID not configured.";
           try {
-            const result = await client.inspectActor(args.actor_id, {
+            const result = await ebClient.inspectActor(args.actor_id, {
               include_relationships: args.include_relationships,
               include_authority_chain: args.include_authority_chain,
             });
@@ -629,7 +643,7 @@ export const ElephantBrokerMemory: Plugin = async () => {
         async execute(args) {
           if (!gatewayId) return "EB_GATEWAY_ID not configured.";
           try {
-            const result = await client.getClaim(args.claim_id);
+            const result = await ebClient.getClaim(args.claim_id);
             return JSON.stringify(result, null, 2);
           } catch (e: unknown) {
             return `Claim get failed: ${e instanceof Error ? e.message : String(e)}`;
@@ -649,7 +663,7 @@ export const ElephantBrokerMemory: Plugin = async () => {
             return "Provide exactly one of action_id or lineage_ref.";
           }
           try {
-            const result = await client.lookupProcedureAudit({
+            const result = await ebClient.lookupProcedureAudit({
               action_id: args.action_id,
               lineage_ref: args.lineage_ref,
             });
@@ -686,14 +700,14 @@ export const ElephantBrokerMemory: Plugin = async () => {
       if (ev.type === "session.created") {
         const sessionID = ev.properties?.sessionID;
         if (sessionID) {
-          client.setSession(`opencode:${sessionID}`, String(sessionID));
+          ebClient.setSession(`opencode:${sessionID}`, String(sessionID));
         }
-        client.sessionStart().catch((e: unknown) => console.error("[EB] sessionStart failed:", e instanceof Error ? e.message : String(e)));
+        ebClient.sessionStart().catch((e: unknown) => log("error", "sessionStart failed", { error: e instanceof Error ? e.message : String(e) }));
       }
 
       if (ev.type === "session.idle" || ev.type === "session.deleted") {
         await flushMessages();
-        client.sessionEnd().catch((e: unknown) => console.error("[EB] sessionEnd failed:", e instanceof Error ? e.message : String(e)));
+        ebClient.sessionEnd().catch((e: unknown) => log("error", "sessionEnd failed", { error: e instanceof Error ? e.message : String(e) }));
       }
 
       if (ev.type === "session.next.text.ended") {
