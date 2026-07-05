@@ -1,11 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 // Mock fetch and crypto
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
 describe("Plugin registration", () => {
-  it("registers 24 tools", async () => {
+  it("registers 28 tools", async () => {
     const { register } = await import("../src/index.js");
     const tools: unknown[] = [];
     const hooks: Record<string, unknown> = {};
@@ -14,7 +14,7 @@ describe("Plugin registration", () => {
       on: (event: string, handler: unknown) => { hooks[event] = handler; },
     };
     register(api);
-    expect(tools.length).toBe(24);
+    expect(tools.length).toBe(28);
   });
 
   it("registers 4 hooks via api.on()", async () => {
@@ -42,6 +42,7 @@ describe("Plugin registration", () => {
     register(api);
     const ids = tools.map(t => t.id).sort();
     expect(ids).toEqual([
+      "actor_inspect",
       "admin_add_member",
       "admin_create_org",
       "admin_create_team",
@@ -49,6 +50,7 @@ describe("Plugin registration", () => {
       "admin_register_actor",
       "admin_remove_member",
       "artifact_search",
+      "claim_get",
       "create_artifact",
       "goal_create",
       "guard_status",
@@ -56,9 +58,11 @@ describe("Plugin registration", () => {
       "memory_forget",
       "memory_get",
       "memory_search",
+      "memory_search_global",
       "memory_store",
       "memory_update",
       "procedure_activate",
+      "procedure_audit_lookup",
       "procedure_complete_step",
       "procedure_create",
       "procedure_session_status",
