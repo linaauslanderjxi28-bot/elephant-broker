@@ -10,6 +10,8 @@ Covers the ``actors-orgs-2`` idempotency fix and ``RC-9`` self-heal in
        when neither mapping exists, falling back to the handle placeholder.
     4. ``_maybe_backfill_display_name`` self-heals placeholder display names.
     5. ``_dashboard_handle`` format.
+    6. Race fix: concurrent first logins provision exactly ONE actor (per-user
+       provisioning lock + deterministic UUID v5 actor id from the handle).
 
 ``supertokens_python`` IS installed in this venv, so the source's lazy
 ``from supertokens_python... import ...`` calls resolve to the real SDK
@@ -19,6 +21,7 @@ SuperTokens backend / network is ever touched. The actor registry is an
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -28,6 +31,7 @@ from elephantbroker.api.auth.identity import (
     _maybe_backfill_display_name,
     resolve_actor_from_st_user,
 )
+from elephantbroker.runtime.identity import deterministic_uuid_from
 from elephantbroker.schemas.actor import ActorRef, ActorType
 
 _UM_PATH = "supertokens_python.recipe.usermetadata.asyncio"
@@ -146,6 +150,9 @@ async def test_create_with_real_display_name_from_email(monkeypatch):
     assert created.type is ActorType.HUMAN_COORDINATOR
     assert created.gateway_id == "gw-xyz"
     assert result == str(created.id)
+    # id is derived from the handle (UUID v5) so a double-create MERGEs the
+    # same graph node instead of minting a duplicate actor.
+    assert created.id == deterministic_uuid_from("dashboard:st-user-3")
     # newly-minted mapping persisted to ST metadata.
     update_mock.assert_awaited_once_with("st-user-3", {"eb_actor_id": result})
 
@@ -168,7 +175,8 @@ async def test_create_falls_back_to_handle_when_no_name(monkeypatch):
 
 async def test_handle_lookup_error_falls_through_to_create(monkeypatch):
     """A raising resolve_by_handle must not abort resolution — it degrades to
-    the create path (no duplicate-avoidance possible, but still one actor)."""
+    the create path (safe even if the actor already exists: the deterministic
+    handle-derived id makes the create MERGE the existing node, not duplicate)."""
     _patch_usermetadata(monkeypatch, metadata={})
     _patch_get_user(monkeypatch, emails=[], email=None)
     reg = _registry()
@@ -179,6 +187,34 @@ async def test_handle_lookup_error_falls_through_to_create(monkeypatch):
 
     reg.register_actor.assert_awaited_once()
     assert result == str(reg.register_actor.await_args.args[0].id)
+
+
+async def test_concurrent_first_logins_provision_exactly_one_actor(monkeypatch):
+    """The login-burst race: N parallel requests for the same ST user with no
+    prior mapping must create exactly ONE actor (per-user lock serializes the
+    provisioning; the re-check under the lock sees the persisted mapping)."""
+    store: dict[str, dict] = {"st-user-race": {"email": "dana@example.com"}}
+
+    async def fake_get(st_id: str):
+        return SimpleNamespace(metadata=dict(store.get(st_id, {})))
+
+    async def fake_update(st_id: str, patch: dict):
+        store.setdefault(st_id, {}).update(patch)
+
+    monkeypatch.setattr(f"{_UM_PATH}.get_user_metadata", fake_get)
+    monkeypatch.setattr(f"{_UM_PATH}.update_user_metadata", fake_update)
+
+    reg = _registry(by_handle=None)  # graph is empty — true first login
+    container = _container(reg)
+
+    results = await asyncio.gather(
+        *(resolve_actor_from_st_user(container, "st-user-race") for _ in range(3))
+    )
+
+    reg.register_actor.assert_awaited_once()  # ONE create across the burst
+    assert len(set(results)) == 1
+    assert results[0] == str(deterministic_uuid_from("dashboard:st-user-race"))
+    assert store["st-user-race"]["eb_actor_id"] == results[0]
 
 
 async def test_returns_none_when_registry_absent(monkeypatch):

@@ -1368,6 +1368,10 @@ async def memory_graph(
             container,
             "MATCH (n) WHERE n.gateway_id = $gw "
             "AND any(l IN labels(n) WHERE l IN $labels) "
+            # Soft-deactivated actors (active=false — merged duplicates,
+            # offboarded operators, TD-22) are hidden everywhere else; only
+            # ActorDataPoint carries ``active``, so IS NULL keeps other labels.
+            "AND (n.active = true OR n.active IS NULL) "
             "RETURN n.eb_id AS id, head([l IN labels(n) WHERE l IN $labels]) AS type, "
             "coalesce(n.display_name, n.title, n.name, left(n.text, 80), n.eb_id) AS label, "
             "n.scope AS scope, n.memory_class AS memory_class, n.category AS category, "
@@ -1397,6 +1401,9 @@ async def memory_graph(
             "MATCH path=(c {eb_id: $center_id, gateway_id: $gw})-[*1..%(depth)d]-(m) "
             "WHERE all(x IN nodes(path) WHERE x.gateway_id = $gw) "
             "AND all(x IN nodes(path) WHERE any(l IN labels(x) WHERE l IN $labels)) "
+            # Hide soft-deactivated actors (TD-22); non-actor labels have no
+            # ``active`` property and pass via IS NULL.
+            "AND all(x IN nodes(path) WHERE x.active = true OR x.active IS NULL) "
             "UNWIND nodes(path) AS n "
             "WITH collect(DISTINCT {id: n.eb_id, type: head([l IN labels(n) WHERE l IN $labels]), "
             "label: coalesce(n.display_name, n.title, n.name, left(n.text, 80), n.eb_id), "

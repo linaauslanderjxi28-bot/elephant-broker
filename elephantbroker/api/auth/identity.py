@@ -17,6 +17,7 @@ and ``request.state.auth_identity`` (the name used by the plan's route handlers)
 """
 from __future__ import annotations
 
+import asyncio
 import enum
 import logging
 import uuid
@@ -105,6 +106,16 @@ async def _authority_for_actor(container: Any, actor_id: str | None) -> int:
 def _dashboard_handle(st_user_id: str) -> str:
     """The stable, per-user handle that anchors a dashboard actor to its ST id."""
     return f"dashboard:{st_user_id}"
+
+
+# First-login provisioning is check-then-act (lookup -> create). The dashboard
+# fires several API requests in parallel right after login; without
+# serialization each of them runs the create path before any has persisted the
+# mapping, minting one duplicate actor per request (observed: 3 actors within
+# 45ms). Single-tenant-per-process (R2-P1.1) makes an in-process per-user lock
+# sufficient; the deterministic actor id in the create path covers the residual
+# cross-process window. Bounded by distinct dashboard users per process.
+_provision_locks: dict[str, asyncio.Lock] = {}
 
 
 async def _fetch_st_user_display_name(st_user_id: str) -> str | None:
@@ -217,6 +228,22 @@ async def _maybe_backfill_display_name(
         logger.debug("display_name backfill failed for %s: %s", actor_id, exc)
 
 
+async def _lookup_mapped_actor_id(st_user_id: str) -> str | None:
+    """The ``eb_actor_id`` mapping in ST user metadata (fast path, no graph)."""
+    try:
+        from supertokens_python.recipe.usermetadata.asyncio import (
+            get_user_metadata,
+        )
+
+        meta = await get_user_metadata(st_user_id)
+        existing = (meta.metadata or {}).get("eb_actor_id")
+        if existing:
+            return str(existing)
+    except Exception as exc:  # ST not installed / not configured / no metadata
+        logger.debug("usermetadata lookup unavailable for %s: %s", st_user_id, exc)
+    return None
+
+
 async def resolve_actor_from_st_user(container: Any, st_user_id: str) -> str | None:
     """Map a SuperTokens user id to an EB actor id — idempotently.
 
@@ -232,66 +259,77 @@ async def resolve_actor_from_st_user(container: Any, st_user_id: str) -> str | N
        resolved from the SuperTokens email/name (actors-orgs-15 / auth-5 /
        cross-cutting-4), and persist the mapping.
 
+    Steps 2-3 run under a per-user in-process lock with a re-check of step 1
+    after acquisition, and the created actor's id is
+    ``deterministic_uuid_from(handle)`` (UUID v5, the same scheme agent actors
+    use for ``agent_key``). Together these close the first-login race where the
+    dashboard's parallel request burst minted one duplicate actor per request:
+    concurrent callers serialize on the lock, and any residual double-create
+    (multi-process, or a transient graph failure in step 2) MERGEs the same
+    Neo4j node instead of inserting a new one.
+
     Degrades gracefully when SuperTokens or the registry is unavailable —
     returns ``None`` so the caller falls through to anonymous.
     """
     handle = _dashboard_handle(st_user_id)
     registry = getattr(container, "actor_registry", None)
 
-    # 1. Metadata mapping (fast path, no graph).
-    mapped_id: str | None = None
-    try:
-        from supertokens_python.recipe.usermetadata.asyncio import (
-            get_user_metadata,
-        )
+    # 1. Metadata mapping — read-only, safe outside the lock.
+    mapped_id = await _lookup_mapped_actor_id(st_user_id)
 
-        meta = await get_user_metadata(st_user_id)
-        existing = (meta.metadata or {}).get("eb_actor_id")
-        if existing:
-            mapped_id = str(existing)
-    except Exception as exc:  # ST not installed / not configured / no metadata
-        logger.debug("usermetadata lookup unavailable for %s: %s", st_user_id, exc)
+    if mapped_id is None:
+        lock = _provision_locks.setdefault(st_user_id, asyncio.Lock())
+        async with lock:
+            # Re-check now that we hold the lock: a concurrent request may have
+            # provisioned (and persisted the mapping) while we waited.
+            mapped_id = await _lookup_mapped_actor_id(st_user_id)
 
-    # 2. Fall back to the stable handle so a failed metadata write never
-    #    produces a second actor on the next login. Reuse the existing node and
-    #    repair the mapping we were missing.
-    if mapped_id is None and registry is not None and hasattr(registry, "resolve_by_handle"):
-        try:
-            existing_actor = await registry.resolve_by_handle(handle)
-        except Exception as exc:  # noqa: BLE001
-            existing_actor = None
-            logger.debug("resolve_by_handle failed for %s: %s", handle, exc)
-        if existing_actor is not None:
-            mapped_id = str(existing_actor.id)
-            await _persist_actor_mapping(st_user_id, mapped_id)
+            # 2. Fall back to the stable handle so a failed metadata write
+            #    never produces a second actor on the next login. Reuse the
+            #    existing node and repair the mapping we were missing.
+            if (
+                mapped_id is None
+                and registry is not None
+                and hasattr(registry, "resolve_by_handle")
+            ):
+                try:
+                    existing_actor = await registry.resolve_by_handle(handle)
+                except Exception as exc:  # noqa: BLE001
+                    existing_actor = None
+                    logger.debug("resolve_by_handle failed for %s: %s", handle, exc)
+                if existing_actor is not None:
+                    mapped_id = str(existing_actor.id)
+                    await _persist_actor_mapping(st_user_id, mapped_id)
 
-    # If we already have an actor, self-heal a placeholder display name and return.
-    if mapped_id is not None:
-        await _maybe_backfill_display_name(registry, mapped_id, st_user_id)
-        return mapped_id
+            # 3. First login: create an actor with a real display name and a
+            #    handle-derived deterministic id, and remember the mapping.
+            if mapped_id is None:
+                if registry is None:
+                    return None
+                display_name = await _fetch_st_user_display_name(st_user_id) or handle
+                try:
+                    from elephantbroker.schemas.actor import ActorRef, ActorType
 
-    # 3. First login: create an actor with a real display name and remember it.
-    if registry is None:
-        return None
-    display_name = await _fetch_st_user_display_name(st_user_id) or handle
-    try:
-        from elephantbroker.schemas.actor import ActorRef, ActorType
+                    actor = ActorRef(
+                        id=deterministic_uuid_from(handle),
+                        type=ActorType.HUMAN_COORDINATOR,
+                        display_name=display_name,
+                        handles=[handle],
+                        authority_level=0,
+                        gateway_id=getattr(container, "gateway_id", "") or "",
+                    )
+                    stored = await registry.register_actor(actor)
+                    mapped_id = str(stored.id)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to create actor for ST user %s: %s", st_user_id, exc
+                    )
+                    return None
+                await _persist_actor_mapping(st_user_id, mapped_id)
 
-        actor = ActorRef(
-            type=ActorType.HUMAN_COORDINATOR,
-            display_name=display_name,
-            handles=[handle],
-            authority_level=0,
-            gateway_id=getattr(container, "gateway_id", "") or "",
-        )
-        stored = await registry.register_actor(actor)
-        actor_id = str(stored.id)
-    except Exception as exc:
-        logger.warning("Failed to create actor for ST user %s: %s", st_user_id, exc)
-        return None
-
-    await _persist_actor_mapping(st_user_id, actor_id)
-    return actor_id
+    # Self-heal a placeholder display name on the resolved actor.
+    await _maybe_backfill_display_name(registry, mapped_id, st_user_id)
+    return mapped_id
 
 
 # ---------------------------------------------------------------------------
