@@ -162,9 +162,21 @@ def _fetch_memory_context(session_id: str, tool_name: str, tool_input: dict) -> 
     results = recall_via_http(
         query, session_id=session_id, top_k=3, scope=["session"], timeout=8.0
     )
-    if results:
+    try:
+        global_results = recall_via_http(
+            query, session_id=session_id, top_k=3, scope=["global"], timeout=8.0
+        )
+    except Exception:
+        global_results = None
+
+    # Merge session + global results (session first, then global)
+    all_results = list(results or [])
+    if global_results:
+        all_results.extend(global_results)
+
+    if all_results:
         texts = []
-        for r in results[:3]:
+        for r in all_results[:3]:
             if isinstance(r, dict):
                 text = str(r.get("text") or r.get("answer") or "")
                 if text:
