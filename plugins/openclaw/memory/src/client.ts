@@ -79,7 +79,7 @@ export class ElephantBrokerClient {
     if (this.agentId) headers["X-EB-Agent-ID"] = this.agentId;
     if (this.currentSessionKey) headers["X-EB-Session-Key"] = this.currentSessionKey;
     if (this.actorId) headers["X-EB-Actor-Id"] = this.actorId;
-    const authToken = process.env.EB_AUTH_TOKEN || "";
+    const authToken = (process.env.EB_AUTH_TOKEN || "").trim();
     if (authToken) headers["X-EB-Auth-Token"] = authToken;
     // Inject W3C trace context
     propagation.inject(context.active(), headers);
