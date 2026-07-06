@@ -131,6 +131,7 @@ async def _recall_context(prompt: str, session_id: str) -> str:
         (["session"], None),
         (["trace"], None),
         (["graph_context"], None),
+        (["global"], None),
     ]
 
     for scope_list, _ in scope_specs:
@@ -147,7 +148,7 @@ async def _recall_context(prompt: str, session_id: str) -> str:
         except Exception as exc:
             hook_log("recall_error", {"scope": scope_list, "error": str(exc)[:200]})
 
-    by_source: dict[str, list] = {"session": [], "trace": [], "graph_context": []}
+    by_source: dict[str, list] = {"session": [], "trace": [], "graph_context": [], "global": []}
     for r in results or []:
         if hasattr(r, "model_dump"):
             r = r.model_dump()
@@ -167,7 +168,7 @@ async def _recall_context(prompt: str, session_id: str) -> str:
     header = (
         f"ElephantBroker memory: recall "
         f"{counts['session']} session / {counts['trace']} trace / "
-        f"{counts['graph_context']} graph; saved last turn "
+        f"{counts['graph_context']} graph / {counts['global']} global; saved last turn "
         f"{saves_last_turn.get('prompt',0)} prompt / "
         f"{saves_last_turn.get('trace',0)} trace / "
         f"{saves_last_turn.get('answer',0)} answer"
@@ -178,6 +179,7 @@ async def _recall_context(prompt: str, session_id: str) -> str:
         ("graph_context", "=== Knowledge graph snapshot ==="),
         ("trace", "=== Prior agent trace ==="),
         ("session", "=== Prior session turns ==="),
+        ("global", "=== Global (cross-session) knowledge ==="),
     ]:
         if by_source.get(src_key):
             section_lines.append(label)
