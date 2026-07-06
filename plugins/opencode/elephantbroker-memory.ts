@@ -72,6 +72,10 @@ function isUUID(value: string): value is UUID {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
+function nonBlank(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 function sessionIdFromKey(sessionKey: string): UUID {
   const hex = crypto.createHash("sha256").update(String(sessionKey), "utf8").digest("hex").slice(0, 32);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
@@ -151,17 +155,17 @@ class EBClient {
 
   async search(
     query: string,
-    opts?: { max_results?: number; min_score?: number; auto_recall?: boolean; entity_type?: string },
+    opts?: { max_results?: number; min_score?: number; auto_recall?: boolean; scope?: string; entity_type?: string },
   ): Promise<EBSearchResult[]> {
     return this.req<EBSearchResult[]>("POST", "/memory/search", {
       query,
       max_results: opts?.max_results ?? 5,
       min_score: opts?.min_score ?? 0,
       auto_recall: opts?.auto_recall ?? false,
+      ...(nonBlank(opts?.scope) ? { scope: opts.scope.trim() } : {}),
       session_key: this.sessionKey,
       session_id: this.sessionId,
-      ...(opts?.entity_type ? { entity_type: opts.entity_type } : {}),
-      ...(this.profileName ? { profile_name: this.profileName } : {}),
+      ...(nonBlank(opts?.entity_type) ? { entity_type: opts.entity_type.trim() } : {}),
     });
   }
 
@@ -177,7 +181,6 @@ class EBClient {
       scope: "global",
       ...(opts?.session_key ? { session_key: opts.session_key } : {}),
       ...(opts?.entity_type ? { entity_type: opts.entity_type } : {}),
-      ...(this.profileName ? { profile_name: this.profileName } : {}),
     });
   }
 
@@ -407,6 +410,7 @@ export const ElephantBrokerMemory: Plugin = async ({ client } = {}) => {
             const results = await ebClient.search(args.query, {
               max_results: Math.min(args.max_results ?? 5, 20),
               min_score: args.min_score ?? 0,
+              scope: args.scope,
               entity_type: args.entity_type,
             });
             if (!results || results.length === 0) return "No relevant memories found.";
@@ -573,25 +577,41 @@ export const ElephantBrokerMemory: Plugin = async ({ client } = {}) => {
           text: tool.schema.string().optional().describe("New text content"),
           confidence: tool.schema.number().optional().describe("New confidence value (0-1)"),
           category: tool.schema.string().optional().describe("New category"),
-          decision_status: tool.schema.string().optional()
-            .describe("Decision status: proposed, approved, rejected, actioned"),
-          entity_type: tool.schema.string().optional()
-            .describe("Entity type: FinancialReport, Invoice, Contract, Document"),
+          scope: tool.schema.string().optional().describe("New scope: session, actor, team, or global"),
+          memory_class: tool.schema.string().optional().describe("New memory class, e.g. episodic, semantic, procedural"),
+          target_actor_ids: tool.schema.array(tool.schema.string()).optional()
+            .describe("Actor UUIDs this fact targets"),
+          decision_domain: tool.schema.string().optional().describe("Decision domain tag"),
           goal_ids: tool.schema.array(tool.schema.string()).optional()
-            .describe("New goal IDs this fact relates to"),
+            .describe("New goal UUIDs this fact relates to"),
           archived: tool.schema.boolean().optional()
             .describe("Archive/unarchive this fact"),
+          autorecall_blacklisted: tool.schema.boolean().optional()
+            .describe("Exclude/include this fact from automatic recall"),
         },
         async execute(args) {
           if (!gatewayId) return "EB_GATEWAY_ID not configured.";
           const updates: Record<string, unknown> = {};
-          if (args.text !== undefined) updates.text = args.text;
+          if (nonBlank(args.text)) updates.text = args.text.trim();
           if (args.confidence !== undefined) updates.confidence = args.confidence;
-          if (args.category !== undefined) updates.category = args.category;
-          if (args.decision_status !== undefined) updates.decision_status = args.decision_status;
-          if (args.entity_type !== undefined) updates.entity_type = args.entity_type;
-          if (args.goal_ids !== undefined) updates.goal_ids = args.goal_ids;
+          if (nonBlank(args.category)) updates.category = args.category.trim();
+          if (nonBlank(args.scope)) updates.scope = args.scope.trim();
+          if (nonBlank(args.memory_class)) updates.memory_class = args.memory_class.trim();
+          if (Array.isArray(args.target_actor_ids)) {
+            for (const actorId of args.target_actor_ids) {
+              if (!isUUID(actorId)) return `Invalid target_actor_id (must be UUID): ${actorId}`;
+            }
+            updates.target_actor_ids = args.target_actor_ids;
+          }
+          if (nonBlank(args.decision_domain)) updates.decision_domain = args.decision_domain.trim();
+          if (Array.isArray(args.goal_ids)) {
+            for (const goalId of args.goal_ids) {
+              if (!isUUID(goalId)) return `Invalid goal_id (must be UUID): ${goalId}`;
+            }
+            updates.goal_ids = args.goal_ids;
+          }
           if (args.archived !== undefined) updates.archived = args.archived;
+          if (args.autorecall_blacklisted !== undefined) updates.autorecall_blacklisted = args.autorecall_blacklisted;
           if (Object.keys(updates).length === 0) return "Nothing to update.";
           try {
             const result = await ebClient.update(args.id, updates);

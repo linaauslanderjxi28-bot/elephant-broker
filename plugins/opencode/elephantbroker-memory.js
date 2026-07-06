@@ -1,7 +1,10 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ElephantBrokerMemory = void 0;
-const node_crypto_1 = require("node:crypto");
+const node_crypto_1 = __importDefault(require("node:crypto"));
 const plugin_1 = require("@opencode-ai/plugin");
 function isTextMessagePart(part) {
     if (!part || typeof part !== "object")
@@ -9,34 +12,21 @@ function isTextMessagePart(part) {
     const candidate = part;
     return candidate.type === "text" && typeof candidate.text === "string";
 }
-function createLogger(client) {
-    return (level, message, extra) => {
-        const appLog = client?.app?.log;
-        if (appLog) {
-            void appLog({ body: { service: "elephantbroker", level, message, extra } }).catch(() => { });
-            return;
-        }
-        const line = `[EB] ${message}`;
-        if (level === "error")
-            console.error(line, extra ?? "");
-        else if (level === "warn")
-            console.warn(line, extra ?? "");
-        else
-            console.info(line, extra ?? "");
-    };
-}
 function isUUID(value) {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
+function nonBlank(value) {
+    return typeof value === "string" && value.trim().length > 0;
+}
 function sessionIdFromKey(sessionKey) {
-    const hex = node_crypto_1.createHash("sha256").update(String(sessionKey), "utf8").digest("hex").slice(0, 32);
+    const hex = node_crypto_1.default.createHash("sha256").update(String(sessionKey), "utf8").digest("hex").slice(0, 32);
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 class EBClient {
     baseUrl;
     gatewayId;
     sessionKey = "agent:main:main";
-    sessionId = crypto.randomUUID();
+    sessionId = node_crypto_1.default.randomUUID();
     agentKey = "";
     agentId = "";
     actorId = "";
@@ -101,10 +91,10 @@ class EBClient {
             max_results: opts?.max_results ?? 5,
             min_score: opts?.min_score ?? 0,
             auto_recall: opts?.auto_recall ?? false,
+            ...(nonBlank(opts?.scope) ? { scope: opts.scope.trim() } : {}),
             session_key: this.sessionKey,
             session_id: this.sessionId,
-            ...(opts?.entity_type ? { entity_type: opts.entity_type } : {}),
-            ...(this.profileName ? { profile_name: this.profileName } : {}),
+            ...(nonBlank(opts?.entity_type) ? { entity_type: opts.entity_type.trim() } : {}),
         });
     }
     async searchGlobal(query, opts) {
@@ -116,7 +106,6 @@ class EBClient {
             scope: "global",
             ...(opts?.session_key ? { session_key: opts.session_key } : {}),
             ...(opts?.entity_type ? { entity_type: opts.entity_type } : {}),
-            ...(this.profileName ? { profile_name: this.profileName } : {}),
         });
     }
     async store(text, opts) {
@@ -220,7 +209,20 @@ class EBClient {
 // Plugin
 // ---------------------------------------------------------------------------
 const ElephantBrokerMemory = async ({ client } = {}) => {
-    const log = createLogger(client);
+    const log = (level, message, extra) => {
+        const appLog = client?.app?.log;
+        if (appLog) {
+            void appLog({ body: { service: "elephantbroker", level, message, extra } }).catch(() => { });
+            return;
+        }
+        const line = `[EB] ${message}`;
+        if (level === "error")
+            console.error(line, extra ?? "");
+        else if (level === "warn")
+            console.warn(line, extra ?? "");
+        else
+            console.info(line, extra ?? "");
+    };
     const baseUrl = process.env.EB_SERVICE_URL || process.env.EB_RUNTIME_URL || process.env.COGNEE_SERVICE_URL || "http://localhost:8420";
     const gatewayId = process.env.EB_GATEWAY_ID ?? "";
     const profileName = process.env.EB_PROFILE ?? "coding";
@@ -259,10 +261,10 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                     continue;
                 for (const msg of batch) {
                     try {
-                            await ebClient.store(`[${msg.role}] ${msg.text}`, { category: "conversation", scope: "session" });
+                        await ebClient.store(`[${msg.role}] ${msg.text}`, { category: "conversation", scope: "session" });
                     }
                     catch {
-                            const stored = await ebClient.ingestMessages([{ role: msg.role, content: msg.text }]);
+                        const stored = await ebClient.ingestMessages([{ role: msg.role, content: msg.text }]);
                         if (!stored)
                             log("error", "message capture failed");
                     }
@@ -271,7 +273,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
         }
         catch (e) {
             const message = e instanceof Error ? e.message : String(e);
-        log("error", "flush failed", { error: message });
+            log("error", "flush failed", { error: message });
         }
         finally {
             flushRunning = false;
@@ -298,9 +300,10 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                     if (!gatewayId)
                         return "EB_GATEWAY_ID not configured. Set EB_GATEWAY_ID and EB_RUNTIME_URL env vars.";
                     try {
-                    const results = await ebClient.search(args.query, {
+                        const results = await ebClient.search(args.query, {
                             max_results: Math.min(args.max_results ?? 5, 20),
                             min_score: args.min_score ?? 0,
+                            scope: args.scope,
                             entity_type: args.entity_type,
                         });
                         if (!results || results.length === 0)
@@ -335,7 +338,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                     if (!gatewayId)
                         return "EB_GATEWAY_ID not configured. Set EB_GATEWAY_ID and EB_RUNTIME_URL env vars.";
                     try {
-                    const results = await ebClient.searchGlobal(args.query, {
+                        const results = await ebClient.searchGlobal(args.query, {
                             max_results: Math.min(args.max_results ?? 20, 30),
                             min_score: args.min_score ?? 0,
                             session_key: args.session_key,
@@ -377,7 +380,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                     if (!gatewayId)
                         return "EB_GATEWAY_ID not configured.";
                     try {
-                    const result = await ebClient.store(args.text, {
+                        const result = await ebClient.store(args.text, {
                             category: args.category,
                             scope: args.scope,
                             goal_ids: args.goal_ids,
@@ -406,7 +409,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                     if (!gatewayId)
                         return "EB_GATEWAY_ID not configured.";
                     try {
-                    const result = await ebClient.store(args.text, {
+                        const result = await ebClient.store(args.text, {
                             category: "decision",
                             scope: args.scope,
                             decision_status: args.decision_status,
@@ -430,7 +433,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                     if (!gatewayId)
                         return "EB_GATEWAY_ID not configured.";
                     try {
-                    const fact = await ebClient.getById(args.id);
+                        const fact = await ebClient.getById(args.id);
                         if (!fact)
                             return `Fact not found: ${args.id}`;
                         return [
@@ -459,7 +462,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                     if (!gatewayId)
                         return "EB_GATEWAY_ID not configured.";
                     try {
-                    const ok = await ebClient.forget(args.id);
+                        const ok = await ebClient.forget(args.id);
                         return ok ? `Memory ${args.id} deleted.` : `Failed to delete memory ${args.id} (not found or permission denied).`;
                     }
                     catch (e) {
@@ -474,37 +477,56 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                     text: plugin_1.tool.schema.string().optional().describe("New text content"),
                     confidence: plugin_1.tool.schema.number().optional().describe("New confidence value (0-1)"),
                     category: plugin_1.tool.schema.string().optional().describe("New category"),
-                    decision_status: plugin_1.tool.schema.string().optional()
-                        .describe("Decision status: proposed, approved, rejected, actioned"),
-                    entity_type: plugin_1.tool.schema.string().optional()
-                        .describe("Entity type: FinancialReport, Invoice, Contract, Document"),
+                    scope: plugin_1.tool.schema.string().optional().describe("New scope: session, actor, team, or global"),
+                    memory_class: plugin_1.tool.schema.string().optional().describe("New memory class, e.g. episodic, semantic, procedural"),
+                    target_actor_ids: plugin_1.tool.schema.array(plugin_1.tool.schema.string()).optional()
+                        .describe("Actor UUIDs this fact targets"),
+                    decision_domain: plugin_1.tool.schema.string().optional().describe("Decision domain tag"),
                     goal_ids: plugin_1.tool.schema.array(plugin_1.tool.schema.string()).optional()
-                        .describe("New goal IDs this fact relates to"),
+                        .describe("New goal UUIDs this fact relates to"),
                     archived: plugin_1.tool.schema.boolean().optional()
                         .describe("Archive/unarchive this fact"),
+                    autorecall_blacklisted: plugin_1.tool.schema.boolean().optional()
+                        .describe("Exclude/include this fact from automatic recall"),
                 },
                 async execute(args) {
                     if (!gatewayId)
                         return "EB_GATEWAY_ID not configured.";
                     const updates = {};
-                    if (args.text !== undefined)
-                        updates.text = args.text;
+                    if (nonBlank(args.text))
+                        updates.text = args.text.trim();
                     if (args.confidence !== undefined)
                         updates.confidence = args.confidence;
-                    if (args.category !== undefined)
-                        updates.category = args.category;
-                    if (args.decision_status !== undefined)
-                        updates.decision_status = args.decision_status;
-                    if (args.entity_type !== undefined)
-                        updates.entity_type = args.entity_type;
-                    if (args.goal_ids !== undefined)
+                    if (nonBlank(args.category))
+                        updates.category = args.category.trim();
+                    if (nonBlank(args.scope))
+                        updates.scope = args.scope.trim();
+                    if (nonBlank(args.memory_class))
+                        updates.memory_class = args.memory_class.trim();
+                    if (Array.isArray(args.target_actor_ids)) {
+                        for (const actorId of args.target_actor_ids) {
+                            if (!isUUID(actorId))
+                                return `Invalid target_actor_id (must be UUID): ${actorId}`;
+                        }
+                        updates.target_actor_ids = args.target_actor_ids;
+                    }
+                    if (nonBlank(args.decision_domain))
+                        updates.decision_domain = args.decision_domain.trim();
+                    if (Array.isArray(args.goal_ids)) {
+                        for (const goalId of args.goal_ids) {
+                            if (!isUUID(goalId))
+                                return `Invalid goal_id (must be UUID): ${goalId}`;
+                        }
                         updates.goal_ids = args.goal_ids;
+                    }
                     if (args.archived !== undefined)
                         updates.archived = args.archived;
+                    if (args.autorecall_blacklisted !== undefined)
+                        updates.autorecall_blacklisted = args.autorecall_blacklisted;
                     if (Object.keys(updates).length === 0)
                         return "Nothing to update.";
                     try {
-                    const result = await ebClient.update(args.id, updates);
+                        const result = await ebClient.update(args.id, updates);
                         if (!result)
                             return `Fact not found: ${args.id}`;
                         return `Memory ${args.id} updated successfully.`;
@@ -527,7 +549,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                     if (!gatewayId)
                         return "EB_GATEWAY_ID not configured.";
                     try {
-                    const result = await ebClient.inspectActor(args.actor_id, {
+                        const result = await ebClient.inspectActor(args.actor_id, {
                             include_relationships: args.include_relationships,
                             include_authority_chain: args.include_authority_chain,
                         });
@@ -547,7 +569,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                     if (!gatewayId)
                         return "EB_GATEWAY_ID not configured.";
                     try {
-                    const result = await ebClient.getClaim(args.claim_id);
+                        const result = await ebClient.getClaim(args.claim_id);
                         return JSON.stringify(result, null, 2);
                     }
                     catch (e) {
@@ -568,7 +590,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                         return "Provide exactly one of action_id or lineage_ref.";
                     }
                     try {
-                    const result = await ebClient.lookupProcedureAudit({
+                        const result = await ebClient.lookupProcedureAudit({
                             action_id: args.action_id,
                             lineage_ref: args.lineage_ref,
                         });
