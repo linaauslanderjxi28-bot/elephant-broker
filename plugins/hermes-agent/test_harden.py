@@ -199,5 +199,42 @@ class TestBackgroundWrites(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class TestGatewayActivation(unittest.TestCase):
+    def test_initialize_is_inactive_without_gateway_id(self) -> None:
+        module = load_plugin_module()
+        provider = module.ElephantBrokerMemoryProvider()
+        with tempfile.TemporaryDirectory() as tmp_home:
+            config_mod = sys.modules["elephantbroker_hermes_config"]
+            with patch.object(config_mod, "get_hermes_home", return_value=Path(tmp_home)):
+                with patch.dict(os.environ, {}, clear=True):
+                    provider.initialize("session-key")
+        self.assertFalse(provider._active)
+        self.assertEqual(provider._gateway_id, "")
+
+    def test_initialize_is_active_with_gateway_id(self) -> None:
+        module = load_plugin_module()
+        provider = module.ElephantBrokerMemoryProvider()
+        with tempfile.TemporaryDirectory() as tmp_home:
+            config_mod = sys.modules["elephantbroker_hermes_config"]
+            with patch.object(config_mod, "get_hermes_home", return_value=Path(tmp_home)):
+                with patch.dict(os.environ, {"EB_GATEWAY_ID": "gw-test"}, clear=True):
+                    provider.initialize("session-key")
+        self.assertTrue(provider._active)
+        self.assertEqual(provider._gateway_id, "gw-test")
+
+    def test_inactive_provider_skips_session_start(self) -> None:
+        module = load_plugin_module()
+        provider = module.ElephantBrokerMemoryProvider()
+        calls = []
+        provider._eb_request = lambda *args, **kwargs: calls.append((args, kwargs))
+        with tempfile.TemporaryDirectory() as tmp_home:
+            config_mod = sys.modules["elephantbroker_hermes_config"]
+            with patch.object(config_mod, "get_hermes_home", return_value=Path(tmp_home)):
+                with patch.dict(os.environ, {}, clear=True):
+                    provider.initialize("session-key")
+        self.assertTrue(provider.flush(timeout=2.0))
+        self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

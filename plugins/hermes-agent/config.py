@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG: dict[str, str] = {
     "service_url": "http://localhost:8420",
-    "gateway_id": "gw-enterprise-prod",
+    "gateway_id": "",
     "agent_key": "",
     "profile_name": "coding",
 }
@@ -76,7 +76,7 @@ def save_config(values: dict[str, Any], hermes_home: str) -> None:
 def config_schema() -> list[dict[str, Any]]:
     return [
         {"key": "service_url", "description": "ElephantBroker service URL", "default": "http://localhost:8420", "env_var": "EB_SERVICE_URL or EB_RUNTIME_URL"},
-        {"key": "gateway_id", "description": "ElephantBroker Gateway ID", "default": "gw-enterprise-prod", "env_var": "EB_GATEWAY_ID"},
+        {"key": "gateway_id", "description": "ElephantBroker Gateway ID", "default": "", "env_var": "EB_GATEWAY_ID"},
         {"key": "agent_key", "description": "ElephantBroker Agent Key", "secret": True, "env_var": "EB_AGENT_KEY"},
         {"key": "profile_name", "description": "Context engine profile name", "default": "coding"},
     ]

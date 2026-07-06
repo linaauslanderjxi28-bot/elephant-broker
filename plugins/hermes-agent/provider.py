@@ -52,7 +52,7 @@ class ElephantBrokerMemoryProvider(MemoryProvider):
     def __init__(self) -> None:
         super().__init__()
         self._config: dict[str, str] = {}
-        self._client = ElephantBrokerClient("http://localhost:8420", "gw-enterprise-prod", "")
+        self._client = ElephantBrokerClient("http://localhost:8420", "", "")
         self._service_url = ""
         self._gateway_id = ""
         self._agent_key = ""
