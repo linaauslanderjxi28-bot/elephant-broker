@@ -19,6 +19,15 @@ migration source/archive; new plugin changes should happen here.
 - `hermes-agent/` — Hermes Agent memory provider plugin.
 - `configs/` — Runtime config snapshots/templates for each agent.
 
+## Host Install Paths
+
+- Claude Code: `~/.claude/plugins/elephantbroker-memory/`
+- Antigravity CLI: `~/.gemini/antigravity-cli/plugins/elephantbroker-memory/`
+- OpenCode: `~/.config/opencode/plugins/elephantbroker-memory.ts`
+- OpenClaw: `~/.openclaw/extensions/elephantbroker-memory/` and
+  `~/.openclaw/extensions/elephantbroker-context/`
+- Hermes Agent: `~/.hermes/plugins/elephantbroker/`
+
 ## Ownership Rules
 
 - Backend APIs, schemas, scoring, policy, retrieval, and storage live outside

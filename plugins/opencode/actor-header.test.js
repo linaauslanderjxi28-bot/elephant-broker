@@ -49,6 +49,40 @@ async function runStoreWithHeaders(env) {
   }
 }
 
+async function runStoreWithoutGateway() {
+  const originalLoad = Module._load;
+  const originalFetch = global.fetch;
+  const originalEnv = { ...process.env };
+  let fetchCalled = false;
+
+  Module._load = (request, parent, isMain) => {
+    if (request === "@opencode-ai/plugin") {
+      const tool = (definition) => definition;
+      tool.schema = { string: schemaNode, number: schemaNode, boolean: schemaNode, array: schemaNode };
+      return { tool };
+    }
+    return originalLoad(request, parent, isMain);
+  };
+
+  global.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("fetch should not run without EB_GATEWAY_ID");
+  };
+
+  try {
+    delete require.cache[require.resolve("./elephantbroker-memory.js")];
+    process.env = { EB_RUNTIME_URL: "http://runtime.test" };
+    const { ElephantBrokerMemory } = require("./elephantbroker-memory.js");
+    const plugin = await ElephantBrokerMemory();
+    const result = await plugin.tool.memory_store.execute({ text: "remember this", category: "general", scope: "session" });
+    return { fetchCalled, result };
+  } finally {
+    Module._load = originalLoad;
+    global.fetch = originalFetch;
+    process.env = originalEnv;
+  }
+}
+
 async function runStoreWithActor(actorId) {
   return runStoreWithHeaders({ EB_ACTOR_ID: actorId });
 }
@@ -71,4 +105,10 @@ test("OpenCode memory writes include X-EB-Auth-Token when EB_AUTH_TOKEN is set",
 test("OpenCode memory writes omit X-EB-Auth-Token when EB_AUTH_TOKEN is blank", async () => {
   const headers = await runStoreWithHeaders({ EB_AUTH_TOKEN: "  " });
   assert.equal(Object.hasOwn(headers, "X-EB-Auth-Token"), false);
+});
+
+test("OpenCode memory writes fail closed when EB_GATEWAY_ID is missing", async () => {
+  const { fetchCalled, result } = await runStoreWithoutGateway();
+  assert.equal(fetchCalled, false);
+  assert.match(result, /EB_GATEWAY_ID not configured/);
 });

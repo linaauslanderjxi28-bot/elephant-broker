@@ -59,7 +59,11 @@ _PLUGIN_DIR = Path.home() / ".elephantbroker"
 
 def _service_url() -> str:
     """Return EB base URL from env or default."""
-    return (os.environ.get("EB_SERVICE_URL") or os.environ.get("COGNEE_SERVICE_URL") or "http://localhost:8420").strip().rstrip("/")
+    return (os.environ.get("EB_SERVICE_URL") or os.environ.get("EB_RUNTIME_URL") or os.environ.get("COGNEE_SERVICE_URL") or "http://localhost:8420").strip().rstrip("/")
+
+
+def _gateway_id() -> str:
+    return os.environ.get("EB_GATEWAY_ID", "").strip()
 
 
 def _default_headers() -> dict[str, str]:
@@ -71,7 +75,7 @@ def _default_headers() -> dict[str, str]:
     valid identity.
     """
     headers: dict[str, str] = {"Content-Type": "application/json"}
-    gw_id = os.environ.get("EB_GATEWAY_ID", "").strip()
+    gw_id = _gateway_id()
     if gw_id:
         headers["X-EB-Gateway-ID"] = gw_id
     agent_key = os.environ.get("EB_AGENT_KEY", "").strip()
@@ -94,6 +98,9 @@ def _eb_request(
     timeout: float = 30.0,
 ):
     """Low-level HTTP helper — mirrors ``_json_http_request`` in plugin_common."""
+    if not _gateway_id():
+        _hook_log("request_skipped_no_gateway_id", {"path": path, "method": method})
+        return None
     base = _service_url()
     headers = _default_headers()
     data = json.dumps(payload).encode("utf-8") if payload is not None else None

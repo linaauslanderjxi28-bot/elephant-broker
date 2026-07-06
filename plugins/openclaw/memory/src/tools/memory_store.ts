@@ -17,7 +17,7 @@ export function createMemoryStoreTool(client: ElephantBrokerClient) {
       },
       required: ["text"],
     },
-    async execute(toolCallId: string, params: { text: string; category?: string; scope?: string; confidence?: number }, signal?: AbortSignal) {
+    async execute(toolCallId: string, params: { text: string; category?: string; scope?: string; confidence?: number; goal_ids?: string[]; decision_status?: string }, signal?: AbortSignal) {
       const sid = client.getSessionId();
       const profile = client.getProfileName();
       const result = await client.store({
