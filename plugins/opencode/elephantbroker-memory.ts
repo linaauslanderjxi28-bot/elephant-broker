@@ -157,14 +157,14 @@ class EBClient {
     query: string,
     opts?: { max_results?: number; min_score?: number; auto_recall?: boolean; scope?: string; entity_type?: string },
   ): Promise<EBSearchResult[]> {
+    const scope = nonBlank(opts?.scope) ? opts.scope.trim() : "";
     return this.req<EBSearchResult[]>("POST", "/memory/search", {
       query,
       max_results: opts?.max_results ?? 5,
       min_score: opts?.min_score ?? 0,
       auto_recall: opts?.auto_recall ?? false,
-      ...(nonBlank(opts?.scope) ? { scope: opts.scope.trim() } : {}),
-      session_key: this.sessionKey,
-      session_id: this.sessionId,
+      ...(scope ? { scope } : {}),
+      ...(scope === "session" ? { session_key: this.sessionKey, session_id: this.sessionId } : {}),
       ...(nonBlank(opts?.entity_type) ? { entity_type: opts.entity_type.trim() } : {}),
     });
   }

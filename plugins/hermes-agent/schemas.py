@@ -32,21 +32,6 @@ SEARCH_GLOBAL_SCHEMA = {
     },
 }
 
-SEARCH_GLOBAL_SCHEMA = {
-    "name": "elephantbroker_search_global",
-    "description": "Search the global ElephantBroker knowledge base. Use this for data imported from scrapling, doc-ingestor, or other non-session pipelines.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "The global search query."},
-            "max_results": {"type": "integer", "description": "Max global results to return (default: 10, max: 20)."},
-            "session_key": {"type": "string", "description": "Optional global session key filter, e.g. scrapling:example-com or doc-ingestor:0-inbox."},
-            "entity_type": {"type": "string", "description": "Entity type filter: FinancialReport, Invoice, Contract, Document"},
-        },
-        "required": ["query"],
-    },
-}
-
 STORE_SCHEMA = {
     "name": "elephantbroker_store",
     "description": "Store a durable, explicit fact in ElephantBroker memory. Use this to persist corrections, key user decisions, or lasting preferences.",

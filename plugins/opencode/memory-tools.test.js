@@ -63,7 +63,7 @@ async function runTool(toolName, args) {
   }
 }
 
-test("memory_search forwards explicit scope to ElephantBroker", async () => {
+test("memory_search includes session identity for session scope", async () => {
   const { requests } = await runTool("memory_search", { query: "probe", scope: "session" });
 
   assert.equal(requests.length, 1);
@@ -72,6 +72,43 @@ test("memory_search forwards explicit scope to ElephantBroker", async () => {
   assert.equal(requests[0].body.session_key, "agent:main:main");
   assert.match(requests[0].body.session_id, /^[0-9a-f-]{36}$/);
   assert.equal(Object.hasOwn(requests[0].body, "profile_name"), false);
+});
+
+test("memory_search omits session identity when scope is omitted", async () => {
+  const { requests } = await runTool("memory_search", { query: "probe" });
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].body.scope, undefined);
+  assert.equal(Object.hasOwn(requests[0].body, "session_key"), false);
+  assert.equal(Object.hasOwn(requests[0].body, "session_id"), false);
+});
+
+test("memory_search omits session identity for team scope", async () => {
+  const { requests } = await runTool("memory_search", { query: "probe", scope: "team" });
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].body.scope, "team");
+  assert.equal(Object.hasOwn(requests[0].body, "session_key"), false);
+  assert.equal(Object.hasOwn(requests[0].body, "session_id"), false);
+});
+
+test("memory_search omits session identity for global scope", async () => {
+  const { requests } = await runTool("memory_search", { query: "probe", scope: "global" });
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].body.scope, "global");
+  assert.equal(Object.hasOwn(requests[0].body, "session_key"), false);
+  assert.equal(Object.hasOwn(requests[0].body, "session_id"), false);
+});
+
+test("memory_store forwards explicit team scope to ElephantBroker", async () => {
+  const { requests } = await runTool("memory_store", { text: "shared fact", scope: "team" });
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "http://eb.local/memory/store");
+  assert.equal(requests[0].body.fact.scope, "team");
+  assert.equal(requests[0].body.session_key, "agent:main:main");
+  assert.match(requests[0].body.session_id, /^[0-9a-f-]{36}$/);
 });
 
 test("memory_update omits backend-forbidden and blank optional fields", async () => {

@@ -41,7 +41,7 @@ def handle_search(provider: ToolProvider, args: dict[str, Any]) -> str:
     # When scope is omitted, the backend returns results from ALL scopes.
     # Only pass session_key/session_id for non-global searches to avoid
     # premature session filtering at the orchestrator level.
-    if scope != "global":
+    if scope == "session":
         payload["session_key"] = provider._session_key
         payload["session_id"] = provider._session_id
     payload["auto_recall"] = True
