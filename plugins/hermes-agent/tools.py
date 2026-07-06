@@ -32,10 +32,19 @@ def handle_search(provider: ToolProvider, args: dict[str, Any]) -> str:
     payload = {
         "query": query,
         "max_results": min(int(args.get("max_results", 5)), 20),
-        "session_key": provider._session_key,
-        "session_id": provider._session_id,
-        "auto_recall": True,
     }
+    scope = args.get("scope")
+    if scope:
+        if scope not in VALID_SCOPES:
+            return json.dumps({"error": f"Invalid scope '{scope}'. Must be one of: {', '.join(sorted(VALID_SCOPES))}"})
+        payload["scope"] = scope
+    # When scope is omitted, the backend returns results from ALL scopes.
+    # Only pass session_key/session_id for non-global searches to avoid
+    # premature session filtering at the orchestrator level.
+    if scope != "global":
+        payload["session_key"] = provider._session_key
+        payload["session_id"] = provider._session_id
+    payload["auto_recall"] = True
     if args.get("entity_type"):
         payload["entity_type"] = args["entity_type"]
     try:
@@ -66,14 +75,19 @@ def handle_search_global(provider: ToolProvider, args: dict[str, Any]) -> str:
         return json.dumps({"error": f"Global search failed: {e}"})
 
 
+VALID_SCOPES = {"session", "actor", "team", "organization", "global", "task", "subagent", "artifact"}
+
 def handle_store(provider: ToolProvider, args: dict[str, Any]) -> str:
     text = args.get("text", "")
     if not text:
         return json.dumps({"error": "Missing required parameter: text"})
+    scope = args.get("scope", "session")
+    if scope not in VALID_SCOPES:
+        return json.dumps({"error": f"Invalid scope '{scope}'. Must be one of: {', '.join(sorted(VALID_SCOPES))}"})
     fact = {
         "text": text,
         "category": args.get("category", "general"),
-        "scope": "session",
+        "scope": scope,
         "memory_class": "episodic",
         "confidence": 1.0,
     }
