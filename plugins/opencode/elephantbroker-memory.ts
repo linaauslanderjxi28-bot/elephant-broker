@@ -333,7 +333,7 @@ export const ElephantBrokerMemory: Plugin = async ({ client } = {}) => {
     else if (level === "warn") console.warn(line, extra ?? "");
     else console.info(line, extra ?? "");
   };
-  const baseUrl = process.env.EB_RUNTIME_URL ?? "http://localhost:8420";
+  const baseUrl = process.env.EB_SERVICE_URL || process.env.EB_RUNTIME_URL || process.env.COGNEE_SERVICE_URL || "http://localhost:8420";
   const gatewayId = process.env.EB_GATEWAY_ID ?? "";
   const profileName = process.env.EB_PROFILE ?? "coding";
   const agentId = process.env.EB_AGENT_NAME ?? process.env.COGNEE_AGENT_NAME ?? "";
