@@ -137,9 +137,23 @@ export function register(api: PluginAPI) {
         max_results: 10,
       });
 
-      if (results.length > 0) {
-        const contextStr = formatMemoryContext(results);
-        console.info(`[EB] Auto-recall: injecting ${results.length} memories into context`);
+      // Also fetch global-scope memories (scrapling/doc-ingestor imports)
+      let globalResults: Awaited<ReturnType<typeof client.searchGlobal>> = [];
+      try {
+        globalResults = await client.searchGlobal(query, {
+          max_results: 10,
+          session_key: currentSessionKey,
+        });
+      } catch (err) {
+        console.warn(`[EB] Global search failed (non-fatal): ${err}`);
+      }
+
+      // Merge: session results first, then global
+      const merged = [...results, ...globalResults];
+
+      if (merged.length > 0) {
+        const contextStr = formatMemoryContext(merged);
+        console.info(`[EB] Auto-recall: injecting ${merged.length} memories into context (${results.length} session + ${globalResults.length} global)`);
         // Slot: `prependSystemContext` (NOT `prependContext`). TF-ER-001 BUG-1 / TODO-5-212:
         // Phase 6 AD-4 assigned `prependContext` to the context plugin's Surface B
         // working-set overlay (per-turn assembled items). The memory plugin's
