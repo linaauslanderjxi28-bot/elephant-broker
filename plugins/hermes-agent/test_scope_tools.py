@@ -78,6 +78,17 @@ class TestScopeTools(unittest.TestCase):
         self.assertNotIn("session_key", payload)
         self.assertNotIn("session_id", payload)
 
+    def test_search_omits_session_identity_for_organization_scope(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+
+        _ = tools.handle_search(provider, {"query": "probe", "scope": "organization"})
+
+        payload = provider.calls[0][1]
+        self.assertEqual(payload["scope"], "organization")
+        self.assertNotIn("session_key", payload)
+        self.assertNotIn("session_id", payload)
+
     def test_search_omits_session_identity_for_global_scope(self) -> None:
         tools = load_tools_module()
         provider = FakeProvider()
@@ -85,6 +96,18 @@ class TestScopeTools(unittest.TestCase):
         _ = tools.handle_search(provider, {"query": "probe", "scope": "global"})
 
         payload = provider.calls[0][1]
+        self.assertEqual(payload["scope"], "global")
+        self.assertNotIn("session_key", payload)
+        self.assertNotIn("session_id", payload)
+
+    def test_search_global_sends_global_scope(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+
+        _ = tools.handle_search_global(provider, {"query": "probe"})
+
+        path, payload, _options = provider.calls[0]
+        self.assertEqual(path, "/memory/search")
         self.assertEqual(payload["scope"], "global")
         self.assertNotIn("session_key", payload)
         self.assertNotIn("session_id", payload)
@@ -99,6 +122,17 @@ class TestScopeTools(unittest.TestCase):
         if not isinstance(fact, dict):
             self.fail("store payload fact must be a dict")
         self.assertEqual(fact["scope"], "team")
+
+    def test_store_uses_explicit_organization_scope(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+
+        _ = tools.handle_store(provider, {"text": "shared fact", "scope": "organization"})
+
+        fact = provider.calls[0][1]["fact"]
+        if not isinstance(fact, dict):
+            self.fail("store payload fact must be a dict")
+        self.assertEqual(fact["scope"], "organization")
 
     def test_invalid_scope_returns_error_without_request(self) -> None:
         tools = load_tools_module()
