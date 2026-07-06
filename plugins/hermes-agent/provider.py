@@ -159,10 +159,19 @@ class ElephantBrokerMemoryProvider(MemoryProvider):
             try:
                 sid = stable_uuid(session_id) if session_id else self._session_id
                 skey = session_id or self._session_key
-                payload = {"query": query, "max_results": 5, "session_key": skey, "session_id": sid, "auto_recall": True}
-                results = self._eb_request("/memory/search", payload, timeout=10.0)
-                if isinstance(results, list) and results:
-                    formatted = self._format_search_results(results)
+                # Session scope — personal conversation context
+                session_payload = {"query": query, "max_results": 5, "session_key": skey, "session_id": sid, "auto_recall": True}
+                session_results = self._eb_request("/memory/search", session_payload, timeout=10.0)
+                if not isinstance(session_results, list):
+                    session_results = []
+                # Global scope — scrapling/doc-ingestor imported data
+                global_payload = {"query": query, "max_results": 5, "scope": "global", "profile_name": self._profile_name}
+                global_results = self._eb_request("/memory/search", global_payload, timeout=10.0)
+                if not isinstance(global_results, list):
+                    global_results = []
+                all_results = session_results + global_results
+                if all_results:
+                    formatted = self._format_search_results(all_results)
                     with self._prefetch_lock:
                         self._prefetch_result = formatted
             except Exception as e:
