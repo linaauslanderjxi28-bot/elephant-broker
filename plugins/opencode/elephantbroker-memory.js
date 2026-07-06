@@ -292,7 +292,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                     min_score: plugin_1.tool.schema.number().optional().default(0)
                         .describe("Minimum relevance score (0-1)"),
                     scope: plugin_1.tool.schema.string().optional()
-                        .describe("Scope filter (global, session, actor)"),
+                        .describe("Scope filter (global, organization, team, actor, session)"),
                     entity_type: plugin_1.tool.schema.string().optional()
                         .describe("Entity type filter: Product, Supplier, MarketSignal, ResearchDecision, Prospect, CustomsRecord, Deal, FinancialReport, Invoice, Contract, Document"),
                 },
@@ -370,7 +370,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                     category: plugin_1.tool.schema.string().optional().default("general")
                         .describe("Category tag (e.g. 'code', 'architecture', 'user-preference')"),
                     scope: plugin_1.tool.schema.string().optional().default("session")
-                        .describe("Visibility scope: session, actor, team, or global"),
+                        .describe("Visibility scope: session, actor, team, organization, or global"),
                     goal_ids: plugin_1.tool.schema.array(plugin_1.tool.schema.string()).optional()
                         .describe("Optional fact IDs this fact relates to"),
                     decision_status: plugin_1.tool.schema.string().optional()
@@ -477,7 +477,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                     text: plugin_1.tool.schema.string().optional().describe("New text content"),
                     confidence: plugin_1.tool.schema.number().optional().describe("New confidence value (0-1)"),
                     category: plugin_1.tool.schema.string().optional().describe("New category"),
-                    scope: plugin_1.tool.schema.string().optional().describe("New scope: session, actor, team, or global"),
+                    scope: plugin_1.tool.schema.string().optional().describe("New scope: session, actor, team, organization, or global"),
                     memory_class: plugin_1.tool.schema.string().optional().describe("New memory class, e.g. episodic, semantic, procedural"),
                     target_actor_ids: plugin_1.tool.schema.array(plugin_1.tool.schema.string()).optional()
                         .describe("Actor UUIDs this fact targets"),

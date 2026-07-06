@@ -4,8 +4,9 @@
 
 ## 功能
 
-- `memory_search` — 语义搜索已有记忆
-- `memory_store` — 存储事实/知识到记忆
+- `memory_search` — 语义搜索已有记忆，支持 `session`、`actor`、`team`、`organization`、`global` 等 scope
+- `memory_search_global` — 搜索全局记忆库
+- `memory_store` — 存储事实/知识到记忆，支持写入 `team`、`organization` 等共享 scope
 - `memory_get` — 按 ID 获取记忆详情
 - `memory_forget` — 按 ID 删除记忆
 - `memory_update` — 更新记忆内容或置信度

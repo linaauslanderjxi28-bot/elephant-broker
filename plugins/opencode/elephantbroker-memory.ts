@@ -400,7 +400,7 @@ export const ElephantBrokerMemory: Plugin = async ({ client } = {}) => {
           min_score: tool.schema.number().optional().default(0)
             .describe("Minimum relevance score (0-1)"),
           scope: tool.schema.string().optional()
-            .describe("Scope filter (global, session, actor)"),
+            .describe("Scope filter (global, organization, team, actor, session)"),
           entity_type: tool.schema.string().optional()
             .describe("Entity type filter: Product, Supplier, MarketSignal, ResearchDecision, Prospect, CustomsRecord, Deal, FinancialReport, Invoice, Contract, Document"),
         },
@@ -477,7 +477,7 @@ export const ElephantBrokerMemory: Plugin = async ({ client } = {}) => {
           category: tool.schema.string().optional().default("general")
             .describe("Category tag (e.g. 'code', 'architecture', 'user-preference')"),
           scope: tool.schema.string().optional().default("session")
-            .describe("Visibility scope: session, actor, team, or global"),
+            .describe("Visibility scope: session, actor, team, organization, or global"),
           goal_ids: tool.schema.array(tool.schema.string()).optional()
             .describe("Optional fact IDs this fact relates to"),
           decision_status: tool.schema.string().optional()
@@ -577,7 +577,7 @@ export const ElephantBrokerMemory: Plugin = async ({ client } = {}) => {
           text: tool.schema.string().optional().describe("New text content"),
           confidence: tool.schema.number().optional().describe("New confidence value (0-1)"),
           category: tool.schema.string().optional().describe("New category"),
-          scope: tool.schema.string().optional().describe("New scope: session, actor, team, or global"),
+          scope: tool.schema.string().optional().describe("New scope: session, actor, team, organization, or global"),
           memory_class: tool.schema.string().optional().describe("New memory class, e.g. episodic, semantic, procedural"),
           target_actor_ids: tool.schema.array(tool.schema.string()).optional()
             .describe("Actor UUIDs this fact targets"),
