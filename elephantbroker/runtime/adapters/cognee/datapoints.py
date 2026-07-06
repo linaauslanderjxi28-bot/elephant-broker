@@ -25,6 +25,26 @@ def _epoch_ms_to_dt(epoch_ms: int) -> datetime:
     return datetime.fromtimestamp(epoch_ms / 1000, tz=UTC)
 
 
+def _provenance_refs_to_json(refs: list[ProvenanceRef]) -> str:
+    return json.dumps(
+        [ref.model_dump(mode="json", exclude_none=True) for ref in refs],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _provenance_refs_from_graph(value: object) -> list[ProvenanceRef]:
+    if value in (None, ""):
+        return []
+    try:
+        raw = json.loads(value) if isinstance(value, str) else value
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [ProvenanceRef.model_validate(ref) for ref in raw if isinstance(ref, dict)]
+
+
 # ---------------------------------------------------------------------------
 # FactDataPoint
 # ---------------------------------------------------------------------------
@@ -45,7 +65,7 @@ class FactDataPoint(DataPoint):
     use_count: int = 0
     successful_use_count: int = 0
     provenance_refs: list[str] = []
-    typed_provenance_refs: list[dict[str, Any]] = []
+    typed_provenance_refs: str = "[]"
     embedding_ref: str | None = None
     token_size: int | None = None
     eb_id: str = ""
@@ -91,7 +111,7 @@ class FactDataPoint(DataPoint):
             use_count=fact.use_count,
             successful_use_count=fact.successful_use_count,
             provenance_refs=list(fact.provenance_refs),
-            typed_provenance_refs=[ref.model_dump() for ref in fact.typed_provenance_refs],
+            typed_provenance_refs=_provenance_refs_to_json(fact.typed_provenance_refs),
             embedding_ref=fact.embedding_ref,
             token_size=fact.token_size,
             eb_id=str(fact.id),
@@ -124,7 +144,7 @@ class FactDataPoint(DataPoint):
             use_count=self.use_count,
             successful_use_count=self.successful_use_count,
             provenance_refs=list(self.provenance_refs),
-            typed_provenance_refs=[ProvenanceRef.model_validate(ref) for ref in self.typed_provenance_refs],
+            typed_provenance_refs=_provenance_refs_from_graph(self.typed_provenance_refs),
             embedding_ref=self.embedding_ref,
             token_size=self.token_size,
             gateway_id=self.gateway_id,

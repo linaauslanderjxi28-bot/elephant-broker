@@ -83,6 +83,26 @@ class TestFactDataPoint:
         assert restored.typed_provenance_refs == fact.typed_provenance_refs
         assert restored.provenance_refs == []
 
+    def test_typed_provenance_is_graph_safe_json_string(self):
+        fact = FactAssertion(
+            text="Imported document chunk",
+            typed_provenance_refs=[
+                ProvenanceRef(
+                    source_type="file_import",
+                    source_name="0-inbox/content_list_v2.json",
+                    collector="s3",
+                    confidence=None,
+                ),
+            ],
+        )
+
+        dp = FactDataPoint.from_schema(fact)
+
+        assert isinstance(dp.typed_provenance_refs, str)
+        assert "NO_VALUE" not in dp.typed_provenance_refs
+        restored = dp.to_schema()
+        assert restored.typed_provenance_refs == fact.typed_provenance_refs
+
     def test_archived_and_blacklisted_round_trip(self):
         """Phase 9: archived and autorecall_blacklisted fields survive DataPoint round-trip."""
         fact = FactAssertion(
