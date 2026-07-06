@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { type Plugin, tool } from "@opencode-ai/plugin";
 
 declare const process: { env: Record<string, string | undefined> };
@@ -72,18 +73,8 @@ function isUUID(value: string): value is UUID {
 }
 
 function sessionIdFromKey(sessionKey: string): UUID {
-  const hash = (seed: number) => {
-    let value = seed >>> 0;
-    for (let i = 0; i < sessionKey.length; i += 1) {
-      value ^= sessionKey.charCodeAt(i);
-      value = Math.imul(value, 16777619) >>> 0;
-    }
-    return value.toString(16).padStart(8, "0");
-  };
-  const hex = `${hash(0x811c9dc5)}${hash(0x01000193)}${hash(0x9e3779b9)}${hash(0x85ebca6b)}`;
-  const version = `4${hex.slice(13, 16)}`;
-  const variant = ((parseInt(hex.slice(16, 18), 16) & 0x3f) | 0x80).toString(16).padStart(2, "0");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${version}-${variant}${hex.slice(18, 20)}-${hex.slice(20, 32)}`;
+  const hex = crypto.createHash("sha256").update(String(sessionKey), "utf8").digest("hex").slice(0, 32);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 class EBClient {
