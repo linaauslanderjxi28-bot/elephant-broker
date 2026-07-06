@@ -7,7 +7,8 @@
     "strict": true,
     "esModuleInterop": true,
     "declaration": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": ["vitest/globals"]
   },
   "include": ["index.ts", "src/**/*.ts", "tests/**/*.ts", "../shared/**/*.ts"]
 }
