@@ -134,7 +134,10 @@ class EBClient {
     if (this.agentId) h["X-EB-Agent-ID"] = this.agentId;
     if (this.actorId) h["X-EB-Actor-Id"] = this.actorId;
     const authToken = (process.env.EB_AUTH_TOKEN || "").trim();
-    if (authToken) h["X-EB-Auth-Token"] = authToken;
+    if (authToken) {
+      h["X-EB-Auth-Token"] = authToken;
+      h.Authorization = `Bearer ${authToken}`;
+    }
     return h;
   }
 

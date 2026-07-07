@@ -70,8 +70,10 @@ class EBClient {
         if (this.actorId)
             h["X-EB-Actor-Id"] = this.actorId;
         const authToken = (process.env.EB_AUTH_TOKEN || "").trim();
-        if (authToken)
+        if (authToken) {
             h["X-EB-Auth-Token"] = authToken;
+            h.Authorization = `Bearer ${authToken}`;
+        }
         return h;
     }
     async req(method, path, body, statusOK) {
