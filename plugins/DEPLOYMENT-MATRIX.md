@@ -27,7 +27,7 @@
 |-------|----------------------|-----------------------|
 | **Claude Code** | `~/.claude/plugins/elephantbroker-memory/` (marketplace 安装) | `plugins/claude-code/` |
 | **AGY CLI** | `~/.gemini/config/plugins/elephantbroker-memory/` | `plugins/antigravity-cli/` |
-| **Hermes** | `~/.hermes/plugins/elephantbroker/` | `plugins/hermes-agent/` |
+| **Hermes** | `~/.hermes/plugins/memory/elephantbroker/` | `plugins/hermes-agent/` |
 | **OpenCode** | `~/.config/opencode/plugins/elephantbroker-memory.ts` | `plugins/opencode/elephantbroker-memory.ts` |
 | **OpenClaw** | `~/.openclaw/extensions/elephantbroker-memory/` and `~/.openclaw/extensions/elephantbroker-context/` | `plugins/openclaw/memory/`, `plugins/openclaw/context/` |
 
