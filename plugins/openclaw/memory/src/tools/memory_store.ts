@@ -12,7 +12,7 @@ export function createMemoryStoreTool(client: ElephantBrokerClient) {
         category: { type: "string", description: "Category (preference, decision, event, etc.)" },
         scope: { type: "string", description: "Visibility scope" },
         confidence: { type: "number", description: "Confidence 0.0-1.0" },
-        goal_ids: { type: "array", items: { type: "string" }, description: "Fact IDs this relates to" },
+        goal_ids: { type: "array", items: { type: "string" }, description: "Related goal UUIDs. Values must be UUID strings." },
         decision_status: { type: "string", description: "Decision status: proposed, approved, rejected, actioned" },
       },
       required: ["text"],

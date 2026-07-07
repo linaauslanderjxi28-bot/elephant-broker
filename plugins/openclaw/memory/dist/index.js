@@ -858,7 +858,7 @@ function createMemoryStoreTool(client) {
         category: { type: "string", description: "Category (preference, decision, event, etc.)" },
         scope: { type: "string", description: "Visibility scope" },
         confidence: { type: "number", description: "Confidence 0.0-1.0" },
-        goal_ids: { type: "array", items: { type: "string" }, description: "Fact IDs this relates to" },
+        goal_ids: { type: "array", items: { type: "string" }, description: "Related goal UUIDs. Values must be UUID strings." },
         decision_status: { type: "string", description: "Decision status: proposed, approved, rejected, actioned" }
       },
       required: ["text"]
@@ -1740,15 +1740,19 @@ function createArtifactCreateTool(client) {
 }
 
 // src/index.ts
+function isEnabled(value) {
+  return value === true || value === "true" || value === "1";
+}
 function register(api) {
   const cfg = api.pluginConfig || {};
   const baseUrl = cfg.baseUrl || process.env.EB_SERVICE_URL || process.env.EB_RUNTIME_URL || process.env.COGNEE_SERVICE_URL || "http://localhost:8420";
-  const profileName = cfg.profileName || process.env.EB_PROFILE || "coding";
-  const gatewayId = cfg.gatewayId || process.env.EB_GATEWAY_ID;
-  const gatewayShortName = cfg.gatewayShortName || process.env.EB_GATEWAY_SHORT_NAME;
+  const profileName = typeof cfg.profileName === "string" ? cfg.profileName : process.env.EB_PROFILE || "coding";
+  const gatewayId = typeof cfg.gatewayId === "string" ? cfg.gatewayId : process.env.EB_GATEWAY_ID;
+  const gatewayShortName = typeof cfg.gatewayShortName === "string" ? cfg.gatewayShortName : process.env.EB_GATEWAY_SHORT_NAME;
+  const enableAdminTools = isEnabled(cfg.enableAdminTools) || isEnabled(process.env.EB_ENABLE_ADMIN_TOOLS);
   const client = new ElephantBrokerClient(baseUrl, gatewayId);
   client.setProfileName(profileName);
-  const configActorId = cfg.actorId || process.env.EB_ACTOR_ID;
+  const configActorId = typeof cfg.actorId === "string" ? cfg.actorId : process.env.EB_ACTOR_ID;
   if (configActorId) {
     client.setActorId(configActorId);
   }
@@ -1779,12 +1783,14 @@ function register(api) {
   api.registerTool(createGuardStatusTool(client));
   api.registerTool(createArtifactSearchTool(client));
   api.registerTool(createArtifactCreateTool(client));
-  api.registerTool(createAdminCreateOrgTool(client));
-  api.registerTool(createAdminCreateTeamTool(client));
-  api.registerTool(createAdminRegisterActorTool(client));
-  api.registerTool(createAdminAddMemberTool(client));
-  api.registerTool(createAdminRemoveMemberTool(client));
-  api.registerTool(createAdminMergeActorsTool(client));
+  if (enableAdminTools) {
+    api.registerTool(createAdminCreateOrgTool(client));
+    api.registerTool(createAdminCreateTeamTool(client));
+    api.registerTool(createAdminRegisterActorTool(client));
+    api.registerTool(createAdminAddMemberTool(client));
+    api.registerTool(createAdminRemoveMemberTool(client));
+    api.registerTool(createAdminMergeActorsTool(client));
+  }
   api.on("before_agent_start", async (event, ctx) => {
     const hookEvent = event;
     const hookCtx = ctx || {};

@@ -5,16 +5,30 @@ const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
 describe("Plugin registration", () => {
-  it("registers 28 tools", async () => {
+  it("registers non-admin tools by default", async () => {
     const { register } = await import("../src/index.js");
-    const tools: unknown[] = [];
+    const tools: Array<{ id: string }> = [];
     const hooks: Record<string, unknown> = {};
     const api = {
-      registerTool: (t: unknown) => tools.push(t),
+      registerTool: (t: { id: string }) => tools.push(t),
       on: (event: string, handler: unknown) => { hooks[event] = handler; },
     };
     register(api);
+    expect(tools.length).toBe(22);
+    expect(tools.map(t => t.id)).not.toContain("admin_create_org");
+  });
+
+  it("registers admin tools when explicitly enabled", async () => {
+    const { register } = await import("../src/index.js");
+    const tools: Array<{ id: string }> = [];
+    const api = {
+      pluginConfig: { enableAdminTools: true },
+      registerTool: (t: { id: string }) => tools.push(t),
+      on: () => {},
+    };
+    register(api);
     expect(tools.length).toBe(28);
+    expect(tools.map(t => t.id)).toContain("admin_create_org");
   });
 
   it("registers 4 hooks via api.on()", async () => {
@@ -43,12 +57,6 @@ describe("Plugin registration", () => {
     const ids = tools.map(t => t.id).sort();
     expect(ids).toEqual([
       "actor_inspect",
-      "admin_add_member",
-      "admin_create_org",
-      "admin_create_team",
-      "admin_merge_actors",
-      "admin_register_actor",
-      "admin_remove_member",
       "artifact_search",
       "claim_get",
       "create_artifact",
@@ -71,5 +79,17 @@ describe("Plugin registration", () => {
       "session_goals_progress",
       "session_goals_update_status",
     ]);
+  });
+
+  it("memory_store describes goal_ids as goal UUIDs", async () => {
+    const { register } = await import("../src/index.js");
+    const tools: Array<{ id: string; parameters: { properties: Record<string, { description?: string }> } }> = [];
+    const api = {
+      registerTool: (t: { id: string; parameters: { properties: Record<string, { description?: string }> } }) => tools.push(t),
+      on: () => {},
+    };
+    register(api);
+    const memoryStore = tools.find(t => t.id === "memory_store");
+    expect(memoryStore?.parameters.properties.goal_ids.description).toContain("goal UUIDs");
   });
 });

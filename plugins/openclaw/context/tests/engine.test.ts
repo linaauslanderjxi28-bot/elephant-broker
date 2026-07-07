@@ -141,6 +141,17 @@ describe("TestLifecycleMethods", () => {
     expect(result.bootstrapped).toBe(true);
   });
 
+  it("bootstrap sends configured gateway id", async () => {
+    engine = new ContextEngineImpl(client, { profileName: "research", gatewayId: "gw-test" });
+    await engine.bootstrap({ sessionId: "sid-1", sessionKey: "agent:test:main" });
+    expect(client.bootstrap).toHaveBeenCalledWith(
+      expect.objectContaining({
+        gateway_id: "gw-test",
+        agent_key: "gw-test:main",
+      }),
+    );
+  });
+
   it("bootstrap uses default session key when not provided", async () => {
     await engine.bootstrap({ sessionId: "sid-2" });
     expect(client.setSessionContext).toHaveBeenCalledWith("agent:main:main", "sid-2");

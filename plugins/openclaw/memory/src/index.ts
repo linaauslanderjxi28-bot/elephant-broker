@@ -35,22 +35,27 @@ export interface PluginAPI {
   pluginConfig?: Record<string, unknown>;
 }
 
+function isEnabled(value: unknown): boolean {
+  return value === true || value === "true" || value === "1";
+}
+
 /**
  * Register the ElephantBroker Memory Plugin with an OpenClaw-compatible host.
  *
  * Config resolution: api.pluginConfig (openclaw.json) > process.env > defaults
  */
 export function register(api: PluginAPI) {
-  const cfg = (api.pluginConfig || {}) as Record<string, string | undefined>;
+  const cfg = (api.pluginConfig || {}) as Record<string, unknown>;
   const baseUrl = cfg.baseUrl || process.env.EB_SERVICE_URL || process.env.EB_RUNTIME_URL || process.env.COGNEE_SERVICE_URL || "http://localhost:8420";
-  const profileName = cfg.profileName || process.env.EB_PROFILE || "coding";
-  const gatewayId = cfg.gatewayId || process.env.EB_GATEWAY_ID;
-  const gatewayShortName = cfg.gatewayShortName || process.env.EB_GATEWAY_SHORT_NAME;
+  const profileName = typeof cfg.profileName === "string" ? cfg.profileName : process.env.EB_PROFILE || "coding";
+  const gatewayId = typeof cfg.gatewayId === "string" ? cfg.gatewayId : process.env.EB_GATEWAY_ID;
+  const gatewayShortName = typeof cfg.gatewayShortName === "string" ? cfg.gatewayShortName : process.env.EB_GATEWAY_SHORT_NAME;
+  const enableAdminTools = isEnabled(cfg.enableAdminTools) || isEnabled(process.env.EB_ENABLE_ADMIN_TOOLS);
   const client = new ElephantBrokerClient(baseUrl, gatewayId);
   client.setProfileName(profileName);
 
   // GF-06: populate actor ID from config/env as fallback
-  const configActorId = cfg.actorId || process.env.EB_ACTOR_ID;
+  const configActorId = typeof cfg.actorId === "string" ? cfg.actorId : process.env.EB_ACTOR_ID;
   if (configActorId) {
     client.setActorId(configActorId);
   }
@@ -96,12 +101,14 @@ export function register(api: PluginAPI) {
   api.registerTool(createArtifactCreateTool(client));
 
   // Register 6 admin tools (Phase 8 — authority-gated, server returns 403 if insufficient)
-  api.registerTool(createAdminCreateOrgTool(client));
-  api.registerTool(createAdminCreateTeamTool(client));
-  api.registerTool(createAdminRegisterActorTool(client));
-  api.registerTool(createAdminAddMemberTool(client));
-  api.registerTool(createAdminRemoveMemberTool(client));
-  api.registerTool(createAdminMergeActorsTool(client));
+  if (enableAdminTools) {
+    api.registerTool(createAdminCreateOrgTool(client));
+    api.registerTool(createAdminCreateTeamTool(client));
+    api.registerTool(createAdminRegisterActorTool(client));
+    api.registerTool(createAdminAddMemberTool(client));
+    api.registerTool(createAdminRemoveMemberTool(client));
+    api.registerTool(createAdminMergeActorsTool(client));
+  }
 
   // Hook: before_agent_start — learn agentId + auto-recall
   api.on("before_agent_start", async (event: unknown, ctx: unknown) => {

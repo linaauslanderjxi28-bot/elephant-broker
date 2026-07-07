@@ -308,8 +308,7 @@ var ContextEngineImpl = class {
       session_key: this.currentSessionKey,
       session_id: this.currentSessionId,
       profile_name: this.profileName,
-      gateway_id: "",
-      // Populated by middleware from X-EB-Gateway-ID header
+      gateway_id: this.gatewayId || void 0,
       agent_key: this.currentAgentKey,
       is_subagent: false,
       parent_session_key: void 0
