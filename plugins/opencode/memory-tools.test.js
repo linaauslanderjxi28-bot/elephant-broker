@@ -10,7 +10,7 @@ function schemaNode() {
   };
 }
 
-async function runTool(toolName, args) {
+async function runTool(toolName, args, options = {}) {
   const originalLoad = Module._load;
   const originalFetch = global.fetch;
   const originalEnv = { ...process.env };
@@ -25,8 +25,9 @@ async function runTool(toolName, args) {
     return originalLoad(request, parent, isMain);
   };
 
-  global.fetch = async (url, options) => {
-    requests.push({ url, options, body: options.body ? JSON.parse(options.body) : undefined });
+  global.fetch = async (url, requestOptions) => {
+    requests.push({ url, options: requestOptions, body: requestOptions.body ? JSON.parse(requestOptions.body) : undefined });
+    if (options.fetch) return options.fetch(url, requestOptions, requests);
     return {
       ok: true,
       status: 200,
@@ -138,6 +139,44 @@ test("memory_store forwards explicit organization scope to ElephantBroker", asyn
   assert.equal(requests[0].body.fact.scope, "organization");
   assert.equal(requests[0].body.session_key, "agent:main:main");
   assert.match(requests[0].body.session_id, /^[0-9a-f-]{36}$/);
+});
+
+test("memory_store reports backend fact id instead of gateway id", async () => {
+  const factId = "11111111-1111-1111-1111-111111111111";
+  const { output } = await runTool("memory_store", { text: "stored fact" }, {
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        id: factId,
+        gateway_id: "gw-test",
+        text: "stored fact",
+        category: "general",
+        scope: "session",
+        confidence: 1,
+        memory_class: "episodic",
+        created_at: "2026-07-06T00:00:00Z",
+        updated_at: "2026-07-06T00:00:00Z",
+        use_count: 0,
+      }),
+    }),
+  });
+
+  assert.match(output, new RegExp(`id: ${factId}`));
+  assert.doesNotMatch(output, /id: gw-test/);
+});
+
+test("memory_forget handles backend not-found response without losing client binding", async () => {
+  const { output } = await runTool("memory_forget", { id: "11111111-1111-1111-1111-111111111111" }, {
+    fetch: async () => ({
+      ok: false,
+      status: 404,
+      text: async () => "",
+    }),
+  });
+
+  assert.match(output, /Failed to delete memory/);
+  assert.doesNotMatch(output, /undefined is not an object|_client/);
 });
 
 test("memory_update omits backend-forbidden and blank optional fields", async () => {

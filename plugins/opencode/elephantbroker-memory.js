@@ -76,11 +76,8 @@ class EBClient {
             body: body ? JSON.stringify(body) : undefined,
             signal: AbortSignal.timeout(30000),
         });
-        if (statusOK !== undefined && res.status === statusOK)
-            return null;
         if (!res.ok) {
-            // For 404/403/409, return null instead of throwing
-            if (res.status === 404 || res.status === 403 || res.status === 409)
+            if (statusOK !== undefined && res.status === statusOK)
                 return null;
             throw new Error(`EB ${method} ${path} failed: ${res.status}`);
         }
@@ -130,7 +127,9 @@ class EBClient {
     }
     async forget(id) {
         try {
-            await this.req("DELETE", `/memory/${id}`);
+            const result = await this.req("DELETE", `/memory/${id}`, undefined, 404);
+            if (result === null)
+                return false;
             return true;
         }
         catch {

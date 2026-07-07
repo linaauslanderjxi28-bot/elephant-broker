@@ -65,7 +65,7 @@ class FactDataPoint(DataPoint):
     use_count: int = 0
     successful_use_count: int = 0
     provenance_refs: list[str] = []
-    typed_provenance_refs: str = "[]"
+    typed_provenance_refs: str | list[dict[str, object]] = "[]"
     embedding_ref: str | None = None
     token_size: int | None = None
     eb_id: str = ""

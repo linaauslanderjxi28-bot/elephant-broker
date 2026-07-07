@@ -642,6 +642,19 @@ class TestMemoryStoreFacadePhase4:
         assert result is not None
         assert result.text == fact.text
 
+    async def test_get_by_id_accepts_graph_list_typed_provenance_refs(self, monkeypatch, mock_add_data_points, mock_cognee):
+        facade, graph, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        fact = make_fact_assertion()
+        props = self._fact_props(fact)
+        props["typed_provenance_refs"] = []
+        graph.get_entity = AsyncMock(return_value=props)
+
+        result = await facade.get_by_id(fact.id)
+
+        assert result is not None
+        assert result.typed_provenance_refs == []
+
     async def test_get_by_id_returns_none_for_missing(self, monkeypatch, mock_add_data_points, mock_cognee):
         facade, graph, *_ = self._make()
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
