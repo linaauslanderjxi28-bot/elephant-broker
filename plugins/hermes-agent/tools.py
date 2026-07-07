@@ -347,8 +347,12 @@ def handle_artifact_search(provider: ToolProvider, args: dict[str, Any]) -> str:
     max_results = min(int(args.get("max_results", 5)), 50)
     results = {}
     if scope in ("session", "all"):
-        payload = {"query": query, "tool_name": args.get("tool_name"), "max_results": max_results, **_session_params(provider)}
-        results["session"] = provider._eb_request("/artifacts/session/search", payload, timeout=10.0)
+        if UUID_RE.match(str(query)):
+            path = _query(f"/artifacts/session/{query}", _session_params(provider))
+            results["session"] = provider._eb_request(path, None, method="GET", timeout=10.0)
+        else:
+            payload = {"query": query, "tool_name": args.get("tool_name"), "max_results": max_results, **_session_params(provider)}
+            results["session"] = provider._eb_request("/artifacts/session/search", payload, timeout=10.0)
     if scope in ("persistent", "all"):
         payload = {"query": query, "tool_name": args.get("tool_name"), "max_results": max_results}
         results["persistent"] = provider._eb_request("/artifacts/search", payload, timeout=10.0)
@@ -403,8 +407,14 @@ def handle_guards_list(provider: ToolProvider, args: dict[str, Any]) -> str:
     try:
         return _json_result(provider._eb_request(f"/guards/active/{provider._session_id}", None, method="GET", timeout=10.0))
     except OSError as exc:
-        if _is_http_status(exc, 404) or _is_http_status(exc, 503):
-            return _optional_unavailable("guards", "guards_unavailable", "Guard rules are not enabled for this deployment or session; this does not affect ordinary memory search/store.")
+        if _is_http_status(exc, 404):
+            try:
+                provider._eb_request(f"/guards/refresh/{provider._session_id}", {"session_key": provider._session_key}, method="POST", timeout=10.0)
+                return _json_result(provider._eb_request(f"/guards/active/{provider._session_id}", None, method="GET", timeout=10.0))
+            except OSError:
+                return _optional_unavailable("guards", "guards_unavailable", "Guard rules are not loaded for this session. Try guards refresh after session bootstrap and verify EB_TIER is full or context_only; this does not affect ordinary memory search/store.")
+        if _is_http_status(exc, 503):
+            return _optional_unavailable("guards", "guards_unavailable", "Guard rules are not enabled for this deployment. Verify EB_TIER is full or context_only; this does not affect ordinary memory search/store.")
         return _json_result({"error": f"Guards list failed: {exc}"})
 
 

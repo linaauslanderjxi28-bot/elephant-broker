@@ -315,6 +315,18 @@ class TestScopeTools(unittest.TestCase):
         self.assertEqual(payload["session_id"], "00000000-0000-4000-8000-000000000001")
         self.assertEqual(options["method"], "POST")
 
+    def test_artifact_search_session_reads_artifact_id_directly(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+        artifact_id = "11111111-1111-4111-8111-111111111111"
+
+        _ = tools.handle_artifact_search(provider, {"query": artifact_id, "scope": "session"})
+
+        path, payload, options = provider.calls[0]
+        self.assertEqual(path, f"/artifacts/session/{artifact_id}?session_key=current-session&session_id=00000000-0000-4000-8000-000000000001")
+        self.assertEqual(payload, {})
+        self.assertEqual(options["method"], "GET")
+
     def test_actor_inspect_optionally_loads_relationships_and_authority(self) -> None:
         tools = load_tools_module()
         provider = FakeProvider()
@@ -351,6 +363,7 @@ class TestScopeTools(unittest.TestCase):
         parsed = json.loads(output)
         self.assertEqual(parsed["status"], "unavailable")
         self.assertEqual(parsed["reason"], "guards_unavailable")
+        self.assertIn("refresh", parsed["message"])
 
 
 if __name__ == "__main__":
