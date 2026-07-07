@@ -84,6 +84,34 @@ def _request_json(provider: ToolProvider, path: str, payload: dict[str, Any] | N
         return _json_result({"error": str(exc)})
 
 
+def _procedure_steps(raw_steps: Any) -> list[Any]:
+    if not isinstance(raw_steps, list):
+        return raw_steps
+    steps = []
+    for index, step in enumerate(raw_steps):
+        if isinstance(step, str):
+            steps.append({"order": index, "instruction": step})
+        elif isinstance(step, dict):
+            normalized = dict(step)
+            normalized.setdefault("order", index)
+            steps.append(normalized)
+        else:
+            steps.append(step)
+    return steps
+
+
+def _procedure_activation_modes(raw_modes: Any) -> list[Any]:
+    if not isinstance(raw_modes, list):
+        return raw_modes
+    modes = []
+    for mode in raw_modes:
+        if isinstance(mode, str):
+            modes.append({mode: True})
+        else:
+            modes.append(mode)
+    return modes
+
+
 def handle_tool_call(provider: ToolProvider, tool_name: str, args: dict[str, Any]) -> str:
     handlers = {
         "elephantbroker_search": handle_search,
@@ -294,12 +322,12 @@ def handle_procedure_create(provider: ToolProvider, args: dict[str, Any]) -> str
         "name": name,
         "description": args.get("description", ""),
         "scope": args.get("scope", "session"),
-        "steps": steps,
+        "steps": _procedure_steps(steps),
         "enabled": args.get("enabled", True),
-        "is_manual_only": args.get("is_manual_only", True),
+        "is_manual_only": args.get("is_manual_only", not bool(args.get("activation_modes"))),
     }
     if args.get("activation_modes"):
-        payload["activation_modes"] = args["activation_modes"]
+        payload["activation_modes"] = _procedure_activation_modes(args["activation_modes"])
     return _request_json(provider, "/procedures/", payload, timeout=10.0)
 
 
@@ -369,7 +397,7 @@ def handle_artifact_create(provider: ToolProvider, args: dict[str, Any]) -> str:
     payload = {
         "tool_name": tool_name,
         "content": content,
-        "summary": args.get("summary"),
+        "summary": args.get("summary") or content[:200],
         "scope": args.get("scope", "session"),
         "tags": args.get("tags", []),
         **_session_params(provider),

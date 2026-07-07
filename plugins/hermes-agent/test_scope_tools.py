@@ -299,6 +299,26 @@ class TestScopeTools(unittest.TestCase):
         self.assertEqual(payload["profile_name"], "coding")
         self.assertEqual(options["method"], "POST")
 
+    def test_procedure_create_normalizes_string_steps_and_activation_modes(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+
+        _ = tools.handle_tool_call(provider, "elephantbroker_procedure_create", {
+            "name": "Self test procedure",
+            "steps": ["Run first check", "Run second check"],
+            "activation_modes": ["manual"],
+        })
+
+        path, payload, options = provider.calls[0]
+        self.assertEqual(path, "/procedures/")
+        self.assertEqual(payload["steps"], [
+            {"order": 0, "instruction": "Run first check"},
+            {"order": 1, "instruction": "Run second check"},
+        ])
+        self.assertEqual(payload["activation_modes"], [{"manual": True}])
+        self.assertEqual(payload["is_manual_only"], False)
+        self.assertEqual(options["method"], "POST")
+
     def test_artifact_create_defaults_to_current_session(self) -> None:
         tools = load_tools_module()
         provider = FakeProvider()
@@ -314,6 +334,18 @@ class TestScopeTools(unittest.TestCase):
         self.assertEqual(payload["session_key"], "current-session")
         self.assertEqual(payload["session_id"], "00000000-0000-4000-8000-000000000001")
         self.assertEqual(options["method"], "POST")
+
+    def test_artifact_create_uses_content_as_session_summary_when_summary_missing(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+
+        _ = tools.handle_tool_call(provider, "elephantbroker_artifact_create", {
+            "tool_name": "pytest",
+            "content": "unique self test artifact output",
+        })
+
+        payload = provider.calls[0][1]
+        self.assertEqual(payload["summary"], "unique self test artifact output")
 
     def test_artifact_search_session_reads_artifact_id_directly(self) -> None:
         tools = load_tools_module()
