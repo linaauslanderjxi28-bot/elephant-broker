@@ -47,6 +47,7 @@ export interface SearchRequest {
   session_id?: string;
   profile_name?: string;
   auto_recall?: boolean;
+  include_audit?: boolean;
 }
 
 /** Store request body. */
