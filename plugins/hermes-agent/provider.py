@@ -34,9 +34,7 @@ _writer_module = load_local_module("writer")
 
 ElephantBrokerClient = _client_module.ElephantBrokerClient
 MemoryProvider = _compat_module.MemoryProvider
-SEARCH_GLOBAL_SCHEMA = _schemas_module.SEARCH_GLOBAL_SCHEMA
-SEARCH_SCHEMA = _schemas_module.SEARCH_SCHEMA
-STORE_SCHEMA = _schemas_module.STORE_SCHEMA
+ALL_SCHEMAS = _schemas_module.ALL_SCHEMAS
 WriteQueue = _writer_module.WriteQueue
 config_schema = _config_module.config_schema
 load_config = _config_module.load_config
@@ -201,7 +199,7 @@ class ElephantBrokerMemoryProvider(MemoryProvider):
         self._enqueue_write(sync)
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
-        return [SEARCH_SCHEMA, SEARCH_GLOBAL_SCHEMA, STORE_SCHEMA]
+        return ALL_SCHEMAS
 
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
         return _tools_module.handle_tool_call(self, tool_name, args)
