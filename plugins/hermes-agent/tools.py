@@ -123,6 +123,38 @@ def _procedure_activation_modes(raw_modes: Any) -> list[Any]:
     return modes
 
 
+def _recent_artifacts(provider: ToolProvider) -> list[dict[str, Any]]:
+    artifacts = getattr(provider, "_recent_session_artifacts", None)
+    if isinstance(artifacts, list):
+        return artifacts
+    artifacts = []
+    setattr(provider, "_recent_session_artifacts", artifacts)
+    return artifacts
+
+
+def _remember_session_artifact(provider: ToolProvider, artifact: dict[str, Any]) -> None:
+    artifacts = _recent_artifacts(provider)
+    artifacts.insert(0, artifact)
+    del artifacts[20:]
+
+
+def _search_recent_artifacts(provider: ToolProvider, query: str, tool_name: Any, max_results: int) -> list[dict[str, Any]]:
+    query_tokens = set(str(query).lower().split())
+    if not query_tokens:
+        return []
+    scored = []
+    for artifact in _recent_artifacts(provider):
+        if tool_name and artifact.get("tool_name") != tool_name:
+            continue
+        haystack = f"{artifact.get('summary', '')} {artifact.get('content', '')} {artifact.get('tool_name', '')}"
+        artifact_tokens = set(haystack.lower().split())
+        overlap = query_tokens & artifact_tokens
+        if overlap:
+            scored.append((len(overlap), artifact))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [artifact for _score, artifact in scored[:max_results]]
+
+
 def handle_tool_call(provider: ToolProvider, tool_name: str, args: dict[str, Any]) -> str:
     handlers = {
         "elephantbroker_search": handle_search,
@@ -391,7 +423,10 @@ def handle_artifact_search(provider: ToolProvider, args: dict[str, Any]) -> str:
             results["session"] = provider._eb_request(path, None, method="GET", timeout=10.0)
         else:
             payload = {"query": query, "tool_name": args.get("tool_name"), "max_results": max_results, **_session_params(provider)}
-            results["session"] = provider._eb_request("/artifacts/session/search", payload, timeout=10.0)
+            session_results = provider._eb_request("/artifacts/session/search", payload, timeout=10.0)
+            if not session_results:
+                session_results = _search_recent_artifacts(provider, str(query), args.get("tool_name"), max_results)
+            results["session"] = session_results
     if scope in ("persistent", "all"):
         payload = {"query": query, "tool_name": args.get("tool_name"), "max_results": max_results}
         results["persistent"] = provider._eb_request("/artifacts/search", payload, timeout=10.0)
@@ -413,7 +448,15 @@ def handle_artifact_create(provider: ToolProvider, args: dict[str, Any]) -> str:
         "tags": args.get("tags", []),
         **_session_params(provider),
     }
-    return _request_json(provider, "/artifacts/create", payload, timeout=10.0)
+    output = _request_json(provider, "/artifacts/create", payload, timeout=10.0)
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError:
+        return output
+    if isinstance(parsed, dict) and "error" not in parsed and payload["scope"] == "session":
+        artifact = {**payload, **parsed}
+        _remember_session_artifact(provider, artifact)
+    return output
 
 
 def handle_actor_inspect(provider: ToolProvider, args: dict[str, Any]) -> str:

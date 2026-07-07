@@ -34,6 +34,7 @@ class FakeProvider:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object], dict[str, object]]] = []
         self.results: list[dict[str, object]] = []
+        self.route_results: dict[str, list[dict[str, object]] | dict[str, object]] = {}
         self.errors: dict[str, OSError] = {}
 
     def _eb_request(
@@ -47,6 +48,8 @@ class FakeProvider:
         self.calls.append((path, payload or {}, {"method": method, "timeout": timeout}))
         if path in self.errors:
             raise self.errors[path]
+        if path in self.route_results:
+            return self.route_results[path]
         return self.results
 
 
@@ -373,6 +376,27 @@ class TestScopeTools(unittest.TestCase):
         self.assertEqual(path, f"/artifacts/session/{artifact_id}?session_key=current-session&session_id=00000000-0000-4000-8000-000000000001")
         self.assertEqual(payload, {})
         self.assertEqual(options["method"], "GET")
+
+    def test_artifact_search_session_falls_back_to_recent_create_when_backend_empty(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+        artifact_id = "11111111-1111-4111-8111-111111111111"
+        provider.route_results["/artifacts/create"] = {
+            "artifact_id": artifact_id,
+            "tool_name": "pytest",
+            "content": "unique self test artifact output",
+            "summary": "unique self test artifact output",
+        }
+        provider.route_results["/artifacts/session/search"] = []
+
+        _ = tools.handle_artifact_create(provider, {
+            "tool_name": "pytest",
+            "content": "unique self test artifact output",
+        })
+        output = tools.handle_artifact_search(provider, {"query": "unique self test", "scope": "session"})
+
+        parsed = json.loads(output)
+        self.assertEqual(parsed["session"][0]["artifact_id"], artifact_id)
 
     def test_actor_inspect_optionally_loads_relationships_and_authority(self) -> None:
         tools = load_tools_module()
