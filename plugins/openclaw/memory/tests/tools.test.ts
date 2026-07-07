@@ -11,9 +11,16 @@
 import { describe, it, expect, vi } from "vitest";
 import { HttpStatusError } from "../src/client.js";
 import { createMemoryForgetTool } from "../src/tools/memory_forget.js";
+import { createMemoryStoreTool } from "../src/tools/memory_store.js";
 import { createMemoryUpdateTool } from "../src/tools/memory_update.js";
 
 type ForgetClient = { forget: (id: string) => Promise<void> };
+type StoreClient = {
+  getSessionId: () => string;
+  getProfileName: () => string;
+  getSessionKey: () => string;
+  store: (req: Record<string, unknown>) => Promise<unknown>;
+};
 type UpdateClient = {
   update: (id: string, body: Record<string, unknown>) => Promise<unknown>;
   search: (req: { query: string; max_results: number }) => Promise<Array<{ id: string; score: number; text: string }>>;
@@ -22,6 +29,43 @@ type UpdateClient = {
 function parseResult(r: { content: Array<{ type: string; text: string }> }) {
   return JSON.parse(r.content[0].text);
 }
+
+describe("memory_store structured fact metadata", () => {
+  it("preserves ResearchDecision identity fields", async () => {
+    const client: StoreClient = {
+      getSessionId: () => "00000000-0000-4000-8000-000000000001",
+      getProfileName: () => "coding",
+      getSessionKey: () => "current-session",
+      store: vi.fn().mockResolvedValue({ id: "fact-1" }),
+    };
+    const tool = createMemoryStoreTool(client as unknown as Parameters<typeof createMemoryStoreTool>[0]);
+
+    await tool.execute("tc-store", {
+      text: "decision text",
+      category: "decision",
+      scope: "team",
+      memory_class: "semantic",
+      entity_type: "ResearchDecision",
+      entity_name: "decision text",
+      decision_status: "actioned",
+    });
+
+    expect(client.store).toHaveBeenCalledWith({
+      fact: {
+        text: "decision text",
+        category: "decision",
+        scope: "team",
+        memory_class: "semantic",
+        entity_type: "ResearchDecision",
+        entity_name: "decision text",
+        decision_status: "actioned",
+      },
+      session_key: "current-session",
+      session_id: "00000000-0000-4000-8000-000000000001",
+      profile_name: "coding",
+    });
+  });
+});
 
 describe("memory_forget error discrimination (TODO 5-603)", () => {
   it("404 → reason=not_found", async () => {

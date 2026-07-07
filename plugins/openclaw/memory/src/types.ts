@@ -57,6 +57,12 @@ export interface StoreRequest {
     category?: string;
     scope?: string;
     confidence?: number;
+    memory_class?: string;
+    entity_type?: string;
+    entity_name?: string;
+    goal_ids?: string[];
+    decision_status?: string;
+    decision_domain?: string;
   };
   session_key?: string;
   session_id?: string;
