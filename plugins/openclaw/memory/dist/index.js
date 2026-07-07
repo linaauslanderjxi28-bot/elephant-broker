@@ -44,7 +44,7 @@ var ElephantBrokerClient = class {
     if (this.agentId) headers["X-EB-Agent-ID"] = this.agentId;
     if (this.currentSessionKey) headers["X-EB-Session-Key"] = this.currentSessionKey;
     if (this.actorId) headers["X-EB-Actor-Id"] = this.actorId;
-    const authToken = process.env.EB_AUTH_TOKEN || "";
+    const authToken = (process.env.EB_AUTH_TOKEN || "").trim();
     if (authToken) headers["X-EB-Auth-Token"] = authToken;
     propagation.inject(context.active(), headers);
     return headers;
@@ -1733,7 +1733,7 @@ function createArtifactCreateTool(client) {
 // src/index.ts
 function register(api) {
   const cfg = api.pluginConfig || {};
-  const baseUrl = cfg.baseUrl || process.env.EB_RUNTIME_URL || "http://localhost:8420";
+  const baseUrl = cfg.baseUrl || process.env.EB_SERVICE_URL || process.env.EB_RUNTIME_URL || process.env.COGNEE_SERVICE_URL || "http://localhost:8420";
   const profileName = cfg.profileName || process.env.EB_PROFILE || "coding";
   const gatewayId = cfg.gatewayId || process.env.EB_GATEWAY_ID;
   const gatewayShortName = cfg.gatewayShortName || process.env.EB_GATEWAY_SHORT_NAME;
@@ -1804,9 +1804,19 @@ function register(api) {
         auto_recall: true,
         max_results: 10
       });
-      if (results.length > 0) {
-        const contextStr = formatMemoryContext(results);
-        console.info(`[EB] Auto-recall: injecting ${results.length} memories into context`);
+      let globalResults = [];
+      try {
+        globalResults = await client.searchGlobal(query, {
+          max_results: 10,
+          session_key: currentSessionKey
+        });
+      } catch (err) {
+        console.warn(`[EB] Global search failed (non-fatal): ${err}`);
+      }
+      const merged = [...results, ...globalResults];
+      if (merged.length > 0) {
+        const contextStr = formatMemoryContext(merged);
+        console.info(`[EB] Auto-recall: injecting ${merged.length} memories into context (${results.length} session + ${globalResults.length} global)`);
         return { prependSystemContext: contextStr };
       }
     } catch (err) {

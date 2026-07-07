@@ -454,7 +454,7 @@ var ContextEngineImpl = class {
 // src/index.ts
 function register(api) {
   const cfg = api.pluginConfig || {};
-  const baseUrl = cfg.baseUrl || process.env.EB_RUNTIME_URL || "http://localhost:8420";
+  const baseUrl = cfg.baseUrl || process.env.EB_SERVICE_URL || process.env.EB_RUNTIME_URL || process.env.COGNEE_SERVICE_URL || "http://localhost:8420";
   const profileName = cfg.profileName || process.env.EB_PROFILE || "coding";
   const gatewayId = cfg.gatewayId || process.env.EB_GATEWAY_ID;
   const gatewayShortName = cfg.gatewayShortName || process.env.EB_GATEWAY_SHORT_NAME;
