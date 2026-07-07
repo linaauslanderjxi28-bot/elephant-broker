@@ -55,7 +55,7 @@ def load_config() -> dict[str, str]:
         "service_url": os.environ.get("EB_SERVICE_URL") or os.environ.get("EB_RUNTIME_URL") or os.environ.get("COGNEE_SERVICE_URL"),
         "gateway_id": os.environ.get("EB_GATEWAY_ID"),
         "agent_key": os.environ.get("EB_AGENT_KEY"),
-        "profile_name": os.environ.get("EB_PROFILE_NAME"),
+        "profile_name": os.environ.get("EB_PROFILE") or os.environ.get("EB_PROFILE_NAME"),
     }
     config.update({k: v for k, v in env_config.items() if v is not None and v != ""})
     return config
@@ -78,5 +78,5 @@ def config_schema() -> list[dict[str, Any]]:
         {"key": "service_url", "description": "ElephantBroker service URL", "default": "http://localhost:8420", "env_var": "EB_SERVICE_URL or EB_RUNTIME_URL"},
         {"key": "gateway_id", "description": "ElephantBroker Gateway ID", "default": "", "env_var": "EB_GATEWAY_ID"},
         {"key": "agent_key", "description": "ElephantBroker Agent Key", "secret": True, "env_var": "EB_AGENT_KEY"},
-        {"key": "profile_name", "description": "Context engine profile name", "default": "coding"},
+        {"key": "profile_name", "description": "Context engine profile name", "default": "coding", "env_var": "EB_PROFILE or EB_PROFILE_NAME"},
     ]

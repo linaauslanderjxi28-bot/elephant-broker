@@ -49,6 +49,12 @@ class TestConfigFallbacks(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True):
                 self.assertEqual(module._load_config()["service_url"], "http://runtime")
 
+    def test_load_config_prefers_shared_eb_profile_env(self) -> None:
+        module = load_plugin_module()
+        env = {"EB_PROFILE": "research", "EB_PROFILE_NAME": "coding"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(module._load_config()["profile_name"], "research")
+
 
 class TestTurnSync(unittest.TestCase):
     def test_sync_turn_uses_supplied_messages_verbatim(self) -> None:
