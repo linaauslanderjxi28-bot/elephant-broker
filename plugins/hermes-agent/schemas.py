@@ -49,6 +49,7 @@ STORE_SCHEMA = {
             "memory_class": {"type": "string", "description": "Memory class (default: episodic).", "enum": MEMORY_CLASS_ENUM},
             "confidence": {"type": "number", "description": "Confidence from 0.0 to 1.0 (default: 1.0)."},
             "entity_type": {"type": "string", "description": "Optional entity type, e.g. Document or ResearchDecision."},
+            "entity_name": {"type": "string", "description": "Optional entity display name for typed facts."},
             "decision_status": {"type": "string", "description": "Decision status: proposed, approved, rejected, actioned."},
             "decision_domain": {"type": "string", "description": "Optional decision domain tag."},
             "target_actor_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional actor UUIDs this fact targets."},

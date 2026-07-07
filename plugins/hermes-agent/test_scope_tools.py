@@ -167,6 +167,31 @@ class TestScopeTools(unittest.TestCase):
         self.assertEqual(fact["target_actor_ids"], ["00000000-0000-4000-8000-000000000002"])
         self.assertEqual(fact["autorecall_blacklisted"], True)
 
+    def test_store_preserves_research_decision_identity(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+
+        _ = tools.handle_store(provider, {
+            "text": "decision text",
+            "category": "decision",
+            "memory_class": "semantic",
+            "entity_type": "ResearchDecision",
+            "entity_name": "decision text",
+            "decision_status": "actioned",
+            "scope": "team",
+        })
+
+        payload = provider.calls[0][1]
+        fact = payload["fact"]
+        if not isinstance(fact, dict):
+            self.fail("store payload fact must be a dict")
+        self.assertEqual(fact["category"], "decision")
+        self.assertEqual(fact["scope"], "team")
+        self.assertEqual(fact["memory_class"], "semantic")
+        self.assertEqual(fact["entity_type"], "ResearchDecision")
+        self.assertEqual(fact["entity_name"], "decision text")
+        self.assertEqual(fact["decision_status"], "actioned")
+
     def test_search_accepts_backend_filters(self) -> None:
         tools = load_tools_module()
         provider = FakeProvider()

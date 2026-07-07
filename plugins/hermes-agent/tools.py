@@ -171,7 +171,7 @@ def handle_store(provider: ToolProvider, args: dict[str, Any]) -> str:
         "memory_class": memory_class,
         "confidence": float(args.get("confidence", 1.0)),
     }
-    for key in ("entity_type", "decision_status", "decision_domain", "target_actor_ids", "autorecall_blacklisted"):
+    for key in ("entity_type", "entity_name", "decision_status", "decision_domain", "target_actor_ids", "autorecall_blacklisted"):
         if key in args and args[key] not in (None, ""):
             fact[key] = args[key]
     payload = {"fact": fact, "session_key": provider._session_key, "session_id": provider._session_id}
