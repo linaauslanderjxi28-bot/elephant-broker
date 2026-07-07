@@ -22,6 +22,12 @@ function sessionIdFromKey(sessionKey) {
     const hex = node_crypto_1.default.createHash("sha256").update(String(sessionKey), "utf8").digest("hex").slice(0, 32);
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
+const AUDIT_CATEGORIES = new Set(["tool-call", "conversation", "todowrite"]);
+function filterAuditResults(results, includeAudit) {
+    if (includeAudit)
+        return results;
+    return results.filter((result) => !AUDIT_CATEGORIES.has(result.category));
+}
 class EBClient {
     baseUrl;
     gatewayId;
@@ -86,15 +92,18 @@ class EBClient {
     }
     async search(query, opts) {
         const scope = nonBlank(opts?.scope) ? opts.scope.trim() : "";
-        return this.req("POST", "/memory/search", {
+        const includeAudit = opts?.include_audit ?? false;
+        const results = await this.req("POST", "/memory/search", {
             query,
             max_results: opts?.max_results ?? 5,
             min_score: opts?.min_score ?? 0,
             auto_recall: opts?.auto_recall ?? false,
+            include_audit: includeAudit,
             ...(scope ? { scope } : {}),
             ...(scope === "session" ? { session_key: this.sessionKey, session_id: this.sessionId } : {}),
             ...(nonBlank(opts?.entity_type) ? { entity_type: opts.entity_type.trim() } : {}),
         });
+        return filterAuditResults(results, includeAudit);
     }
     async searchGlobal(query, opts) {
         return this.req("POST", "/memory/search", {
@@ -315,6 +324,8 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                         .describe("Scope filter (global, organization, team, actor, session)"),
                     entity_type: plugin_1.tool.schema.string().optional()
                         .describe("Entity type filter: Product, Supplier, MarketSignal, ResearchDecision, Prospect, CustomsRecord, Deal, FinancialReport, Invoice, Contract, Document"),
+                    include_audit: plugin_1.tool.schema.boolean().optional().default(false)
+                        .describe("Include tool-call/conversation/todowrite audit records. Defaults to false."),
                 },
                 async execute(args) {
                     if (!gatewayId)
@@ -325,6 +336,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                             min_score: args.min_score ?? 0,
                             scope: args.scope,
                             entity_type: args.entity_type,
+                            include_audit: args.include_audit ?? false,
                         });
                         if (!results || results.length === 0)
                             return "No relevant memories found.";

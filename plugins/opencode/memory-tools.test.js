@@ -111,6 +111,40 @@ test("memory_search omits session identity for global scope", async () => {
   assert.equal(Object.hasOwn(requests[0].body, "session_id"), false);
 });
 
+test("memory_search filters audit results by default", async () => {
+  const { output, requests } = await runTool("memory_search", { query: "probe" }, {
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([
+        { category: "tool-call", text: "audit log", confidence: 1, score: 1 },
+        { category: "general", text: "business fact", confidence: 0.9, score: 0.8 },
+      ]),
+    }),
+  });
+
+  assert.equal(requests[0].body.include_audit, false);
+  assert.match(output, /business fact/);
+  assert.doesNotMatch(output, /audit log/);
+});
+
+test("memory_search can include audit results when requested", async () => {
+  const { output, requests } = await runTool("memory_search", { query: "probe", include_audit: true }, {
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([
+        { category: "tool-call", text: "audit log", confidence: 1, score: 1 },
+        { category: "general", text: "business fact", confidence: 0.9, score: 0.8 },
+      ]),
+    }),
+  });
+
+  assert.equal(requests[0].body.include_audit, true);
+  assert.match(output, /audit log/);
+  assert.match(output, /business fact/);
+});
+
 test("memory_search_global sends global scope to ElephantBroker", async () => {
   const { requests } = await runTool("memory_search_global", { query: "probe" });
 
