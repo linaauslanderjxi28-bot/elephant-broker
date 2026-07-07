@@ -102,6 +102,11 @@ test("OpenCode memory writes include X-EB-Auth-Token when EB_AUTH_TOKEN is set",
   assert.equal(headers["X-EB-Auth-Token"], "token-test");
 });
 
+test("OpenCode memory writes include X-EB-Agent-ID when EB_AGENT_NAME is set", async () => {
+  const headers = await runStoreWithHeaders({ EB_AGENT_NAME: "opencode-agent" });
+  assert.equal(headers["X-EB-Agent-ID"], "opencode-agent");
+});
+
 test("OpenCode memory writes omit X-EB-Auth-Token when EB_AUTH_TOKEN is blank", async () => {
   const headers = await runStoreWithHeaders({ EB_AUTH_TOKEN: "  " });
   assert.equal(Object.hasOwn(headers, "X-EB-Auth-Token"), false);

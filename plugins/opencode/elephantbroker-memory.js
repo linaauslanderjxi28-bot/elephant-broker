@@ -59,6 +59,8 @@ class EBClient {
         };
         if (this.agentKey)
             h["X-EB-Agent-Key"] = this.agentKey;
+        if (this.agentId)
+            h["X-EB-Agent-ID"] = this.agentId;
         if (this.actorId)
             h["X-EB-Actor-Id"] = this.actorId;
         const authToken = (process.env.EB_AUTH_TOKEN || "").trim();
