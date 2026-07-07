@@ -161,12 +161,12 @@ class ElephantBrokerMemoryProvider(MemoryProvider):
                 sid = stable_uuid(session_id) if session_id else self._session_id
                 skey = session_id or self._session_key
                 # Session scope — personal conversation context
-                session_payload = {"query": query, "max_results": 5, "session_key": skey, "session_id": sid, "auto_recall": True}
+                session_payload = {"query": query, "max_results": 5, "session_key": skey, "session_id": sid, "auto_recall": True, "include_audit": False}
                 session_results = self._eb_request("/memory/search", session_payload, timeout=10.0)
                 if not isinstance(session_results, list):
                     session_results = []
                 # Global scope — scrapling/doc-ingestor imported data
-                global_payload = {"query": query, "max_results": 5, "scope": "global", "profile_name": self._profile_name}
+                global_payload = {"query": query, "max_results": 5, "scope": "global", "profile_name": self._profile_name, "include_audit": False}
                 global_results = self._eb_request("/memory/search", global_payload, timeout=10.0)
                 if not isinstance(global_results, list):
                     global_results = []

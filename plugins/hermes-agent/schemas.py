@@ -12,6 +12,7 @@ SEARCH_SCHEMA = {
                 "enum": ["session", "actor", "team", "organization", "global", "task", "subagent", "artifact"],
             },
             "entity_type": {"type": "string", "description": "Entity type filter: FinancialReport, Invoice, Contract, Document"},
+            "include_audit": {"type": "boolean", "description": "Include tool-call/conversation/todowrite audit records. Defaults to false."},
         },
         "required": ["query"],
     },

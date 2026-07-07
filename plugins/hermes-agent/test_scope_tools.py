@@ -31,6 +31,7 @@ class FakeProvider:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object], dict[str, object]]] = []
+        self.results: list[dict[str, object]] = []
 
     def _eb_request(
         self,
@@ -41,7 +42,7 @@ class FakeProvider:
         timeout: float = 30.0,
     ) -> list[dict[str, object]]:
         self.calls.append((path, payload or {}, {"method": method, "timeout": timeout}))
-        return []
+        return self.results
 
 
 class TestScopeTools(unittest.TestCase):

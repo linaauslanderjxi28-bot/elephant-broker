@@ -4,6 +4,15 @@ import json
 from typing import Any, Protocol
 
 
+AUDIT_CATEGORIES = {"tool-call", "conversation", "todowrite"}
+
+
+def _filter_audit_results(results: list[dict[str, Any]], include_audit: bool) -> list[dict[str, Any]]:
+    if include_audit:
+        return results
+    return [result for result in results if result.get("category") not in AUDIT_CATEGORIES]
+
+
 class ToolProvider(Protocol):
     @property
     def name(self) -> str: ...
@@ -32,6 +41,7 @@ def handle_search(provider: ToolProvider, args: dict[str, Any]) -> str:
     payload = {
         "query": query,
         "max_results": min(int(args.get("max_results", 5)), 20),
+        "include_audit": bool(args.get("include_audit", False)),
     }
     scope = args.get("scope")
     if scope:
@@ -51,7 +61,10 @@ def handle_search(provider: ToolProvider, args: dict[str, Any]) -> str:
         results = provider._eb_request("/memory/search", payload, timeout=10.0)
         if not results:
             return json.dumps({"result": "No matching memories found."})
-        return json.dumps({"results": results, "count": len(results)})
+        filtered = _filter_audit_results(results, bool(payload["include_audit"]))
+        if not filtered:
+            return json.dumps({"result": "No matching memories found."})
+        return json.dumps({"results": filtered, "count": len(filtered)})
     except Exception as e:
         return json.dumps({"error": f"Search failed: {e}"})
 
