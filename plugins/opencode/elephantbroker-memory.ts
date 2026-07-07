@@ -202,6 +202,9 @@ class EBClient {
       category?: string;
       scope?: string;
       confidence?: number;
+      memory_class?: string;
+      entity_type?: string;
+      entity_name?: string;
       goal_ids?: string[];
       decision_status?: string;
     },
@@ -212,6 +215,9 @@ class EBClient {
         category: opts?.category ?? "general",
         scope: opts?.scope ?? "session",
         confidence: opts?.confidence ?? 1.0,
+        ...(opts?.memory_class ? { memory_class: opts.memory_class } : {}),
+        ...(opts?.entity_type ? { entity_type: opts.entity_type } : {}),
+        ...(opts?.entity_name ? { entity_name: opts.entity_name } : {}),
         ...(opts?.goal_ids?.length ? { goal_ids: opts.goal_ids } : {}),
         ...(opts?.decision_status ? { decision_status: opts.decision_status } : {}),
       },
@@ -553,6 +559,9 @@ export const ElephantBrokerMemory: Plugin = async ({ client } = {}) => {
             const result = await ebClient.store(args.text, {
               category: "decision",
               scope: args.scope,
+              memory_class: "semantic",
+              entity_type: "ResearchDecision",
+              entity_name: args.text,
               decision_status: args.decision_status,
               goal_ids: args.source_fact_ids,
             });

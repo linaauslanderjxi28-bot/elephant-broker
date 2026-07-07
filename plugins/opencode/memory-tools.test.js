@@ -200,6 +200,50 @@ test("memory_store reports backend fact id instead of gateway id", async () => {
   assert.doesNotMatch(output, /id: gw-test/);
 });
 
+test("memory_decide stores a searchable ResearchDecision fact", async () => {
+  const factId = "11111111-1111-1111-1111-111111111111";
+  const { output, requests } = await runTool("memory_decide", {
+    text: "decision text",
+    decision_status: "actioned",
+    source_fact_ids: ["22222222-2222-2222-2222-222222222222"],
+    scope: "team",
+  }, {
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        id: factId,
+        gateway_id: "gw-test",
+        text: "decision text",
+        category: "decision",
+        scope: "team",
+        confidence: 1,
+        memory_class: "semantic",
+        entity_type: "ResearchDecision",
+        entity_name: "decision text",
+        created_at: "2026-07-06T00:00:00Z",
+        updated_at: "2026-07-06T00:00:00Z",
+        use_count: 0,
+      }),
+    }),
+  });
+
+  assert.match(output, new RegExp(`id: ${factId}`));
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "http://eb.local/memory/store");
+  assert.deepEqual(requests[0].body.fact, {
+    text: "decision text",
+    category: "decision",
+    scope: "team",
+    confidence: 1,
+    memory_class: "semantic",
+    entity_type: "ResearchDecision",
+    entity_name: "decision text",
+    decision_status: "actioned",
+    goal_ids: ["22222222-2222-2222-2222-222222222222"],
+  });
+});
+
 test("memory_forget handles backend not-found response without losing client binding", async () => {
   const { output } = await runTool("memory_forget", { id: "11111111-1111-1111-1111-111111111111" }, {
     fetch: async () => ({
