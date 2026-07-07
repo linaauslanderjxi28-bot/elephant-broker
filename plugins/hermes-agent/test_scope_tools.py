@@ -32,6 +32,7 @@ class FakeProvider:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object], dict[str, object]]] = []
         self.results: list[dict[str, object]] = []
+        self.errors: dict[str, OSError] = {}
 
     def _eb_request(
         self,
@@ -42,6 +43,8 @@ class FakeProvider:
         timeout: float = 30.0,
     ) -> list[dict[str, object]] | dict[str, object] | None:
         self.calls.append((path, payload or {}, {"method": method, "timeout": timeout}))
+        if path in self.errors:
+            raise self.errors[path]
         return self.results
 
 
@@ -112,6 +115,18 @@ class TestScopeTools(unittest.TestCase):
         self.assertEqual(payload["scope"], "global")
         self.assertNotIn("session_key", payload)
         self.assertNotIn("session_id", payload)
+
+    def test_search_global_timeout_returns_degraded_status(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+        provider.errors["/memory/search"] = TimeoutError("timed out")
+
+        output = tools.handle_search_global(provider, {"query": "probe"})
+
+        parsed = json.loads(output)
+        self.assertEqual(parsed["status"], "degraded")
+        self.assertEqual(parsed["reason"], "timeout")
+        self.assertIn("Global search timed out", parsed["message"])
 
     def test_store_uses_explicit_team_scope(self) -> None:
         tools = load_tools_module()
@@ -191,6 +206,18 @@ class TestScopeTools(unittest.TestCase):
         self.assertEqual(fact["entity_type"], "ResearchDecision")
         self.assertEqual(fact["entity_name"], "decision text")
         self.assertEqual(fact["decision_status"], "actioned")
+
+    def test_store_503_returns_retryable_degraded_status(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+        provider.errors["/memory/store"] = OSError("HTTP Error 503: Service Unavailable")
+
+        output = tools.handle_store(provider, {"text": "retry me"})
+
+        parsed = json.loads(output)
+        self.assertEqual(parsed["status"], "degraded")
+        self.assertEqual(parsed["reason"], "store_unavailable")
+        self.assertEqual(parsed["retryable"], True)
 
     def test_search_accepts_backend_filters(self) -> None:
         tools = load_tools_module()
@@ -291,16 +318,39 @@ class TestScopeTools(unittest.TestCase):
     def test_actor_inspect_optionally_loads_relationships_and_authority(self) -> None:
         tools = load_tools_module()
         provider = FakeProvider()
+        actor_id = "00000000-0000-4000-8000-000000000002"
 
         _ = tools.handle_tool_call(provider, "elephantbroker_actor_inspect", {
-            "actor_id": "actor-1",
+            "actor_id": actor_id,
             "include_relationships": True,
             "include_authority_chain": True,
         })
 
-        self.assertEqual(provider.calls[0][0], "/actors/actor-1")
-        self.assertEqual(provider.calls[1][0], "/actors/actor-1/relationships")
-        self.assertEqual(provider.calls[2][0], "/actors/actor-1/authority-chain")
+        self.assertEqual(provider.calls[0][0], f"/actors/{actor_id}")
+        self.assertEqual(provider.calls[1][0], f"/actors/{actor_id}/relationships")
+        self.assertEqual(provider.calls[2][0], f"/actors/{actor_id}/authority-chain")
+
+    def test_actor_inspect_rejects_non_uuid_without_backend_422(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+
+        output = tools.handle_actor_inspect(provider, {"actor_id": "not-a-uuid"})
+
+        parsed = json.loads(output)
+        self.assertEqual(parsed["status"], "unavailable")
+        self.assertEqual(parsed["reason"], "invalid_actor_id")
+        self.assertEqual(provider.calls, [])
+
+    def test_guards_list_404_returns_optional_module_status(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+        provider.errors["/guards/active/00000000-0000-4000-8000-000000000001"] = OSError("HTTP Error 404: Not Found")
+
+        output = tools.handle_guards_list(provider, {})
+
+        parsed = json.loads(output)
+        self.assertEqual(parsed["status"], "unavailable")
+        self.assertEqual(parsed["reason"], "guards_unavailable")
 
 
 if __name__ == "__main__":

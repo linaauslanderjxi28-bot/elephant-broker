@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Protocol
 from urllib.parse import urlencode
 
@@ -8,6 +9,7 @@ from urllib.parse import urlencode
 AUDIT_CATEGORIES = {"tool-call", "conversation", "todowrite"}
 VALID_SCOPES = {"session", "actor", "team", "organization", "global", "task", "subagent", "artifact"}
 VALID_MEMORY_CLASSES = {"episodic", "semantic", "procedural"}
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 FACT_UPDATE_FIELDS = {
     "text",
     "category",
@@ -52,6 +54,23 @@ def _filter_audit_results(results: list[dict[str, Any]], include_audit: bool) ->
     if include_audit:
         return results
     return [result for result in results if result.get("category") not in AUDIT_CATEGORIES]
+
+
+def _error_text(exc: OSError) -> str:
+    return str(exc)
+
+
+def _is_timeout(exc: OSError) -> bool:
+    return isinstance(exc, TimeoutError) or "timed out" in _error_text(exc).lower() or "timeout" in _error_text(exc).lower()
+
+
+def _is_http_status(exc: OSError, status: int) -> bool:
+    text = _error_text(exc).lower()
+    return f"http error {status}" in text or f"{status}" in text
+
+
+def _optional_unavailable(feature: str, reason: str, detail: str) -> str:
+    return _json_result({"status": "unavailable", "feature": feature, "reason": reason, "message": detail})
 
 
 def _session_params(provider: ToolProvider) -> dict[str, str]:
@@ -151,6 +170,8 @@ def handle_search_global(provider: ToolProvider, args: dict[str, Any]) -> str:
             return _json_result({"result": "No matching global memories found."})
         return _json_result({"results": results, "count": len(results)})
     except OSError as exc:
+        if _is_timeout(exc):
+            return _json_result({"status": "degraded", "reason": "timeout", "message": "Global search timed out; use elephantbroker_search without global scope or retry later.", "retryable": True})
         return _json_result({"error": f"Global search failed: {exc}"})
 
 
@@ -181,6 +202,8 @@ def handle_store(provider: ToolProvider, args: dict[str, Any]) -> str:
         res = provider._eb_request("/memory/store", payload, timeout=10.0)
         return _json_result({"result": "Fact stored successfully.", "details": res})
     except OSError as exc:
+        if _is_http_status(exc, 503) or _is_timeout(exc):
+            return _json_result({"status": "degraded", "reason": "store_unavailable", "message": "Memory store is temporarily unavailable; retry is safe.", "retryable": True, "detail": _error_text(exc)})
         return _json_result({"error": f"Failed to store fact: {exc}"})
 
 
@@ -354,12 +377,19 @@ def handle_actor_inspect(provider: ToolProvider, args: dict[str, Any]) -> str:
     actor_id = args.get("actor_id", "")
     if not actor_id:
         return _missing("actor_id")
-    result = {"actor": provider._eb_request(f"/actors/{actor_id}", None, method="GET", timeout=10.0)}
-    if args.get("include_relationships"):
-        result["relationships"] = provider._eb_request(f"/actors/{actor_id}/relationships", None, method="GET", timeout=10.0)
-    if args.get("include_authority_chain"):
-        result["authority_chain"] = provider._eb_request(f"/actors/{actor_id}/authority-chain", None, method="GET", timeout=10.0)
-    return _json_result(result)
+    if not UUID_RE.match(str(actor_id)):
+        return _optional_unavailable("actor_inspect", "invalid_actor_id", "Actor inspect requires a UUID actor_id; this deployment rejected the provided value before calling the backend.")
+    try:
+        result = {"actor": provider._eb_request(f"/actors/{actor_id}", None, method="GET", timeout=10.0)}
+        if args.get("include_relationships"):
+            result["relationships"] = provider._eb_request(f"/actors/{actor_id}/relationships", None, method="GET", timeout=10.0)
+        if args.get("include_authority_chain"):
+            result["authority_chain"] = provider._eb_request(f"/actors/{actor_id}/authority-chain", None, method="GET", timeout=10.0)
+        return _json_result(result)
+    except OSError as exc:
+        if _is_http_status(exc, 404) or _is_http_status(exc, 422):
+            return _optional_unavailable("actor_inspect", "actor_module_unavailable", f"Actor inspection is unavailable or actor_id is not registered in this deployment: {_error_text(exc)}")
+        return _json_result({"error": f"Actor inspect failed: {exc}"})
 
 
 def handle_claim_get(provider: ToolProvider, args: dict[str, Any]) -> str:
@@ -370,7 +400,12 @@ def handle_claim_get(provider: ToolProvider, args: dict[str, Any]) -> str:
 
 
 def handle_guards_list(provider: ToolProvider, args: dict[str, Any]) -> str:
-    return _request_json(provider, f"/guards/active/{provider._session_id}", None, method="GET", timeout=10.0)
+    try:
+        return _json_result(provider._eb_request(f"/guards/active/{provider._session_id}", None, method="GET", timeout=10.0))
+    except OSError as exc:
+        if _is_http_status(exc, 404) or _is_http_status(exc, 503):
+            return _optional_unavailable("guards", "guards_unavailable", "Guard rules are not enabled for this deployment or session; this does not affect ordinary memory search/store.")
+        return _json_result({"error": f"Guards list failed: {exc}"})
 
 
 def handle_guard_status(provider: ToolProvider, args: dict[str, Any]) -> str:
