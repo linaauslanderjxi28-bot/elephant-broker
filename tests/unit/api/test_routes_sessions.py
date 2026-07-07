@@ -77,7 +77,7 @@ class TestSessionRoutes:
         Overrides the autouse fixture's fake_add_data_points with a capturing spy so we can
         inspect the actual DataPoint instance passed on the single call.
         """
-        calls: list = []
+        calls = []
 
         async def capture(data_points, context=None, custom_edges=None, embed_triplets=False):
             calls.append(list(data_points))
@@ -101,6 +101,27 @@ class TestSessionRoutes:
         expected = deterministic_uuid_from(r.json()["agent_key"])
         assert dp.eb_id == str(expected)
 
+    async def test_session_start_registers_actor_registry(self, client, container):
+        captured = []
+
+        async def capture(actor):
+            captured.append(actor)
+            return actor
+
+        container.actor_registry.register_actor = AsyncMock(side_effect=capture)
+
+        r = await client.post("/sessions/start", json={
+            "session_key": "agent:main:main",
+            "session_id": "abc-123",
+            "agent_id": "main",
+        })
+
+        assert r.status_code == 200
+        assert len(captured) == 1
+        actor = captured[0]
+        assert actor.id == deterministic_uuid_from(r.json()["agent_key"])
+        assert any("main" in handle for handle in actor.handles)
+
     async def test_session_start_merges_agent_identity(self, client, container):
         """G3 (#560): POST /sessions/start issues a Cypher MERGE on AgentIdentity keyed on
         agent_key. Idempotent: ON CREATE SET registered_at; ON MATCH SET last_seen_at.
@@ -122,7 +143,7 @@ class TestSessionRoutes:
         instances with identical eb_id (deterministic UUID from agent_key). No duplicate-upsert
         creates a second actor.
         """
-        calls: list = []
+        calls = []
 
         async def capture(data_points, context=None, custom_edges=None, embed_triplets=False):
             calls.append(list(data_points))

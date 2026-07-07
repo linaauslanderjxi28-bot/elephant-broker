@@ -84,6 +84,12 @@ async def session_start(body: SessionStartRequest, request: Request):
             await add_data_points([dp])
         except Exception as exc:
             logger.warning("Agent ActorRef registration failed: %s", exc)
+        registry = getattr(container, "actor_registry", None)
+        if registry:
+            try:
+                await registry.register_actor(agent_actor)
+            except Exception as exc:
+                logger.warning("Agent actor registry sync failed: %s", exc)
 
     # 3. Store subagent parent mapping
     if body.parent_session_key:
