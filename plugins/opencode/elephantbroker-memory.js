@@ -252,22 +252,28 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
     }
     async function flushMessages() {
         if (flushRunning)
-            return;
+            return 0;
         flushRunning = true;
+        let flushed = 0;
         try {
             while (messageBuffer.length > 0) {
                 const batch = messageBuffer.splice(0);
                 const messages = batch.map((msg) => ({ role: msg.role, content: msg.text }));
                 const ingested = await ebClient.ingestTurn(messages);
-                if (ingested)
+                if (ingested) {
+                    flushed += batch.length;
                     continue;
+                }
                 for (const msg of batch) {
                     try {
                         await ebClient.store(`[${msg.role}] ${msg.text}`, { category: "conversation", scope: "session" });
+                        flushed += 1;
                     }
                     catch {
                         const stored = await ebClient.ingestMessages([{ role: msg.role, content: msg.text }]);
-                        if (!stored)
+                        if (stored)
+                            flushed += 1;
+                        else
                             log("error", "message capture failed");
                     }
                 }
@@ -280,6 +286,17 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
         finally {
             flushRunning = false;
         }
+        return flushed;
+    }
+    function setHookSession(sessionID) {
+        if (sessionID)
+            ebClient.setSession(`opencode:${sessionID}`, sessionID);
+    }
+    function formatRecall(results) {
+        return [
+            "ElephantBroker recalled context:",
+            ...results.map((result) => `- [${result.category}] ${result.text}`),
+        ].join("\n");
     }
     const seenMessages = new Set();
     const assistantTexts = new Map();
@@ -607,6 +624,7 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
         "chat.message": async (_input, output) => {
             if (!gatewayId)
                 return;
+            setHookSession(_input.sessionID);
             const msgId = _input.messageID ?? output.message.id;
             if (!msgId || seenMessages.has(msgId))
                 return;
@@ -621,6 +639,51 @@ const ElephantBrokerMemory = async ({ client } = {}) => {
                 timestamp: Date.now(),
             });
             scheduleFlush();
+        },
+        "tool.execute.after": async (input, output) => {
+            if (!gatewayId)
+                return;
+            setHookSession(input.sessionID);
+            const renderedOutput = typeof output.output === "string" ? output.output : JSON.stringify(output.output);
+            const text = [
+                `Tool ${input.tool} completed (call ${input.callID}).`,
+                output.title ? `Title: ${output.title}` : "",
+                `Args: ${JSON.stringify(input.args ?? {})}`,
+                renderedOutput ? `Output: ${renderedOutput}` : "",
+            ].filter(Boolean).join("\n");
+            try {
+                await ebClient.store(text, { category: "tool-call", scope: "session" });
+            }
+            catch (e) {
+                log("error", "tool audit capture failed", { error: e instanceof Error ? e.message : String(e) });
+            }
+        },
+        "experimental.session.compacting": async (input, output) => {
+            if (!gatewayId)
+                return;
+            setHookSession(input.sessionID);
+            const flushed = await flushMessages();
+            if (flushed > 0) {
+                output.context.push(`ElephantBroker flushed ${flushed} buffered message(s) before compaction.`);
+            }
+        },
+        "experimental.chat.system.transform": async (input, output) => {
+            if (!gatewayId)
+                return;
+            setHookSession(input.sessionID);
+            try {
+                const results = await ebClient.search("current session context", {
+                    max_results: 5,
+                    min_score: 0,
+                    auto_recall: true,
+                    scope: "session",
+                });
+                if (results?.length)
+                    output.system.push(formatRecall(results));
+            }
+            catch (e) {
+                log("error", "system recall failed", { error: e instanceof Error ? e.message : String(e) });
+            }
         },
         event: async ({ event }) => {
             if (!gatewayId)
