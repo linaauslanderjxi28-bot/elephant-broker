@@ -240,6 +240,7 @@ try:
                 "query": req_query,
                 "max_results": int(req_max_results or top_k),
                 "min_score": 0.0,
+                "include_audit": False,
             }
             if req_scope == "session":
                 payload["scope"] = "session"
@@ -251,7 +252,10 @@ try:
                 payload["entity_type"] = req_entity_type
             if include_session_id and _is_valid_uuid and session_id:
                 payload["session_id"] = session_id
-            return post_json(SEARCH_PATH, payload)
+            result = post_json(SEARCH_PATH, payload)
+            if isinstance(result, list):
+                return [item for item in result if item.get("category") not in {"tool-call", "conversation", "todowrite"}]
+            return result
 
         if depth_mode == "deep":
             if mode == "graph":

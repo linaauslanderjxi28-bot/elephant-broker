@@ -205,6 +205,7 @@ def eb_search(
     scope: str | None = None,
     memory_class: str | None = None,
     auto_recall: bool = False,
+    include_audit: bool = False,
     timeout: float = 22.0,
 ) -> list[dict]:
     """Search memory via ``POST /memory/search``.
@@ -218,6 +219,7 @@ def eb_search(
         "max_results": max_results,
         "min_score": min_score,
         "auto_recall": auto_recall,
+        "include_audit": include_audit,
     }
     if session_key:
         payload["session_key"] = session_key
@@ -232,7 +234,11 @@ def eb_search(
     if memory_class:
         payload["memory_class"] = memory_class
     result = _eb_request("/memory/search", payload, timeout=timeout)
-    return result if isinstance(result, list) else []
+    if not isinstance(result, list):
+        return []
+    if include_audit:
+        return result
+    return [item for item in result if item.get("category") not in {"tool-call", "conversation", "todowrite"}]
 
 
 def eb_search_global(
@@ -251,13 +257,16 @@ def eb_search_global(
         "min_score": min_score,
         "auto_recall": auto_recall,
         "scope": "global",
+        "include_audit": False,
     }
     if memory_class:
         payload["memory_class"] = memory_class
     if session_key:
         payload["session_key"] = session_key
     result = _eb_request("/memory/search", payload, timeout=timeout)
-    return result if isinstance(result, list) else []
+    if not isinstance(result, list):
+        return []
+    return [item for item in result if item.get("category") not in {"tool-call", "conversation", "todowrite"}]
 
 
 # ── session lifecycle ────────────────────────────────────────────────
