@@ -68,7 +68,6 @@ class SessionArtifactStore:
 
     async def search(self, sk: str, sid: str, query: str,
                      tool_name: str | None = None, max_results: int = 5) -> list[SessionArtifact]:
-        """Search artifacts by Jaccard keyword overlap on summary+tool_name."""
         try:
             all_raw = await self._redis.hgetall(self._keys.session_artifacts(sk, sid))
         except Exception:
@@ -81,7 +80,7 @@ class SessionArtifactStore:
             artifact = SessionArtifact.model_validate_json(raw)
             if tool_name and artifact.tool_name != tool_name:
                 continue
-            artifact_tokens = set(f"{artifact.summary} {artifact.tool_name}".lower().split())
+            artifact_tokens = set(f"{artifact.summary} {artifact.content} {artifact.tool_name}".lower().split())
             intersection = query_tokens & artifact_tokens
             union = query_tokens | artifact_tokens
             score = len(intersection) / len(union) if union else 0.0
@@ -146,6 +145,7 @@ class SessionArtifactStore:
         graph = getattr(self._artifact_store, "_graph", None)
         if graph:
             artifact_node_id = str(result.artifact_id)
+            agent_actor_id = ""
             # CREATED_BY: artifact → agent actor (derive from gateway_id)
             from elephantbroker.runtime.identity import deterministic_uuid_from
             if self._gateway_id:

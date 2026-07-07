@@ -71,6 +71,20 @@ class TestSessionArtifactStore:
         assert len(results) >= 1
         assert results[0].tool_name == "psql"
 
+    async def test_search_matches_artifact_content(self):
+        store, redis = _make_store()
+        artifact = make_session_artifact(
+            content="unique self test artifact output",
+            summary="short summary",
+            tool_name="pytest",
+        )
+        redis.hgetall = AsyncMock(return_value={"1": artifact.model_dump_json()})
+
+        results = await store.search("sk", "sid", "unique self test")
+
+        assert len(results) == 1
+        assert results[0].artifact_id == artifact.artifact_id
+
     async def test_search_with_tool_filter(self):
         store, redis = _make_store()
         a1 = make_session_artifact(summary="data output", tool_name="psql")
