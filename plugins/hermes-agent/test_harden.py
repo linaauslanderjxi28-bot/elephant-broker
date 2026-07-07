@@ -116,6 +116,16 @@ class TestTurnSync(unittest.TestCase):
 
 
 class TestBackgroundWrites(unittest.TestCase):
+    def test_system_prompt_block_describes_active_provider(self) -> None:
+        module = load_plugin_module()
+        provider = module.ElephantBrokerMemoryProvider()
+        provider._session_key = "session-key"
+
+        prompt = provider.system_prompt_block()
+
+        self.assertIn("ElephantBroker external memory provider", prompt)
+        self.assertIn("session-key", prompt)
+
     def test_flush_drains_writes_in_fifo_order(self) -> None:
         module = load_plugin_module()
         provider = module.ElephantBrokerMemoryProvider()

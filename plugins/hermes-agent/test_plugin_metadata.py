@@ -19,10 +19,14 @@ class TestHermesPluginMetadata(unittest.TestCase):
         self.assertIn("version: 1.0.0", plugin_yaml)
         self.assertIn("provider_type: memory", plugin_yaml)
         self.assertIn("hooks:", plugin_yaml)
+        self.assertIn("  - system_prompt_block", plugin_yaml)
         self.assertIn("  - prefetch", plugin_yaml)
+        self.assertIn("  - queue_prefetch", plugin_yaml)
         self.assertIn("  - sync_turn", plugin_yaml)
         self.assertIn("  - on_session_end", plugin_yaml)
         self.assertIn("  - on_pre_compress", plugin_yaml)
+        self.assertIn("  - on_memory_write", plugin_yaml)
+        self.assertIn("  - shutdown", plugin_yaml)
 
 
 if __name__ == "__main__":

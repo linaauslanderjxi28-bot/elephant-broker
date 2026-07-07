@@ -124,6 +124,7 @@ class ElephantBrokerMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         return (
             "# ElephantBroker Memory\n"
+            "ElephantBroker external memory provider is active.\n"
             f"Active. Session Key: {self._session_key}.\n"
             "Use elephantbroker_search to look up user facts, preferences, and details. "
             "Use elephantbroker_store to record explicit facts."

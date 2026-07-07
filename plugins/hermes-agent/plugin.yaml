@@ -3,8 +3,12 @@ version: 1.0.0
 description: "ElephantBroker — Memory provider plugin for NousResearch Hermes Agent with session-scoped persistence, semantic search, and fact extraction."
 provider_type: memory
 hooks:
+  - system_prompt_block
   - prefetch
+  - queue_prefetch
   - sync_turn
   - on_session_end
   - on_pre_compress
+  - on_memory_write
+  - shutdown
 pip_dependencies: []
