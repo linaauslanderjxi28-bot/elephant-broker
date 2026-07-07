@@ -179,6 +179,19 @@ test("memory_forget handles backend not-found response without losing client bin
   assert.doesNotMatch(output, /undefined is not an object|_client/);
 });
 
+test("memory_forget treats empty successful delete response as deleted", async () => {
+  const factId = "11111111-1111-1111-1111-111111111111";
+  const { output } = await runTool("memory_forget", { id: factId }, {
+    fetch: async () => ({
+      ok: true,
+      status: 204,
+      text: async () => "",
+    }),
+  });
+
+  assert.equal(output, `Memory ${factId} deleted.`);
+});
+
 test("memory_update omits backend-forbidden and blank optional fields", async () => {
   const { requests, output } = await runTool("memory_update", {
     id: "11111111-1111-1111-1111-111111111111",

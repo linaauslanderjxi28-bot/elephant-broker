@@ -214,9 +214,12 @@ class EBClient {
 
   async forget(id: string): Promise<boolean> {
     try {
-      const result = await this.req<void | null>("DELETE", `/memory/${id}`, undefined, 404);
-      if (result === null) return false;
-      return true;
+      const res = await fetch(`${this.baseUrl}/memory/${id}`, {
+        method: "DELETE",
+        headers: this.headers(),
+        signal: AbortSignal.timeout(30000),
+      });
+      return res.ok;
     } catch {
       return false;
     }
