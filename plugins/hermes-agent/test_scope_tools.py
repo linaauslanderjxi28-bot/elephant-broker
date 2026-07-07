@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from types import ModuleType
 
+from elephantbroker.schemas.procedure import ProcedureDefinition
+
 
 PLUGIN_ROOT = Path(__file__).parent
 
@@ -318,6 +320,19 @@ class TestScopeTools(unittest.TestCase):
         self.assertEqual(payload["activation_modes"], [{"manual": True}])
         self.assertEqual(payload["is_manual_only"], False)
         self.assertEqual(options["method"], "POST")
+
+    def test_procedure_create_payload_validates_against_backend_schema(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+
+        _ = tools.handle_tool_call(provider, "elephantbroker_procedure_create", {
+            "name": "Self test procedure",
+            "steps": [{"instruction": "Run first check"}],
+            "activation_modes": [{"manual": True}],
+        })
+
+        payload = provider.calls[0][1]
+        ProcedureDefinition.model_validate(payload)
 
     def test_artifact_create_defaults_to_current_session(self) -> None:
         tools = load_tools_module()

@@ -146,10 +146,26 @@ PROCEDURE_CREATE_SCHEMA = {
             "name": {"type": "string"},
             "description": {"type": "string"},
             "scope": {"type": "string"},
-            "steps": {"type": "array", "items": {"type": "object"}},
+            "steps": {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "object", "properties": {"order": {"type": "integer"}, "instruction": {"type": "string"}}, "required": ["instruction"]},
+                    ],
+                },
+            },
             "enabled": {"type": "boolean"},
             "is_manual_only": {"type": "boolean"},
-            "activation_modes": {"type": "array", "items": {"type": "string"}},
+            "activation_modes": {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {"type": "string", "enum": ["manual", "actor_default", "goal_bound", "supervisor_forced"]},
+                        {"type": "object"},
+                    ],
+                },
+            },
         },
         "required": ["name", "steps"],
     },

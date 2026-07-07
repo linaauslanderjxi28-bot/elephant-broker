@@ -94,6 +94,8 @@ def _procedure_steps(raw_steps: Any) -> list[Any]:
         elif isinstance(step, dict):
             normalized = dict(step)
             normalized.setdefault("order", index)
+            if "instruction" not in normalized and "description" in normalized:
+                normalized["instruction"] = normalized["description"]
             steps.append(normalized)
         else:
             steps.append(step)
@@ -106,7 +108,16 @@ def _procedure_activation_modes(raw_modes: Any) -> list[Any]:
     modes = []
     for mode in raw_modes:
         if isinstance(mode, str):
-            modes.append({mode: True})
+            if mode == "manual":
+                modes.append({"manual": True})
+            elif mode == "actor_default":
+                modes.append({"actor_default": True})
+            elif mode == "goal_bound":
+                modes.append({"goal_bound": True})
+            elif mode == "supervisor_forced":
+                modes.append({"supervisor_forced": True})
+            else:
+                modes.append({"trigger_word": mode})
         else:
             modes.append(mode)
     return modes
