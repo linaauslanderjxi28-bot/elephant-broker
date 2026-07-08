@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 AUDIT_CATEGORIES = {"tool-call", "conversation", "todowrite"}
 VALID_SCOPES = {"session", "actor", "team", "organization", "global", "task", "subagent", "artifact"}
-VALID_MEMORY_CLASSES = {"episodic", "semantic", "procedural"}
+VALID_MEMORY_CLASSES = {"episodic", "semantic", "procedural", "policy", "working_memory"}
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 FACT_UPDATE_FIELDS = {
     "text",
@@ -264,12 +264,10 @@ def handle_store(provider: ToolProvider, args: dict[str, Any]) -> str:
         "memory_class": memory_class,
         "confidence": float(args.get("confidence", 1.0)),
     }
-    for key in ("entity_type", "entity_name", "decision_status", "decision_domain", "target_actor_ids", "autorecall_blacklisted"):
+    for key in ("entity_type", "entity_name", "decision_status", "decision_domain", "target_actor_ids", "goal_ids", "autorecall_blacklisted"):
         if key in args and args[key] not in (None, ""):
             fact[key] = args[key]
     payload = {"fact": fact, "session_key": provider._session_key, "session_id": provider._session_id}
-    if args.get("goal_ids"):
-        payload["goal_ids"] = args["goal_ids"]
     try:
         res = provider._eb_request("/memory/store", payload, timeout=10.0)
         return _json_result({"result": "Fact stored successfully.", "details": res})
@@ -474,8 +472,12 @@ def handle_actor_inspect(provider: ToolProvider, args: dict[str, Any]) -> str:
             result["authority_chain"] = provider._eb_request(f"/actors/{actor_id}/authority-chain", None, method="GET", timeout=10.0)
         return _json_result(result)
     except OSError as exc:
-        if _is_http_status(exc, 404) or _is_http_status(exc, 422):
-            return _optional_unavailable("actor_inspect", "actor_module_unavailable", f"Actor inspection is unavailable or actor_id is not registered in this deployment: {_error_text(exc)}")
+        if _is_http_status(exc, 404):
+            return _json_result({"error": "Actor not found", "reason": "actor_not_found", "actor_id": actor_id, "detail": _error_text(exc)})
+        if _is_http_status(exc, 422):
+            return _optional_unavailable("actor_inspect", "invalid_actor_id", f"Actor inspection rejected the provided UUID: {_error_text(exc)}")
+        if _is_http_status(exc, 503):
+            return _optional_unavailable("actor_inspect", "actor_registry_unavailable", f"Actor registry is unavailable in this deployment: {_error_text(exc)}")
         return _json_result({"error": f"Actor inspect failed: {exc}"})
 
 

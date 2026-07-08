@@ -158,17 +158,30 @@ class ElephantBrokerMemoryProvider(MemoryProvider):
             try:
                 sid = stable_uuid(session_id) if session_id else self._session_id
                 skey = session_id or self._session_key
-                # Session scope — personal conversation context
-                session_payload = {"query": query, "max_results": 5, "session_key": skey, "session_id": sid, "auto_recall": True, "include_audit": False}
-                session_results = self._eb_request("/memory/search", session_payload, timeout=10.0)
-                if not isinstance(session_results, list):
-                    session_results = []
-                # Global scope — scrapling/doc-ingestor imported data
-                global_payload = {"query": query, "max_results": 5, "scope": "global", "profile_name": self._profile_name, "include_audit": False}
-                global_results = self._eb_request("/memory/search", global_payload, timeout=10.0)
-                if not isinstance(global_results, list):
-                    global_results = []
-                all_results = session_results + global_results
+                # Session scope — current conversation context.
+                search_specs = [
+                    ("session", {"query": query, "max_results": 5, "scope": "session", "session_key": skey, "session_id": sid, "auto_recall": True, "include_audit": False}),
+                    # Shared scopes — visible at the current gateway. Do not pass
+                    # profile_name here: pipeline-synced/global shared data is
+                    # profile-agnostic, and profile filtering can hide facts.
+                    ("team", {"query": query, "max_results": 3, "scope": "team", "auto_recall": True, "include_audit": False}),
+                    ("organization", {"query": query, "max_results": 3, "scope": "organization", "auto_recall": True, "include_audit": False}),
+                    ("global", {"query": query, "max_results": 5, "scope": "global", "auto_recall": True, "include_audit": False}),
+                ]
+                all_results: list[dict[str, Any]] = []
+                seen_ids: set[str] = set()
+                for _scope, payload in search_specs:
+                    scope_results = self._eb_request("/memory/search", payload, timeout=10.0)
+                    if not isinstance(scope_results, list):
+                        continue
+                    for item in scope_results:
+                        if not isinstance(item, dict):
+                            continue
+                        dedupe_key = str(item.get("id") or item.get("text") or repr(item))
+                        if dedupe_key in seen_ids:
+                            continue
+                        seen_ids.add(dedupe_key)
+                        all_results.append(item)
                 if all_results:
                     formatted = self._format_search_results(all_results)
                     with self._prefetch_lock:

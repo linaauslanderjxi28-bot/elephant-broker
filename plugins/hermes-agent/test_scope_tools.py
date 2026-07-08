@@ -187,6 +187,34 @@ class TestScopeTools(unittest.TestCase):
         self.assertEqual(fact["target_actor_ids"], ["00000000-0000-4000-8000-000000000002"])
         self.assertEqual(fact["autorecall_blacklisted"], True)
 
+    def test_store_places_goal_ids_inside_fact_payload(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+        goal_id = "00000000-0000-4000-8000-000000000003"
+
+        _ = tools.handle_store(provider, {"text": "goal linked fact", "goal_ids": [goal_id]})
+
+        payload = provider.calls[0][1]
+        fact = payload["fact"]
+        if not isinstance(fact, dict):
+            self.fail("store payload fact must be a dict")
+        self.assertEqual(fact["goal_ids"], [goal_id])
+        self.assertNotIn("goal_ids", payload)
+
+    def test_store_accepts_policy_and_working_memory_classes(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+
+        _ = tools.handle_store(provider, {"text": "policy fact", "memory_class": "policy"})
+        _ = tools.handle_store(provider, {"text": "working fact", "memory_class": "working_memory"})
+
+        first_fact = provider.calls[0][1]["fact"]
+        second_fact = provider.calls[1][1]["fact"]
+        if not isinstance(first_fact, dict) or not isinstance(second_fact, dict):
+            self.fail("store payload facts must be dicts")
+        self.assertEqual(first_fact["memory_class"], "policy")
+        self.assertEqual(second_fact["memory_class"], "working_memory")
+
     def test_store_preserves_research_decision_identity(self) -> None:
         tools = load_tools_module()
         provider = FakeProvider()
@@ -423,6 +451,18 @@ class TestScopeTools(unittest.TestCase):
         self.assertEqual(parsed["status"], "unavailable")
         self.assertEqual(parsed["reason"], "invalid_actor_id")
         self.assertEqual(provider.calls, [])
+
+    def test_actor_inspect_404_reports_actor_not_found_not_module_unavailable(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+        actor_id = "00000000-0000-4000-8000-000000000099"
+        provider.errors[f"/actors/{actor_id}"] = OSError("HTTP Error 404: Not Found")
+
+        output = tools.handle_actor_inspect(provider, {"actor_id": actor_id})
+
+        parsed = json.loads(output)
+        self.assertEqual(parsed["reason"], "actor_not_found")
+        self.assertEqual(parsed["actor_id"], actor_id)
 
     def test_guards_list_404_returns_optional_module_status(self) -> None:
         tools = load_tools_module()

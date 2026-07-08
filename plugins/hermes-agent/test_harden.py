@@ -57,6 +57,34 @@ class TestConfigFallbacks(unittest.TestCase):
 
 
 class TestTurnSync(unittest.TestCase):
+    def test_queue_prefetch_searches_session_team_org_and_global_without_global_profile(self) -> None:
+        module = load_plugin_module()
+        provider = module.ElephantBrokerMemoryProvider()
+        provider._active = True
+        provider._agent_context = "primary"
+        provider._session_key = "session-key"
+        provider._session_id = "00000000-0000-4000-8000-000000000001"
+        provider._profile_name = "coding"
+        calls = []
+
+        def fake_request(path, payload=None, **_kwargs):
+            calls.append((path, payload or {}))
+            return []
+
+        provider._eb_request = fake_request
+        provider.queue_prefetch("pricing policy")
+        if provider._prefetch_thread:
+            provider._prefetch_thread.join(timeout=2.0)
+
+        payloads = [payload for path, payload in calls if path == "/memory/search"]
+        self.assertEqual([payload.get("scope") for payload in payloads], ["session", "team", "organization", "global"])
+        self.assertEqual(payloads[0]["session_key"], "session-key")
+        self.assertEqual(payloads[0]["session_id"], "00000000-0000-4000-8000-000000000001")
+        for payload in payloads[1:]:
+            self.assertNotIn("session_key", payload)
+            self.assertNotIn("session_id", payload)
+            self.assertNotIn("profile_name", payload)
+
     def test_sync_turn_uses_supplied_messages_verbatim(self) -> None:
         module = load_plugin_module()
         provider = module.ElephantBrokerMemoryProvider()

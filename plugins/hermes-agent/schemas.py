@@ -1,9 +1,9 @@
 SCOPE_ENUM = ["session", "actor", "team", "organization", "global", "task", "subagent", "artifact"]
-MEMORY_CLASS_ENUM = ["episodic", "semantic", "procedural"]
+MEMORY_CLASS_ENUM = ["episodic", "semantic", "procedural", "policy", "working_memory"]
 
 SEARCH_SCHEMA = {
     "name": "elephantbroker_search",
-    "description": "Search ElephantBroker memories across scopes by semantic meaning. Omit scope to search all accessible scopes.",
+    "description": "Search ElephantBroker memories by semantic meaning. Omit scope to search all scopes visible to the current gateway; pass scope for session/team/organization/global precision.",
     "parameters": {
         "type": "object",
         "properties": {
