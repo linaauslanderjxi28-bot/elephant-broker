@@ -252,6 +252,25 @@ class TestScopeTools(unittest.TestCase):
         self.assertEqual(parsed["reason"], "store_unavailable")
         self.assertEqual(parsed["retryable"], True)
 
+    def test_store_409_returns_structured_near_duplicate_detail(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+
+        class StructuredHTTPError(OSError):
+            status = 409
+            reason = "Conflict"
+            json_body = {"status": "skipped", "reason": "near_duplicate_detected", "existing_fact_id": "fact-old"}
+            body = '{"status":"skipped"}'
+
+        provider.errors["/memory/store"] = StructuredHTTPError("HTTP Error 409: Conflict")
+
+        output = tools.handle_store(provider, {"text": "duplicate me"})
+
+        parsed = json.loads(output)
+        self.assertEqual(parsed["status"], "skipped")
+        self.assertEqual(parsed["reason"], "near_duplicate_detected")
+        self.assertEqual(parsed["detail"]["existing_fact_id"], "fact-old")
+
     def test_search_accepts_backend_filters(self) -> None:
         tools = load_tools_module()
         provider = FakeProvider()
@@ -280,6 +299,24 @@ class TestScopeTools(unittest.TestCase):
         self.assertEqual(path, "/memory/fact-1")
         self.assertEqual(payload, {})
         self.assertEqual(options["method"], "GET")
+
+    def test_request_json_includes_structured_http_error_detail(self) -> None:
+        tools = load_tools_module()
+        provider = FakeProvider()
+
+        class StructuredHTTPError(OSError):
+            status = 422
+            reason = "Unprocessable Entity"
+            json_body = {"detail": [{"msg": "bad field"}]}
+            body = '{"detail":[{"msg":"bad field"}]}'
+
+        provider.errors["/memory/fact-1"] = StructuredHTTPError("HTTP Error 422: Unprocessable Entity")
+
+        output = tools.handle_tool_call(provider, "elephantbroker_get", {"fact_id": "fact-1"})
+
+        parsed = json.loads(output)
+        self.assertEqual(parsed["status"], 422)
+        self.assertEqual(parsed["detail"], {"detail": [{"msg": "bad field"}]})
 
     def test_memory_update_uses_patch_endpoint(self) -> None:
         tools = load_tools_module()

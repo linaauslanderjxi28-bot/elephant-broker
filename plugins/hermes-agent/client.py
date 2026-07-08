@@ -2,8 +2,24 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.request
 from typing import Any
+
+
+class ElephantBrokerHTTPError(OSError):
+    """Structured HTTP error raised by the Hermes EB client."""
+
+    def __init__(self, status: int, reason: str, body: str) -> None:
+        self.status = status
+        self.reason = reason
+        self.body = body
+        try:
+            parsed = json.loads(body) if body else None
+        except json.JSONDecodeError:
+            parsed = None
+        self.json_body = parsed
+        super().__init__(f"HTTP Error {status}: {reason}: {body[:500]}")
 
 
 class ElephantBrokerClient:
@@ -34,8 +50,12 @@ class ElephantBrokerClient:
             headers=self.default_headers(),
             method=method,
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8")
-            if not body:
-                return None
-            return json.loads(body)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8")
+                if not body:
+                    return None
+                return json.loads(body)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise ElephantBrokerHTTPError(exc.code, exc.reason, body) from exc

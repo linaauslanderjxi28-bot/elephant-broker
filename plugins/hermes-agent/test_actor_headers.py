@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import sys
 import unittest
@@ -44,6 +45,28 @@ class TestActorHeaders(unittest.TestCase):
         provider = module.ElephantBrokerMemoryProvider()
         with patch.dict(os.environ, {"EB_AUTH_TOKEN": "  "}, clear=True):
             self.assertNotIn("X-EB-Auth-Token", provider._default_headers())
+
+
+class TestClientHTTPError(unittest.TestCase):
+    def test_request_raises_structured_http_error_with_json_body(self) -> None:
+        load_plugin_module()
+        client_mod = sys.modules["elephantbroker_hermes_client"]
+        err = client_mod.urllib.error.HTTPError(
+            url="http://eb.test/memory/store",
+            code=409,
+            msg="Conflict",
+            hdrs={},
+            fp=io.BytesIO(b'{"reason":"near_duplicate_detected","existing_fact_id":"fact-old"}'),
+        )
+
+        client = client_mod.ElephantBrokerClient("http://eb.test", "gw-test", "")
+        with patch.object(client_mod.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(client_mod.ElephantBrokerHTTPError) as ctx:
+                client.request("/memory/store", {"fact": {"text": "duplicate"}})
+
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(ctx.exception.reason, "Conflict")
+        self.assertEqual(ctx.exception.json_body["existing_fact_id"], "fact-old")
 
 
 class TestProviderContract(unittest.TestCase):

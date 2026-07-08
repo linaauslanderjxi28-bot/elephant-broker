@@ -57,7 +57,36 @@ def _filter_audit_results(results: list[dict[str, Any]], include_audit: bool) ->
 
 
 def _error_text(exc: OSError) -> str:
+    body = getattr(exc, "body", "")
+    if body:
+        return f"{exc}"
     return str(exc)
+
+
+def _http_status(exc: OSError) -> int | None:
+    status = getattr(exc, "status", None)
+    return int(status) if isinstance(status, int) else None
+
+
+def _error_json(exc: OSError) -> dict[str, Any] | None:
+    parsed = getattr(exc, "json_body", None)
+    if isinstance(parsed, dict):
+        return parsed
+    body = getattr(exc, "body", "")
+    if isinstance(body, str) and body:
+        try:
+            loaded = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+        return loaded if isinstance(loaded, dict) else None
+    return None
+
+
+def _backend_detail(exc: OSError) -> Any:
+    parsed = _error_json(exc)
+    if parsed is not None:
+        return parsed
+    return _error_text(exc)
 
 
 def _is_timeout(exc: OSError) -> bool:
@@ -65,6 +94,9 @@ def _is_timeout(exc: OSError) -> bool:
 
 
 def _is_http_status(exc: OSError, status: int) -> bool:
+    structured_status = _http_status(exc)
+    if structured_status is not None:
+        return structured_status == status
     text = _error_text(exc).lower()
     return f"http error {status}" in text or f"{status}" in text
 
@@ -81,6 +113,9 @@ def _request_json(provider: ToolProvider, path: str, payload: dict[str, Any] | N
     try:
         return _json_result(provider._eb_request(path, payload, method=method, timeout=timeout))
     except OSError as exc:
+        status = _http_status(exc)
+        if status is not None:
+            return _json_result({"error": f"HTTP {status}: {getattr(exc, 'reason', '')}", "status": status, "detail": _backend_detail(exc)})
         return _json_result({"error": str(exc)})
 
 
@@ -272,8 +307,14 @@ def handle_store(provider: ToolProvider, args: dict[str, Any]) -> str:
         res = provider._eb_request("/memory/store", payload, timeout=10.0)
         return _json_result({"result": "Fact stored successfully.", "details": res})
     except OSError as exc:
+        if _is_http_status(exc, 409):
+            detail = _backend_detail(exc)
+            return _json_result({"status": "skipped", "reason": "near_duplicate_detected", "message": "Fact was not stored because EB detected a near-duplicate.", "detail": detail})
         if _is_http_status(exc, 503) or _is_timeout(exc):
-            return _json_result({"status": "degraded", "reason": "store_unavailable", "message": "Memory store is temporarily unavailable; retry is safe.", "retryable": True, "detail": _error_text(exc)})
+            return _json_result({"status": "degraded", "reason": "store_unavailable", "message": "Memory store is temporarily unavailable; retry is safe.", "retryable": True, "detail": _backend_detail(exc)})
+        status = _http_status(exc)
+        if status is not None:
+            return _json_result({"error": f"Failed to store fact: HTTP {status}", "status": status, "detail": _backend_detail(exc)})
         return _json_result({"error": f"Failed to store fact: {exc}"})
 
 
