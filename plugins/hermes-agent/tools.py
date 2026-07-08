@@ -233,8 +233,9 @@ def handle_search_global(provider: ToolProvider, args: dict[str, Any]) -> str:
     for key in ("session_key", "entity_type"):
         if args.get(key):
             payload[key] = args[key]
-    if provider._profile_name:
-        payload["profile_name"] = provider._profile_name
+    # TD-78: do NOT inject profile_name on global searches —
+    # pipeline-synced data is profile-agnostic; filtering by profile
+    # silently hides all global facts.
     try:
         results = provider._eb_request("/memory/search", payload, timeout=15.0)
         if not results:
