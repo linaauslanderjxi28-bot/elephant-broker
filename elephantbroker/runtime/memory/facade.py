@@ -409,6 +409,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     "(exc=%s: %s)", type(vec_exc).__name__, vec_exc,
                 )
         cypher, params = self._build_structural_query(
+            query=query,
             scope=scope, actor_id=actor_id, memory_class=memory_class,
             session_key=session_key, entity_type=entity_type, limit=max_results,
             caller_gateway_id=caller_gateway_id,
@@ -544,7 +545,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             logger.warning("Failed to update use counts: %s", exc)
 
     def _build_structural_query(
-        self, scope: Scope | None = None, actor_id: str | None = None,
+        self, query: str | None = None, scope: Scope | None = None, actor_id: str | None = None,
         memory_class: MemoryClass | None = None, session_key: str | None = None,
         entity_type: str | None = None,
         limit: int = 100, caller_gateway_id: str = "",
@@ -556,6 +557,14 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         if scope:
             conditions.append("f.scope = $scope")
             params["scope"] = scope.value if hasattr(scope, "value") else str(scope)
+        if query:
+            conditions.append(
+                "(toLower(coalesce(f.text, '')) CONTAINS toLower($text_query) "
+                "OR toLower(coalesce(f.entity_name, '')) CONTAINS toLower($text_query) "
+                "OR toLower(coalesce(f.entity_type, '')) CONTAINS toLower($text_query) "
+                "OR toLower(coalesce(f.category, '')) CONTAINS toLower($text_query))"
+            )
+            params["text_query"] = query
         if actor_id:
             conditions.append("f.source_actor_id = $actor_id")
             params["actor_id"] = actor_id

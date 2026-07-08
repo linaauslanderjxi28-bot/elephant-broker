@@ -75,6 +75,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         if policy.structural_enabled:
             tasks["structural"] = asyncio.ensure_future(
                 _with_source_timeout(self.get_structural_hits(
+                    query=query,
                     scope=scope, actor_id=actor_id, memory_class=memory_class,
                     entity_type=entity_type, session_key=session_key, limit=policy.structural_fetch_k,
                     auto_recall=auto_recall,
@@ -230,7 +231,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
     # --- Stage 0: Structural (direct Cypher) ---
 
     async def get_structural_hits(
-        self, *, scope: str | None = None, actor_id: str | None = None,
+        self, *, query: str | None = None, scope: str | None = None, actor_id: str | None = None,
         goal_ids: list[str] | None = None,
         memory_class: MemoryClass | None = None, session_key: str | None = None,
         entity_type: str | None = None,
@@ -249,6 +250,14 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         if scope:
             conditions.append("f.scope = $scope")
             params["scope"] = scope
+        if query:
+            conditions.append(
+                "(toLower(coalesce(f.text, '')) CONTAINS toLower($text_query) "
+                "OR toLower(coalesce(f.entity_name, '')) CONTAINS toLower($text_query) "
+                "OR toLower(coalesce(f.entity_type, '')) CONTAINS toLower($text_query) "
+                "OR toLower(coalesce(f.category, '')) CONTAINS toLower($text_query))"
+            )
+            params["text_query"] = query
         # TD-61 symmetry: session_key and actor_id are isolation-scope
         # pre-filters. When auto_recall=True the caller wants cross-session
         # / cross-actor candidates, so the pre-filter must bypass in lockstep

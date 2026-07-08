@@ -47,8 +47,10 @@ def clean_graph_props(raw: dict[str, Any]) -> dict[str, Any]:
             continue
         # `*_json` suffix opts out of deserialization — see docstring
         # rationale. The consuming DataPoint class json.loads() inside
-        # to_schema, so the prop must arrive as str.
-        if isinstance(v, str) and not k.endswith("_json"):
+        # to_schema, so the prop must arrive as str. FactDataPoint.text is
+        # also a string contract even when the fact text happens to be a JSON
+        # object (trade pipelines store JSON payloads as human-readable text).
+        if isinstance(v, str) and not k.endswith("_json") and k != "text":
             if v.startswith("{") or v.startswith("["):
                 try:
                     v = json.loads(v)

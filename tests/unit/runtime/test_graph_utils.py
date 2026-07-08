@@ -111,3 +111,14 @@ class TestCleanGraphProps:
         # Suffix keys: preserved as raw JSON strings, untouched.
         assert result["steps_json"] == '[{"a": 1}]'
         assert result["red_line_bindings_json"] == '["x", "y"]'
+
+    def test_fact_text_json_object_is_preserved_as_string(self):
+        """FactDataPoint.text is a string contract.
+
+        Trade pipelines often store JSON payloads as fact text. Neo4j/Cognee may
+        persist those strings as JSON-looking values; clean_graph_props must not
+        deserialize the `text` field or FactDataPoint reconstruction drops the
+        fact during search.
+        """
+        result = clean_graph_props({"text": '{"keyword": "portable fan"}', "meta": '{"a": 1}'})
+        assert result == {"text": '{"keyword": "portable fan"}', "meta": {"a": 1}}
