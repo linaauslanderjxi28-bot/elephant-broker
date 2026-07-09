@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+import inspect
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -98,8 +99,34 @@ async def ready(request: Request):
         else:
             t0 = time.monotonic()
             try:
-                await container.embeddings.embed_text("health check")
-                emb_check = {"status": "ok", "latency_ms": round((time.monotonic() - t0) * 1000, 2)}
+                embedding = await container.embeddings.embed_text("health check")
+                actual_dim = len(embedding) if embedding else 0
+                expected_dim = container.embeddings.get_dimension() if hasattr(container.embeddings, "get_dimension") else None
+                if inspect.isawaitable(expected_dim):
+                    expected_dim = await expected_dim
+                expected_dim = expected_dim if isinstance(expected_dim, int) else None
+                embedding_model = container.embeddings.get_model() if hasattr(container.embeddings, "get_model") else "unknown"
+                if inspect.isawaitable(embedding_model):
+                    embedding_model = await embedding_model
+                embedding_model = embedding_model if isinstance(embedding_model, str) else "unknown"
+                qdrant_dim = None
+                if container.vector and hasattr(container.vector, "get_collection_vector_size"):
+                    qdrant_dim = container.vector.get_collection_vector_size("FactDataPoint_text")
+                    if inspect.isawaitable(qdrant_dim):
+                        qdrant_dim = await qdrant_dim
+                    qdrant_dim = qdrant_dim if isinstance(qdrant_dim, int) else None
+                dim_ok = bool(actual_dim) and (expected_dim is None or actual_dim == expected_dim) and (qdrant_dim is None or actual_dim == qdrant_dim)
+                emb_check = {
+                    "status": "ok" if dim_ok else "error",
+                    "latency_ms": round((time.monotonic() - t0) * 1000, 2),
+                    "model": embedding_model,
+                    "expected_dimension": expected_dim,
+                    "actual_dimension": actual_dim,
+                    "qdrant_collection": "FactDataPoint_text",
+                    "qdrant_dimension": qdrant_dim,
+                }
+                if not dim_ok:
+                    emb_check["error"] = "embedding dimension mismatch"
             except Exception as exc:
                 logger.warning("%s health check failed: %s", "Embedding", exc)
                 emb_check = {"status": "error", "latency_ms": round((time.monotonic() - t0) * 1000, 2), "error": str(exc)}

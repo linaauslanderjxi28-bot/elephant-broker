@@ -90,6 +90,14 @@ class EmbeddingService:
         """Return the expected embedding dimension."""
         return self._dimensions
 
+    def get_model(self) -> str:
+        """Return the configured embedding model name/alias."""
+        return self._model
+
+    def get_endpoint(self) -> str:
+        """Return the configured embedding endpoint, without secrets."""
+        return self._endpoint
+
     async def close(self) -> None:
         """Close the underlying HTTP client."""
         if self._client is not None:

@@ -68,6 +68,29 @@ class VectorAdapter:
         client = await self._get_client()
         await client.get_collections()
 
+    async def get_collection_vector_size(self, collection: str, using: str = "text") -> int | None:
+        """Return Qdrant vector size for a collection/vector name.
+
+        Used by health checks to catch embedding dimension drift before writes
+        silently fail or retrieval quality degrades. Returns None when the
+        collection or vector config is absent.
+        """
+        client = await self._get_client()
+        try:
+            info = await client.get_collection(collection)
+        except Exception:
+            return None
+        vectors = getattr(getattr(info, "config", None), "params", None)
+        vectors = getattr(vectors, "vectors", None)
+        if vectors is None:
+            return None
+        # Qdrant can expose either a single VectorParams object or a dict of
+        # named vectors. Cognee uses named vector "text".
+        if isinstance(vectors, dict):
+            vec = vectors.get(using)
+            return getattr(vec, "size", None) if vec is not None else None
+        return getattr(vectors, "size", None)
+
     def _gateway_filter(self) -> FieldCondition | None:
         """Return a ``database_name=<gateway_id>`` filter condition, or
         ``None`` when the adapter is gateway-agnostic (``gateway_id=""``).

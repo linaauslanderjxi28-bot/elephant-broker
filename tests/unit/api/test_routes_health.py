@@ -199,6 +199,43 @@ class TestHealthRoutes:
         await client.get("/health/ready")
         assert container.rerank.health_check.await_count == 1
 
+    async def test_ready_embedding_reports_dimensions(self, client, container):
+        """KG-2: /ready exposes actual/configured/Qdrant embedding dimensions."""
+        from elephantbroker.api.routes.health import _embedding_probe_cache
+        _embedding_probe_cache.clear()
+        container.embeddings.embed_text = AsyncMock(return_value=[0.1] * 1024)
+        container.embeddings.get_dimension = lambda: 1024
+        container.embeddings.get_model = lambda: "/models/embedding"
+        container.vector.get_collection_vector_size = AsyncMock(return_value=1024)
+        r = await client.get("/health/ready")
+        data = r.json()
+        emb = data["checks"]["embedding"]
+        assert r.status_code == 200
+        assert emb["status"] == "ok"
+        assert emb["model"] == "/models/embedding"
+        assert emb["expected_dimension"] == 1024
+        assert emb["actual_dimension"] == 1024
+        assert emb["qdrant_dimension"] == 1024
+
+    async def test_ready_embedding_dimension_mismatch_returns_503(self, client, container):
+        """KG-2: dimension drift fails readiness instead of looking healthy."""
+        from elephantbroker.api.routes.health import _embedding_probe_cache
+        _embedding_probe_cache.clear()
+        container.embeddings.embed_text = AsyncMock(return_value=[0.1] * 768)
+        container.embeddings.get_dimension = lambda: 1024
+        container.embeddings.get_model = lambda: "/models/embedding"
+        container.vector.get_collection_vector_size = AsyncMock(return_value=1024)
+        r = await client.get("/health/ready")
+        data = r.json()
+        emb = data["checks"]["embedding"]
+        assert r.status_code == 503
+        assert data["ready"] is False
+        assert emb["status"] == "error"
+        assert emb["expected_dimension"] == 1024
+        assert emb["actual_dimension"] == 768
+        assert emb["qdrant_dimension"] == 1024
+        assert emb["error"] == "embedding dimension mismatch"
+
     async def test_llm_probe_cache_caps_at_100_entries(self):
         """L2: _llm_probe_cache clears when exceeding 100 entries."""
         from elephantbroker.api.routes.health import _llm_probe_cache, _PROBE_CACHE_MAX

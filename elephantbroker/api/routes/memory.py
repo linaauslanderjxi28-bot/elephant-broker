@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+import inspect
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -328,10 +329,27 @@ async def memory_status(request: Request):
         except Exception:
             pass
 
+    embedding_dimension = None
+    embedding_expected_dimension = None
+    qdrant_embedding_dimension = None
     if container.embeddings:
         try:
-            await container.embeddings.embed_text("health check")
-            embedding_ok = True
+            embedding = await container.embeddings.embed_text("health check")
+            embedding_dimension = len(embedding) if embedding else 0
+            embedding_expected_dimension = container.embeddings.get_dimension() if hasattr(container.embeddings, "get_dimension") else None
+            if inspect.isawaitable(embedding_expected_dimension):
+                embedding_expected_dimension = await embedding_expected_dimension
+            embedding_expected_dimension = embedding_expected_dimension if isinstance(embedding_expected_dimension, int) else None
+            if container.vector and hasattr(container.vector, "get_collection_vector_size"):
+                qdrant_embedding_dimension = container.vector.get_collection_vector_size("FactDataPoint_text")
+                if inspect.isawaitable(qdrant_embedding_dimension):
+                    qdrant_embedding_dimension = await qdrant_embedding_dimension
+                qdrant_embedding_dimension = qdrant_embedding_dimension if isinstance(qdrant_embedding_dimension, int) else None
+            embedding_ok = bool(embedding_dimension) and (
+                embedding_expected_dimension is None or embedding_dimension == embedding_expected_dimension
+            ) and (
+                qdrant_embedding_dimension is None or embedding_dimension == qdrant_embedding_dimension
+            )
         except Exception:
             pass
 
@@ -348,6 +366,10 @@ async def memory_status(request: Request):
         "backend": "elephantbroker",
         "provider": "neo4j+qdrant",
         "model": getattr(container.config, "cognee", None) and container.config.cognee.embedding_model or "unknown",
+        "embedding_expected_dimension": embedding_expected_dimension,
+        "embedding_actual_dimension": embedding_dimension,
+        "qdrant_collection": "FactDataPoint_text",
+        "qdrant_dimension": qdrant_embedding_dimension,
         "facts_count": facts_count,
         "neo4j_connected": neo4j_ok,
         "qdrant_connected": qdrant_ok,
