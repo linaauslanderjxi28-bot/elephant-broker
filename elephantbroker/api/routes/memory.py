@@ -215,6 +215,11 @@ async def search_memory(body: SearchRequest, request: Request):
                 ),
                 timeout=_MEMORY_SEARCH_TIMEOUT_SECONDS,
             )
+            if candidates and container.rerank:
+                candidates = await asyncio.wait_for(
+                    container.rerank.rerank(candidates, body.query),
+                    timeout=10.0,
+                )
         except PermissionError as e:
             return JSONResponse(status_code=403, content={"detail": str(e)})
         except (TimeoutError, RuntimeError, ConnectionError, OSError) as exc:

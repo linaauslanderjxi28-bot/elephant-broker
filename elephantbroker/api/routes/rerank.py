@@ -28,16 +28,30 @@ async def rerank(body: RerankRequest, request: Request):
 
     candidates = [
         RetrievalCandidate(
-            fact=FactAssertion(text=doc),
+            fact=FactAssertion(text=doc, provenance_refs=[f"input_index:{i}"]),
             source="api",
             score=1.0 / (i + 1),
         )
         for i, doc in enumerate(body.documents)
     ]
     reranked = await rerank_orch.rerank(candidates, body.query, top_n=body.top_n)
+    def _original_index(c) -> int | None:
+        for ref in c.fact.provenance_refs:
+            if ref.startswith("input_index:"):
+                try:
+                    return int(ref.split(":", 1)[1])
+                except ValueError:
+                    return None
+        return None
+
     return {
         "results": [
-            {"index": i, "text": c.fact.text, "score": c.score}
-            for i, c in enumerate(reranked)
+            {
+                "index": rank,
+                "original_index": _original_index(c),
+                "text": c.fact.text,
+                "score": c.score,
+            }
+            for rank, c in enumerate(reranked)
         ]
     }

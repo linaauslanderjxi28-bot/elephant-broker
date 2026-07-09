@@ -81,6 +81,7 @@ class TestWorkingSetRoutes:
         assert len(data["results"]) == 2
         for item in data["results"]:
             assert "index" in item
+            assert "original_index" in item
             assert "text" in item
             assert "score" in item
 

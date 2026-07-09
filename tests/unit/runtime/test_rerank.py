@@ -106,6 +106,29 @@ class TestCrossEncoder:
         assert "/v1/rerank" in call_args[0][0]
 
     @pytest.mark.asyncio
+    async def test_cross_encoder_updates_scores_and_order(self):
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = MagicMock(return_value={
+            "results": [
+                {"index": 1, "relevance_score": 2.0},
+                {"index": 0, "relevance_score": -1.0},
+            ]
+        })
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        config = RerankerConfig(enabled=True)
+        orch = RerankOrchestrator(TraceLedger(), reranker_config=config)
+        orch._http_client = mock_client
+
+        result = await orch.cross_encoder_rerank([_rc(text="low", score=0.99), _rc(text="high", score=0.01)], "query")
+
+        assert result[0].fact.text == "high"
+        assert abs(result[0].score - _sigmoid(2.0)) < 0.01
+        assert result[1].fact.text == "low"
+        assert abs(result[1].score - _sigmoid(-1.0)) < 0.01
+
+    @pytest.mark.asyncio
     async def test_normalizes_scores_via_sigmoid(self):
         # sigmoid(2.0) ≈ 0.88, sigmoid(-1.0) ≈ 0.27
         assert abs(_sigmoid(2.0) - 0.8808) < 0.01

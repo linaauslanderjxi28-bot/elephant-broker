@@ -197,10 +197,13 @@ class RerankOrchestrator(IRerankOrchestrator):
                 raw = r.get("relevance_score", 0.0)
                 score_map[idx] = _sigmoid(raw)
 
-            # Sort by normalized score
+            # Sort by normalized score and preserve that score for downstream
+            # observability/API consumers. The previous implementation sorted by
+            # cross-encoder score but returned the original retrieval scores,
+            # which made the reranker look inactive from the outside.
             scored = [(score_map.get(i, 0.0), c) for i, c in enumerate(truncated)]
             scored.sort(key=lambda x: x[0], reverse=True)
-            return [c for _, c in scored]
+            return [c.model_copy(update={"score": score}) for score, c in scored]
 
         except Exception as exc:
             if self._reranker_config.fallback_on_error:
@@ -299,7 +302,11 @@ class RerankOrchestrator(IRerankOrchestrator):
             },
         )
         response.raise_for_status()
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "endpoint": self._reranker_config.endpoint,
+            "model": self._reranker_config.model,
+        }
 
     async def close(self) -> None:
         """Close the httpx client."""
