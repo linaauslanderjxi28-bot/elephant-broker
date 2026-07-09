@@ -576,6 +576,7 @@ class RuntimeContainer:
                 approval_queue=approval_queue,
                 autonomy_classifier=autonomy_classifier,
                 session_goal_store=None,  # set after session_goal_store creation
+                custom_rule_store=None,  # RC-7: set after CustomRuleStore creation
             )
 
         c.procedure_audit = ProcedureAuditStore(

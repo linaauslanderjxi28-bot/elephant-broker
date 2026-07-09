@@ -60,6 +60,15 @@ class _SessionGuardState:
     active_procedure_ids: list[uuid.UUID] = field(default_factory=list)
     active_procedure_domains: list[str] = field(default_factory=list)
     active_procedure_bindings: list[str] = field(default_factory=list)
+    # RC-7 (gap-3-1): the non-custom rule inputs, retained so the registry can
+    # be cheaply rebuilt (base profile rules + fresh custom rules + procedure
+    # bindings) when custom rules are re-synced from CustomRuleStore.
+    policy_static_rules: list = field(default_factory=list)
+    custom_rules_synced_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # FIX-4: the CustomRuleStore version the session's registry was built from.
+    # ``None`` = unknown (store unwired or probe failed at load) — the next
+    # successful probe triggers a re-sync.
+    custom_rules_version: int | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     last_accessed_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -83,6 +92,7 @@ class RedLineGuardEngine(IRedLineGuardEngine):
         approval_queue=None,
         autonomy_classifier=None,
         session_goal_store=None,
+        custom_rule_store=None,
     ) -> None:
         self._trace = trace_ledger
         self._embed = embedding_service
@@ -98,6 +108,18 @@ class RedLineGuardEngine(IRedLineGuardEngine):
         self._approvals = approval_queue
         self._autonomy = autonomy_classifier
         self._goals = session_goal_store
+        # RC-7 (gap-3-1): CustomRuleStore is the SAME persistence the dashboard
+        # writes operator-defined guard rules to. The engine MUST consult it so
+        # a rule created in the UI is actually enforced. Wired post-init by the
+        # container (see container.py late-binding of _llm/_goals) because the
+        # store is created after the engine.
+        self._custom_rule_store = custom_rule_store
+        # FIX-4: engine-level cache of the store's rules version so N sessions
+        # hitting preflight within the same refresh interval share ONE probe.
+        # ``_rules_version_probed_at = None`` forces a re-probe on the next
+        # check (see invalidate_custom_rules_probe()).
+        self._rules_version: int | None = None
+        self._rules_version_probed_at: datetime | None = None
         self._sessions: dict[uuid.UUID, _SessionGuardState] = {}
         self._log = GatewayLoggerAdapter(logger, {"gateway_id": gateway_id})
 
@@ -120,6 +142,11 @@ class RedLineGuardEngine(IRedLineGuardEngine):
 
         t0 = time.monotonic()
         state.last_accessed_at = datetime.now(UTC)
+
+        # RC-7 (gap-3-1): re-sync operator-defined custom rules (bounded to once
+        # per refresh interval) so a rule created in the dashboard actually gates
+        # without requiring an explicit POST /guards/refresh.
+        await self._maybe_refresh_custom_rules(state)
 
         action = self._extract_check_input(session_id, messages)
 
@@ -354,13 +381,16 @@ class RedLineGuardEngine(IRedLineGuardEngine):
                 except Exception as exc:
                     self._log.warning("Failed to coerce static_rule dict to StaticRule: %s — %s", r, exc)
 
-        # GUARD-GAP-1: Skip builtin rules when config disables them
-        builtin_override = [] if not self._config.builtin_rules_enabled else None
-        rule_registry.load_rules(
-            policy_rules=policy_rules,
-            procedure_bindings=procedure_bindings if procedure_bindings else None,
-            builtin_rules=builtin_override,
-        )
+        # RC-7 (gap-3-1): load operator-defined custom rules from the same
+        # CustomRuleStore the dashboard writes to. They are merged as an
+        # additional policy source in _apply_rules() below so a rule created in
+        # the UI is actually enforced. Custom rules override builtins/profile
+        # rules that share an id (operator intent wins).
+        # FIX-4: probe the store version BEFORE reading the rules — if a write
+        # lands between the two reads, the stamped version is older than the
+        # rules we hold, so the next probe re-syncs (staleness-safe direction).
+        custom_rules_version = await self._probe_rules_version()
+        custom_rules = await self._load_custom_rules()
 
         # Build semantic index (merge redline_exemplars + procedure bindings)
         semantic_index = SemanticGuardIndex(self._embed)
@@ -383,7 +413,7 @@ class RedLineGuardEngine(IRedLineGuardEngine):
                     self._log.warning("Failed to coerce structural_validator dict to StructuralValidatorSpec: %s — %s", v, exc)
 
         # Store session state
-        self._sessions[session_id] = _SessionGuardState(
+        state = _SessionGuardState(
             session_id=session_id,
             session_key=session_key,
             agent_id=agent_id,
@@ -396,16 +426,197 @@ class RedLineGuardEngine(IRedLineGuardEngine):
             active_procedure_ids=list(active_procedure_ids or []),
             active_procedure_domains=procedure_domains,
             active_procedure_bindings=procedure_bindings,
+            policy_static_rules=policy_rules,
         )
+        # Build the registry (builtins + profile rules + custom rules + procedure
+        # bindings) and stamp the custom-rule sync time + applied store version.
+        # A failed store read (None) loads without custom rules but leaves the
+        # applied version unstamped so the next version probe re-syncs (FIX-4:
+        # read-failure must not masquerade as "no rules").
+        self._apply_rules(state, custom_rules or [])
+        state.custom_rules_synced_at = datetime.now(UTC)
+        state.custom_rules_version = (
+            custom_rules_version if custom_rules is not None else None
+        )
+        self._sessions[session_id] = state
 
         self._log.info(
-            "Loaded guard rules for session %s: %d rules, %d exemplars, %d validators, %d bindings",
+            "Loaded guard rules for session %s: %d rules (%d custom), %d exemplars, %d validators, %d bindings",
             session_id,
-            len(rule_registry._rules),
+            len(state.rule_registry._rules),
+            len(custom_rules or []),
             len(guard_policy.redline_exemplars),
             len(validators),
             len(procedure_bindings),
         )
+
+    async def _load_custom_rules(self) -> list | None:
+        """Load operator-defined custom rules for this gateway (RC-7 / gap-3-1).
+
+        Returns ``[]`` when no store is wired, and ``None`` when the read
+        FAILS. Callers must treat ``None`` as "state unknown" — keep whatever
+        rules are already in force and leave the applied version unstamped so
+        the next probe retries — never as "no rules": a transient store
+        failure must not silently disable operator rules (FIX-4).
+        """
+        if not self._custom_rule_store:
+            return []
+        try:
+            return await self._custom_rule_store.list_rules(gateway_id=self._gateway_id)
+        except Exception as exc:
+            self._log.warning("Failed to load custom guard rules: %s", exc)
+            return None
+
+    def _apply_rules(self, state: _SessionGuardState, custom_rules: list) -> None:
+        """(Re)build a session's static-rule registry from its base inputs plus
+        the supplied custom rules (RC-7 / gap-3-1).
+
+        Merge precedence (StaticRuleRegistry.load_rules dedups by id): builtin <
+        profile policy rules < custom rules. Operator-defined custom rules win on
+        id collision so a rule created in the UI overrides a builtin of the same
+        name.
+        """
+        from elephantbroker.runtime.guards.rules import StaticRuleRegistry
+
+        registry = StaticRuleRegistry()
+        # GUARD-GAP-1: honor builtin_rules_enabled=False.
+        builtin_override = [] if not self._config.builtin_rules_enabled else None
+        registry.load_rules(
+            policy_rules=list(state.policy_static_rules) + list(custom_rules),
+            procedure_bindings=list(state.active_procedure_bindings) or None,
+            builtin_rules=builtin_override,
+        )
+        state.rule_registry = registry
+
+    async def _probe_rules_version(self) -> int | None:
+        """Read the CustomRuleStore's monotonic rules version, at most once per
+        ``custom_rule_refresh_seconds`` across ALL sessions (FIX-4).
+
+        The probe is a single-row SQLite read, cached at engine level so N
+        sessions hitting preflight within the same interval share one probe.
+        Returns ``None`` when no store is wired; on probe failure the previous
+        cached version (possibly ``None``) is kept and the failure is not
+        retried until the interval elapses. The dashboard's rule-mutation
+        routes call :meth:`invalidate_custom_rules_probe` to bypass the cache
+        after a same-process write.
+        """
+        if not self._custom_rule_store:
+            return None
+        now = datetime.now(UTC)
+        if (
+            self._rules_version_probed_at is not None
+            and (now - self._rules_version_probed_at).total_seconds()
+            < self._config.custom_rule_refresh_seconds
+        ):
+            return self._rules_version
+        try:
+            self._rules_version = await self._custom_rule_store.get_rules_version()
+        except Exception as exc:
+            self._log.warning("Custom-rule version probe failed: %s", exc)
+        self._rules_version_probed_at = now
+        return self._rules_version
+
+    def invalidate_custom_rules_probe(self) -> None:
+        """Force the next preflight to re-probe the CustomRuleStore version
+        (FIX-4).
+
+        Called best-effort by the dashboard's rule create/update/delete routes
+        so a same-process rule change enforces on the very next guard check —
+        ``custom_rule_refresh_seconds`` then only governs cross-process
+        staleness.
+        """
+        self._rules_version_probed_at = None
+
+    async def _maybe_refresh_custom_rules(self, state: _SessionGuardState) -> None:
+        """Re-sync custom rules into a loaded session when the store actually
+        changed (RC-7 / gap-3-1, FIX-4).
+
+        The dashboard's rule-create flow in ANOTHER process does not trigger a
+        guard refresh, so a session loaded before a rule was created would
+        never enforce it. Rather than blindly re-reading all rules once per
+        interval, probe the store's version counter (single-row read, shared
+        across sessions via :meth:`_probe_rules_version`) and rebuild the
+        session's registry only when the version differs from the one it was
+        built from. Failure here is non-fatal: the previously-loaded rules stay
+        in force.
+        """
+        if not self._custom_rule_store:
+            return
+        version = await self._probe_rules_version()
+        if version is None or version == state.custom_rules_version:
+            return
+        custom_rules = await self._load_custom_rules()
+        if custom_rules is None:
+            # Store read failed: keep the previously-applied rules in force and
+            # leave the applied version unchanged so the next probe retries — a
+            # transient failure must never silently disable operator rules.
+            return
+        try:
+            self._apply_rules(state, custom_rules)
+            state.custom_rules_synced_at = datetime.now(UTC)
+            state.custom_rules_version = version
+        except Exception as exc:
+            self._log.warning("Custom-rule refresh failed for session %s: %s", state.session_id, exc)
+
+    async def resolve_approval(
+        self,
+        request_id: uuid.UUID,
+        decision: str,
+        *,
+        operator_actor_id: str | None,
+        reason: str = "",
+        message: str | None = None,
+        agent_id: str = "",
+    ) -> ApprovalRequest | None:
+        """Approve or reject a pending HITL approval, recording the *server-resolved*
+        operator identity in the audit record (gap-3-5).
+
+        ``operator_actor_id`` MUST be resolved server-side from the authenticated
+        request at the route boundary — never a browser-supplied header/body
+        value. It is threaded into ``ApprovalRequest.resolved_by`` so the audit
+        trail captures *who* resolved the request instead of ``null``.
+
+        Encapsulating resolution here (rather than the route reaching into
+        ``engine._approvals``/``_sessions``/``_goals`` directly) also fixes the
+        session_key lookup: the owning session is resolved from the approval's
+        own ``session_id`` instead of an arbitrary "first loaded session".
+
+        Returns the updated request, or ``None`` if no approval queue is wired or
+        the request is not found. Raises ``ValueError`` on an invalid decision.
+        """
+        if not self._approvals:
+            return None
+        # Resolve the owning session (for correct session_key on goal resolution)
+        # from the approval itself, not an arbitrary session in the map.
+        session_key = ""
+        try:
+            existing = await self._approvals.get(request_id, agent_id)
+        except Exception:
+            existing = None
+        if existing is not None:
+            owner = self._sessions.get(existing.session_id)
+            if owner is not None:
+                session_key = owner.session_key
+                if not agent_id:
+                    agent_id = owner.agent_id
+        resolver = operator_actor_id or None
+        if decision == "approved":
+            return await self._approvals.approve(
+                request_id, agent_id,
+                message=message,
+                approved_by=resolver,
+                session_goal_store=self._goals,
+                session_key=session_key,
+            )
+        if decision == "rejected":
+            return await self._approvals.reject(
+                request_id, agent_id,
+                reason=reason,
+                rejected_by=resolver,
+                session_goal_store=self._goals,
+                session_key=session_key,
+            )
+        raise ValueError(f"Invalid decision {decision!r} (expected 'approved' or 'rejected')")
 
     async def unload_session(self, session_id: uuid.UUID) -> None:
         state = self._sessions.pop(session_id, None)
