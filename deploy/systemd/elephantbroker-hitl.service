@@ -3,12 +3,15 @@
 # =============================================================================
 #
 # Installation:
-#   sudo cp deploy/systemd/elephantbroker-hitl.service /etc/systemd/system/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable elephantbroker-hitl
-#   sudo systemctl start elephantbroker-hitl
+#   This file is a TEMPLATE — deploy/install.sh substitutes the @@...@@ tokens
+#   in it at install time (deploy/update.sh re-applies them on update). The
+#   tokens are: PREFIX, CONFIG_DIR, DATA_DIR, CACHE_DIR, SERVICE_NAME,
+#   HITL_SERVICE_NAME, SERVICE_USER, SERVICE_GROUP. Do NOT `cp` this file to
+#   /etc/systemd/system/ directly — the raw tokens would fail to start. The HITL
+#   listen port is NOT templated here — it is read from CONFIG_DIR/hitl.env
+#   (HITL_PORT, default 8421).
 #
-# Verification:
+# Verification (default instance):
 #   systemctl status elephantbroker-hitl
 #   journalctl -u elephantbroker-hitl -f
 #   curl http://localhost:8421/health
@@ -54,29 +57,29 @@ Documentation=https://github.com/elephant-broker/elephant-broker
 # add PartOf= or BindsTo= directly to this unit file: both change the
 # restart semantics for every deployment and are operator-level policy
 # decisions, not packaging decisions.
-After=elephantbroker.service network-online.target
-Wants=network-online.target elephantbroker.service
+After=@@SERVICE_NAME@@.service network-online.target
+Wants=network-online.target @@SERVICE_NAME@@.service
 
 [Service]
 Type=simple
 
 # --- Identity (same user as the main runtime) ---
-User=elephantbroker
-Group=elephantbroker
+User=@@SERVICE_USER@@
+Group=@@SERVICE_GROUP@@
 
 # --- Filesystem ---
-WorkingDirectory=/var/lib/elephantbroker
-EnvironmentFile=/etc/elephantbroker/hitl.env
+WorkingDirectory=@@DATA_DIR@@
+EnvironmentFile=@@CONFIG_DIR@@/hitl.env
 # Console script entry point installed by `uv sync` from
 # hitl-middleware/pyproject.toml [project.scripts]. The previous form
 # (`python -m hitl_middleware`) worked but bypassed the entry point machinery
 # and made the unit harder to introspect (`systemctl cat` showed only `python`,
 # not the actual binary). Use the binary form for clarity and consistency
 # with the main runtime unit which uses /opt/elephantbroker/.venv/bin/elephantbroker.
-ExecStart=/opt/elephantbroker/.venv/bin/hitl-middleware
+ExecStart=@@PREFIX@@/.venv/bin/hitl-middleware
 
 # TODO-3-637: redirect .pyc writes away from the read-only site-packages tree (see C3).
-Environment=PYTHONPYCACHEPREFIX=/var/cache/elephantbroker
+Environment=PYTHONPYCACHEPREFIX=@@CACHE_DIR@@
 
 # --- Restart policy ---
 Restart=on-failure
@@ -103,7 +106,7 @@ LimitNOFILE=4096
 # --- Logging ---
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=elephantbroker-hitl
+SyslogIdentifier=@@HITL_SERVICE_NAME@@
 
 # --- Filesystem hardening ---
 # D1 (TODO-3-311 + TODO-3-605): /opt/elephantbroker dropped from
@@ -115,7 +118,7 @@ SyslogIdentifier=elephantbroker-hitl
 # compromised HITL process cannot rewrite the main runtime's binaries
 # or its own service definition.
 ProtectSystem=strict
-ReadWritePaths=/var/lib/elephantbroker /var/cache/elephantbroker
+ReadWritePaths=@@DATA_DIR@@ @@CACHE_DIR@@
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true

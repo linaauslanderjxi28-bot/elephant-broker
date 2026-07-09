@@ -80,14 +80,32 @@ SERVICE_GROUP="elephantbroker"
 # AFTER flag parsing so the auto-derive sees the flag-set SERVICE_NAME.
 SERVICE_NAME="${EB_SERVICE_NAME:-elephantbroker}"
 HITL_SERVICE_NAME="${EB_HITL_SERVICE_NAME:-}"  # sentinel; resolved post-parse
-CONFIG_DIR="/etc/elephantbroker"
-DATA_DIR="/var/lib/elephantbroker"
+# CONFIG_DIR / DATA_DIR / CACHE_DIR are resolved AFTER flag parsing so
+# --service-name drives them by convention (/etc/<name>, /var/lib/<name>,
+# /var/cache/<name>) unless explicitly overridden via --config-dir/--data-dir/
+# --cache-dir. Left as sentinels here. The default service name "elephantbroker"
+# reproduces the historical /etc/elephantbroker, /var/lib/elephantbroker,
+# /var/cache/elephantbroker layout exactly (backward compatible).
+CONFIG_DIR=""
+DATA_DIR=""
 # TODO-3-637: pycache prefix for the editable-source C3/H-R2 narrowing.
 # Python compiles .pyc files on import; the C3 chown narrowing made
 # site-packages read-only for the service user, so on-import compilation
 # fails with EACCES. PYTHONPYCACHEPREFIX redirects the writes to this dir
 # (mirrored in both systemd units via Environment=).
-CACHE_DIR="/var/cache/elephantbroker"
+CACHE_DIR=""
+# Runtime FastAPI listen port, baked into the systemd ExecStart --port. The
+# bind is a CLI flag only (never a YAML/env key — see default.yaml header),
+# so this is the single source of truth for where the runtime listens;
+# distinct --port values let multiple co-tenant runtimes coexist on one host.
+#
+# The HITL middleware port is intentionally NOT a flag here: it is env-driven
+# (HITL_PORT in hitl.env, default 8421) and correlated with the runtime's
+# hitl.default_url — and HITL is off by default. Wiring a --hitl-port would
+# mean stamping default_url too, so we leave HITL on the conventional 8421.
+# For concurrent HITL instances, set HITL_PORT (hitl.env) + hitl.default_url
+# by hand.
+PORT=8420
 
 # --- Parse flags ---
 while [[ $# -gt 0 ]]; do
@@ -97,6 +115,10 @@ while [[ $# -gt 0 ]]; do
         --allow-out-of-tree) ALLOW_OOT=1; shift ;;
         --service-name) SERVICE_NAME="$2"; shift 2 ;;
         --hitl-service-name) HITL_SERVICE_NAME="$2"; shift 2 ;;
+        --config-dir) CONFIG_DIR="$2"; shift 2 ;;
+        --data-dir) DATA_DIR="$2"; shift 2 ;;
+        --cache-dir) CACHE_DIR="$2"; shift 2 ;;
+        --port) PORT="$2"; shift 2 ;;
         --help|-h)
             cat <<'HELP'
 ElephantBroker DB-VM installer
@@ -104,6 +126,8 @@ ElephantBroker DB-VM installer
 Usage:
   sudo ./install.sh [--no-systemd] [--prefix PATH] [--allow-out-of-tree]
                     [--service-name NAME] [--hitl-service-name NAME]
+                    [--config-dir PATH] [--data-dir PATH] [--cache-dir PATH]
+                    [--port N]
 
 Flags:
   --no-systemd            Skip installing systemd unit files
@@ -119,7 +143,24 @@ Flags:
                           "<SERVICE_NAME>-hitl"; env: EB_HITL_SERVICE_NAME).
                           Use this to run multiple co-tenant runtimes on one
                           host without systemd unit-name collisions.
+  --config-dir PATH       Config dir holding env / default.yaml / hitl.env
+                          (default: /etc/<SERVICE_NAME>).
+  --data-dir PATH         Runtime state dir; becomes the unit WorkingDirectory
+                          (default: /var/lib/<SERVICE_NAME>).
+  --cache-dir PATH        PYTHONPYCACHEPREFIX target dir
+                          (default: /var/cache/<SERVICE_NAME>).
+  --port N                Runtime FastAPI listen port (default: 8420). The bind
+                          is CLI-only, so this is the sole source of truth. If
+                          you later enable dashboard auth or HITL on a non-default
+                          port, also set the matching URLs (EB_DASHBOARD_API_DOMAIN,
+                          hitl.default_url) — both features are off by default.
   --help, -h              Show this message
+
+Multi-instance note:
+  --service-name NAME derives CONFIG_DIR=/etc/NAME, DATA_DIR=/var/lib/NAME, and
+  CACHE_DIR=/var/cache/NAME by default, so a second instance is fully isolated
+  from the first. Give each concurrent instance its own --prefix, --service-name,
+  --port, and EB_GATEWAY_ID. Pass the SAME flags to deploy/update.sh later.
 
 Typical workflow:
   sudo git clone <repo-url> /opt/elephantbroker
@@ -159,8 +200,39 @@ log()  { printf "\033[1;34m==>\033[0m %s\n" "$*"; }
 warn() { printf "\033[1;33m!!\033[0m  %s\n" "$*" >&2; }
 die()  { printf "\033[1;31mXX\033[0m  %s\n" "$*" >&2; exit 1; }
 
+# Render a systemd unit template: substitute every @@TOKEN@@ with the resolved
+# per-instance value. Single mechanism behind --prefix + --service-name +
+# --config-dir + --port landing in the live units. `|` is the sed delimiter
+# because every value is a path or name that never contains it. Tokens absent
+# from a given template simply don't match (@@PORT@@ is runtime-only,
+# @@HITL_SERVICE_NAME@@ is HITL-only), so running the full set over both units
+# is harmless.
+render_unit() {  # $1 = template path, $2 = output path
+    sed \
+        -e "s|@@PREFIX@@|$PREFIX|g" \
+        -e "s|@@CONFIG_DIR@@|$CONFIG_DIR|g" \
+        -e "s|@@DATA_DIR@@|$DATA_DIR|g" \
+        -e "s|@@CACHE_DIR@@|$CACHE_DIR|g" \
+        -e "s|@@SERVICE_NAME@@|$SERVICE_NAME|g" \
+        -e "s|@@HITL_SERVICE_NAME@@|$HITL_SERVICE_NAME|g" \
+        -e "s|@@SERVICE_USER@@|$SERVICE_USER|g" \
+        -e "s|@@SERVICE_GROUP@@|$SERVICE_GROUP|g" \
+        -e "s|@@PORT@@|$PORT|g" \
+        "$1" > "$2"
+}
+
 # --- Pre-flight ---
 [[ $EUID -eq 0 ]] || die "must run as root (use sudo)"
+
+# Resolve the per-instance directories from SERVICE_NAME unless the operator
+# overrode them via --config-dir/--data-dir/--cache-dir. The default service
+# name "elephantbroker" yields the historical /etc/elephantbroker,
+# /var/lib/elephantbroker, /var/cache/elephantbroker paths, so existing
+# single-instance installs render byte-identical units.
+[[ -z "$CONFIG_DIR" ]] && CONFIG_DIR="/etc/${SERVICE_NAME}"
+[[ -z "$DATA_DIR" ]]   && DATA_DIR="/var/lib/${SERVICE_NAME}"
+[[ -z "$CACHE_DIR" ]]  && CACHE_DIR="/var/cache/${SERVICE_NAME}"
+[[ "$PORT" =~ ^[0-9]+$ ]] || die "--port must be numeric (got: '$PORT')"
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 log "Source repo:    $REPO_DIR"
@@ -621,31 +693,20 @@ log "Step 7/8: install systemd unit files"
 if [[ "$INSTALL_SYSTEMD" -eq 0 ]]; then
     log "  --no-systemd flag set — skipping"
 else
-    # Sed-transform the packaged unit templates so SERVICE_NAME / HITL_SERVICE_NAME
-    # land in the live SyslogIdentifier, After=, and Wants= directives. Patterns
-    # are line-anchored (^...) so comments mentioning the default names — e.g.
-    # the D5 comment block in elephantbroker-hitl.service that documents the
-    # `Wants=elephantbroker.service` directive — are NOT rewritten. The unit-file
-    # User=/Group= lines are intentionally left alone (controlled by SERVICE_USER
-    # / SERVICE_GROUP, separate concern).
-    sed \
-        -e "s|^SyslogIdentifier=elephantbroker$|SyslogIdentifier=$SERVICE_NAME|" \
-        "$REPO_DIR/deploy/systemd/elephantbroker.service" \
-        > "/etc/systemd/system/${SERVICE_NAME}.service"
+    # Render the tokenized unit templates with the resolved per-instance
+    # values (venv path, config/data/cache dirs, port, service names, user).
+    # render_unit substitutes every @@TOKEN@@ in one pass — this is what makes
+    # --prefix + --service-name + --config-dir + --port actually land in the
+    # live units. The previous version only rewrote SyslogIdentifier, so a
+    # custom --service-name produced a unit that still pointed at
+    # /opt/elephantbroker/.venv, /etc/elephantbroker, and port 8420.
+    render_unit "$REPO_DIR/deploy/systemd/elephantbroker.service" \
+                "/etc/systemd/system/${SERVICE_NAME}.service"
     chmod 644 "/etc/systemd/system/${SERVICE_NAME}.service"
     chown root:root "/etc/systemd/system/${SERVICE_NAME}.service"
 
-    # The HITL unit also rewrites its cross-reference to the runtime unit on
-    # the After= and Wants= directives. The Wants= line carries TWO values
-    # ("network-online.target elephantbroker.service") so we capture the
-    # leading content via \(.*\) and only rewrite the elephantbroker.service
-    # tail.
-    sed \
-        -e "s|^SyslogIdentifier=elephantbroker-hitl$|SyslogIdentifier=$HITL_SERVICE_NAME|" \
-        -e "s|^After=elephantbroker\.service|After=${SERVICE_NAME}.service|" \
-        -e "s|^Wants=\(.*\)elephantbroker\.service|Wants=\1${SERVICE_NAME}.service|" \
-        "$REPO_DIR/deploy/systemd/elephantbroker-hitl.service" \
-        > "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
+    render_unit "$REPO_DIR/deploy/systemd/elephantbroker-hitl.service" \
+                "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
     chmod 644 "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
     chown root:root "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
 
@@ -704,15 +765,15 @@ log "Install complete."
 cat <<EOF
 
 Next steps:
-  1. Fill in the required secrets in /etc/elephantbroker/env :
+  1. Fill in the required secrets in $CONFIG_DIR/env :
         EB_LLM_API_KEY=...
         EB_EMBEDDING_API_KEY=...
         EB_NEO4J_PASSWORD=...                   # REQUIRED — runtime refuses to boot if empty
 
      NOTE (TODO-3-624): EB_HITL_CALLBACK_SECRET is auto-generated by this
      installer (F11) on a fresh install — the same random 32-byte hex
-     value is written to BOTH /etc/elephantbroker/env and
-     /etc/elephantbroker/hitl.env, and the installer now verifies the
+     value is written to BOTH $CONFIG_DIR/env and
+     $CONFIG_DIR/hitl.env, and the installer now verifies the
      sed anchor actually matched before exiting. You do NOT need to run
      \`openssl rand -hex 32\` manually on fresh installs. If you re-run
      the installer on a host with existing env files, the auto-gen is
@@ -721,7 +782,7 @@ Next steps:
      value lands in BOTH files — a mismatch will fail every HITL
      callback with "signature mismatch".
 
-  2. Set gateway_id in /etc/elephantbroker/default.yaml to a deployment-
+  2. Set gateway_id in $CONFIG_DIR/default.yaml to a deployment-
      specific value (REQUIRED — the runtime refuses to boot with the empty
      sentinel default; two hosts that share the same gateway_id collide on
      Redis, ClickHouse, and Neo4j). For example:
@@ -729,7 +790,7 @@ Next steps:
           gateway_id: "gw-prod-eu1"     # any unique label per host
         # Override at runtime via EB_GATEWAY_ID if you prefer env-based config.
 
-  3. Review the rest of /etc/elephantbroker/default.yaml (org_id, team_id,
+  3. Review the rest of $CONFIG_DIR/default.yaml (org_id, team_id,
      reranker, etc.) — most operators only need to change those few fields.
 
   4. Make sure your infrastructure (Neo4j / Qdrant / Redis) is running. The
@@ -741,7 +802,7 @@ Next steps:
 
   6. Verify:
         systemctl status $SERVICE_NAME $HITL_SERVICE_NAME
-        curl http://localhost:8420/health/    # note trailing slash
+        curl http://localhost:$PORT/health/    # note trailing slash
         curl http://localhost:8421/health
         journalctl -u $SERVICE_NAME -f
 

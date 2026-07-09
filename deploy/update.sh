@@ -78,7 +78,15 @@ SERVICE_GROUP="elephantbroker"
 # (or set the same env vars) so the script targets the matching unit files.
 SERVICE_NAME="${EB_SERVICE_NAME:-elephantbroker}"
 HITL_SERVICE_NAME="${EB_HITL_SERVICE_NAME:-}"  # sentinel; resolved post-parse
-CONFIG_DIR="/etc/elephantbroker"
+# CONFIG_DIR / DATA_DIR / CACHE_DIR / PORT are resolved AFTER flag parsing so
+# they follow the same --service-name-derived convention as install.sh
+# (/etc/<name>, /var/lib/<name>, /var/cache/<name>). PORT is recovered from the
+# currently-installed unit when not passed, so an update preserves the port the
+# instance was installed with. Sentinels here.
+CONFIG_DIR=""
+DATA_DIR=""
+CACHE_DIR=""
+PORT=""
 UPGRADE_LOCK=0
 RESTART=1
 SKIP_PLUGINS=0
@@ -92,6 +100,10 @@ while [[ $# -gt 0 ]]; do
         --prefix) PREFIX="$2"; shift 2 ;;
         --service-name) SERVICE_NAME="$2"; shift 2 ;;
         --hitl-service-name) HITL_SERVICE_NAME="$2"; shift 2 ;;
+        --config-dir) CONFIG_DIR="$2"; shift 2 ;;
+        --data-dir) DATA_DIR="$2"; shift 2 ;;
+        --cache-dir) CACHE_DIR="$2"; shift 2 ;;
+        --port) PORT="$2"; shift 2 ;;
         --help|-h)
             cat <<'HELP'
 ElephantBroker DB-VM updater
@@ -99,6 +111,8 @@ ElephantBroker DB-VM updater
 Usage:
   sudo ./update.sh [--upgrade] [--no-restart] [--skip-plugins] [--prefix PATH]
                    [--service-name NAME] [--hitl-service-name NAME]
+                   [--config-dir PATH] [--data-dir PATH] [--cache-dir PATH]
+                   [--port N]
 
 Flags:
   --upgrade        Regenerate uv.lock before syncing. Use when a new dependency
@@ -116,6 +130,13 @@ Flags:
   --hitl-service-name NAME
                    Override the HITL systemd unit name. Default:
                    "<SERVICE_NAME>-hitl"; env: EB_HITL_SERVICE_NAME.
+  --config-dir PATH  Config dir (default: /etc/<SERVICE_NAME>). Must match the
+                   value used at install time.
+  --data-dir PATH  Runtime state dir (default: /var/lib/<SERVICE_NAME>).
+  --cache-dir PATH PYTHONPYCACHEPREFIX dir (default: /var/cache/<SERVICE_NAME>).
+  --port N         Runtime port baked into the re-rendered unit. Default: read
+                   from the currently-installed unit, else 8420 — so you do NOT
+                   normally need to pass this on update.
   --help, -h       Show this message
 
 Default behavior (no --upgrade):
@@ -154,10 +175,40 @@ done
 # makes `--service-name foo` automatically target a "foo-hitl" HITL unit.
 [[ -z "$HITL_SERVICE_NAME" ]] && HITL_SERVICE_NAME="${SERVICE_NAME}-hitl"
 
+# Resolve per-instance dirs from SERVICE_NAME unless overridden — mirrors
+# install.sh so update targets the same paths a custom install created. The
+# default service name reproduces the historical /etc/elephantbroker paths.
+[[ -z "$CONFIG_DIR" ]] && CONFIG_DIR="/etc/${SERVICE_NAME}"
+[[ -z "$DATA_DIR" ]]   && DATA_DIR="/var/lib/${SERVICE_NAME}"
+[[ -z "$CACHE_DIR" ]]  && CACHE_DIR="/var/cache/${SERVICE_NAME}"
+# Recover the runtime port from the currently-installed unit so re-rendering
+# preserves it without the operator re-passing --port; fall back to 8420.
+if [[ -z "$PORT" ]]; then
+    PORT=$(grep -oE -- '--port[[:space:]]+[0-9]+' "/etc/systemd/system/${SERVICE_NAME}.service" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+    [[ -z "$PORT" ]] && PORT=8420
+fi
+
 # --- Helpers ---
 log()  { printf "\033[1;34m==>\033[0m %s\n" "$*"; }
 warn() { printf "\033[1;33m!!\033[0m  %s\n" "$*" >&2; }
 die()  { printf "\033[1;31mXX\033[0m  %s\n" "$*" >&2; exit 1; }
+
+# Render a systemd unit template: substitute every @@TOKEN@@ with this
+# instance's resolved value. Identical substitution set to install.sh's
+# render_unit — keep the two in sync.
+render_unit() {  # $1 = template path, $2 = output path
+    sed \
+        -e "s|@@PREFIX@@|$PREFIX|g" \
+        -e "s|@@CONFIG_DIR@@|$CONFIG_DIR|g" \
+        -e "s|@@DATA_DIR@@|$DATA_DIR|g" \
+        -e "s|@@CACHE_DIR@@|$CACHE_DIR|g" \
+        -e "s|@@SERVICE_NAME@@|$SERVICE_NAME|g" \
+        -e "s|@@HITL_SERVICE_NAME@@|$HITL_SERVICE_NAME|g" \
+        -e "s|@@SERVICE_USER@@|$SERVICE_USER|g" \
+        -e "s|@@SERVICE_GROUP@@|$SERVICE_GROUP|g" \
+        -e "s|@@PORT@@|$PORT|g" \
+        "$1" > "$2"
+}
 
 # --- Pre-flight ---
 [[ $EUID -eq 0 ]] || die "must run as root (use sudo)"
@@ -526,16 +577,15 @@ log "Step 7/8: re-install systemd unit files"
 # unit back in behind their backs; mirroring the "is the unit registered"
 # guard in step 7 keeps the two paths symmetric.
 SYSTEMD_TOUCHED=0
-# Sed-transform mirrors install.sh Step 7: line-anchored patterns rewrite the
-# live SyslogIdentifier / After= / Wants= directives ONLY (comments referencing
-# the default names are left untouched). User=/Group= remain controlled by
-# SERVICE_USER / SERVICE_GROUP — separate concern, not rewritten here.
+# render_unit mirrors install.sh Step 7: substitute every @@TOKEN@@ in the
+# pulled unit templates with this instance's resolved values (prefix, config/
+# data/cache dirs, port, service names, user). This preserves the instance's
+# custom paths/port across updates while still picking up hardening changes
+# from the repo. PORT was recovered from the installed unit at resolve time.
 if systemctl list-unit-files "${SERVICE_NAME}.service" &>/dev/null; then
     if [[ -f "$PREFIX/deploy/systemd/elephantbroker.service" ]]; then
-        sed \
-            -e "s|^SyslogIdentifier=elephantbroker$|SyslogIdentifier=$SERVICE_NAME|" \
-            "$PREFIX/deploy/systemd/elephantbroker.service" \
-            > "/etc/systemd/system/${SERVICE_NAME}.service"
+        render_unit "$PREFIX/deploy/systemd/elephantbroker.service" \
+                    "/etc/systemd/system/${SERVICE_NAME}.service"
         chmod 644 "/etc/systemd/system/${SERVICE_NAME}.service"
         chown root:root "/etc/systemd/system/${SERVICE_NAME}.service"
         log "  re-installed /etc/systemd/system/${SERVICE_NAME}.service"
@@ -548,12 +598,8 @@ else
 fi
 if systemctl list-unit-files "${HITL_SERVICE_NAME}.service" &>/dev/null; then
     if [[ -f "$PREFIX/deploy/systemd/elephantbroker-hitl.service" ]]; then
-        sed \
-            -e "s|^SyslogIdentifier=elephantbroker-hitl$|SyslogIdentifier=$HITL_SERVICE_NAME|" \
-            -e "s|^After=elephantbroker\.service|After=${SERVICE_NAME}.service|" \
-            -e "s|^Wants=\(.*\)elephantbroker\.service|Wants=\1${SERVICE_NAME}.service|" \
-            "$PREFIX/deploy/systemd/elephantbroker-hitl.service" \
-            > "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
+        render_unit "$PREFIX/deploy/systemd/elephantbroker-hitl.service" \
+                    "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
         chmod 644 "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
         chown root:root "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
         log "  re-installed /etc/systemd/system/${HITL_SERVICE_NAME}.service"
@@ -596,7 +642,7 @@ cat <<EOF
 
 Verify:
   systemctl status $SERVICE_NAME $HITL_SERVICE_NAME
-  curl http://localhost:8420/health/    # note trailing slash
+  curl http://localhost:$PORT/health/    # note trailing slash
   curl http://localhost:8421/health
   journalctl -u $SERVICE_NAME -n 50
 
