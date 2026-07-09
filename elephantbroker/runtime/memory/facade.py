@@ -23,6 +23,7 @@ from elephantbroker.runtime.interfaces.memory_store import IMemoryStoreFacade
 from elephantbroker.runtime.interfaces.scrub_buffer import IScrubBuffer
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
 from elephantbroker.runtime.memory.cascade_helper import CascadeStatus, cascade_cognee_data
+from elephantbroker.runtime.trade_relations import apply_trade_relation_plan
 from elephantbroker.runtime.metrics import (
     inc_cognee_capture_failure,
     inc_dedup,
@@ -178,6 +179,22 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 cognee_data_id=str(cognee_data_id) if cognee_data_id else None,
             )
             await add_data_points([dp])
+
+            # KG-4: deterministic trade ontology relations.  This converts
+            # structured Product/Supplier/MarketSignal facts into explicit
+            # commerce nodes/edges (Product→HSCode, Supplier→Product, etc.)
+            # without relying on probabilistic LLM extraction. Best-effort so
+            # generic memory storage remains available even if a malformed
+            # trade payload cannot be linked.
+            try:
+                trade_counts = await apply_trade_relation_plan(self._graph, fact)
+                if trade_counts.get("nodes") or trade_counts.get("edges"):
+                    logger.info(
+                        "Trade relations applied for fact %s: nodes=%s edges=%s",
+                        fact.id, trade_counts.get("nodes", 0), trade_counts.get("edges", 0),
+                    )
+            except Exception as exc:
+                logger.warning("Trade relation builder failed for fact %s: %s", fact.id, exc)
 
             # Graph edges (best-effort). Batch gateway pre-check (M6) reduces
             # N+1 Cypher round-trips to 1 for the common case.
