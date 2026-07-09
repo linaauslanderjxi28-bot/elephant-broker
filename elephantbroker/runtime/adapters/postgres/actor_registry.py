@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from typing import TypeAlias
 
 import asyncpg
+from cognee.tasks.storage import add_data_points
 
 from elephantbroker.runtime.adapters.cognee.datapoints import ActorDataPoint
 from elephantbroker.runtime.interfaces.actor_registry import IActorRegistry
@@ -143,6 +144,16 @@ class PostgresActorRegistry(IActorRegistry):
                        ON CONFLICT DO NOTHING""",
                     actor.id, team_id,
                 )
+
+        # KG-3: PG is the authority source for actors in production, but
+        # memory graph edges (e.g. FactDataPoint-[:CREATED_BY]->ActorDataPoint)
+        # still require an ActorDataPoint node in Neo4j.  Dual-write the
+        # lightweight graph node after the PG transaction so edge creation can
+        # MATCH by eb_id.  Failures are re-raised: a successful actor
+        # registration that cannot participate in the KG would make downstream
+        # edge smoke tests fail silently.
+        dp = ActorDataPoint.from_schema(actor)
+        await add_data_points([dp])
         return actor
 
     async def resolve_actor(self, actor_id: uuid.UUID) -> ActorRef | None:
