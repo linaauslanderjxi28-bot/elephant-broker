@@ -206,6 +206,39 @@ class TestCompleteJson:
             payload = mock_post.call_args.kwargs["json"]
             assert payload["temperature"] == 0.0
 
+    async def test_schema_400_retries_without_response_format(self, client):
+        """KG-1: OpenAI-compatible gateways may reject json_schema response_format.
+
+        A 400 on the structured-output request should retry once without
+        response_format, preserving strict JSON parsing on the fallback body.
+        """
+        schema = {"type": "object", "properties": {"facts": {"type": "array"}}}
+        responses = [
+            httpx.Response(
+                400, json={"error": "response_format unsupported"},
+                request=httpx.Request("POST", "http://test"),
+            ),
+            _make_response('{"facts": []}'),
+        ]
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.side_effect = responses
+            result = await client.complete_json("sys", "usr", json_schema=schema)
+        assert result == {"facts": []}
+        assert mock_post.call_count == 2
+        first_payload = mock_post.call_args_list[0].kwargs["json"]
+        second_payload = mock_post.call_args_list[1].kwargs["json"]
+        assert "response_format" in first_payload
+        assert "response_format" not in second_payload
+
+    async def test_non_schema_400_still_raises(self, client):
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = httpx.Response(
+                400, json={"error": "bad request"}, request=httpx.Request("POST", "http://test"),
+            )
+            with pytest.raises(httpx.HTTPStatusError):
+                await client.complete_json("sys", "usr")
+        assert mock_post.call_count == 1
+
 
 class TestLLMClientMetrics:
     """Gap #4: inc_llm_call must fire on complete/complete_json success + error paths."""

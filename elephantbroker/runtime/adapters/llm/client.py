@@ -164,7 +164,30 @@ class LLMClient:
         # the `status` label cleanly separates HTTP ("error") from
         # response-format ("json_parse_error") failures.
         try:
-            response = await self._post_with_retry(f"{self._endpoint}/chat/completions", payload)
+            try:
+                response = await self._post_with_retry(f"{self._endpoint}/chat/completions", payload)
+            except httpx.HTTPStatusError as exc:
+                # KG-1: Some OpenAI-compatible gateways reject OpenAI structured
+                # output (`response_format: {type: json_schema, ...}`) with HTTP
+                # 400 even though the same chat endpoint works without it.  For
+                # extraction, degrade to prompt-enforced JSON instead of failing
+                # the whole graph/fact extraction path.  The strict JSON parse
+                # below remains unchanged, so malformed fallback output is still
+                # surfaced as a parse failure.
+                if (
+                    json_schema is not None
+                    and exc.response is not None
+                    and exc.response.status_code == 400
+                    and "response_format" in payload
+                ):
+                    logger.warning(
+                        "LLM complete_json structured response_format rejected with 400; retrying without response_format"
+                    )
+                    fallback_payload = dict(payload)
+                    fallback_payload.pop("response_format", None)
+                    response = await self._post_with_retry(f"{self._endpoint}/chat/completions", fallback_payload)
+                else:
+                    raise
 
             data = response.json()
             content = data["choices"][0]["message"]["content"]
