@@ -80,7 +80,13 @@ services:
   # Prod: set SUPERTOKENS_POSTGRES_URI to the postgres service below and enable
   # the 'auth-prod' profile so durable state is persisted.
   supertokens:
-    image: registry.supertokens.io/supertokens/supertokens-postgresql:9.2
+    # Pinned to 11.4.5: the venv's supertokens-python 0.30.0 SDK negotiates
+    # exactly CDI 5.3 (SUPPORTED_CDI_VERSIONS = ["5.3"]). Core 9.2 tops out at
+    # CDI 5.1, so signup/session calls fail with "running SuperTokens core
+    # version is not compatible" → HTTP 500. Core 10.0+ advertises 5.3; 11.4.5
+    # is the current release paired with SDK 0.30.x. Bump this in lockstep with
+    # the SDK pin.
+    image: registry.supertokens.io/supertokens/supertokens-postgresql:11.4.5
     ports:
       - "13567:3567"
     environment:
