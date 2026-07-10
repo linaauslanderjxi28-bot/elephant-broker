@@ -372,6 +372,8 @@ multi-tenant:
 - **Single-tenant (only one `EB_GATEWAY_ID` on this host):** `docker compose -f infrastructure/docker-compose.yml down -v` wipes all infra volumes and is safe. Retry bootstrap.
 - **Multi-tenant (multiple gateways sharing this infra stack):** `down -v` destroys every tenant's state. Instead, use the narrow per-gateway cleanup (next subsection).
 
+> **After any `down -v`, `systemctl restart` the runtime service before retrying bootstrap.** The long-lived runtime holds a Neo4j connection to the now-destroyed container and caches its bootstrap-mode check, so until it reconnects it still reports "not bootstrap" — and every unauthenticated `/admin` call (bootstrap included) then 401s with `{"error":"Authentication required"}` even though the graph is empty.
+
 ### 5a. Multi-tenant safety: narrow per-gateway cleanup
 
 When multiple gateways share a single DB VM (multiple `EB_GATEWAY_ID`
