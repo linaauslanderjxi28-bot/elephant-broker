@@ -476,14 +476,6 @@ curl -s -X PUT http://localhost:8420/admin/actors/<dashboard-actor-id> \
   -d '{"authority_level": 90}'
 ```
 
-> **`{"error":"Token expired"}` when opening `/ui/` or `/auth/identity`?** The
-> SuperTokens access token is short-lived (~1h) and only the dashboard SPA's
-> `fetch` interceptor auto-refreshes it — a **direct browser navigation** to
-> `/auth/identity` (or a stale tab) has no interceptor and returns this 401 once
-> the token lapses. It is not a server error. Fix: open `<website_domain>/ui/`
-> and **sign in again** (a fresh sign-in mints a new session). Do not curl
-> `/auth/identity` to read your actor id — use `ebrun actor list` instead.
-
 ### 8. Optional: enable Neo4j fact indexes
 
 Five `FactDataPoint` property indexes (`eb_fact_gateway_id`, `eb_fact_created_at`,
