@@ -49,6 +49,24 @@ class AuthMiddleware(BaseHTTPMiddleware):
     AUTH_REQUIRED: tuple[str, ...] = ("/admin", "/dashboard")
     # Route prefixes that accept any auth method (including gateway identity).
     FLEXIBLE: tuple[str, ...] = ("/trace",)
+    # Static/navigable prefixes reached by TOP-LEVEL browser navigation rather
+    # than the SuperTokens-patched ``fetch`` — there is no interceptor on these
+    # requests to catch a 401 and trigger a session refresh. Hard-401'ing them on
+    # ``TryRefreshTokenError`` returns raw JSON to the browser and the dashboard
+    # SPA never boots, so its own recovery logic (auto-refresh, redirect-to-login,
+    # signOut) can never run. These paths must therefore load anonymously on an
+    # expired token so the SPA can mount and refresh itself. ``/auth/*`` is
+    # DELIBERATELY excluded: it is a custom fetch-driven route whose 401 the
+    # client is expected to catch and refresh — serving it anonymously would
+    # poison the frontend identity cache.
+    STATIC_NAVIGABLE: tuple[str, ...] = (
+        "/ui",
+        "/health",
+        "/metrics",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+    )
 
     def __init__(self, app, config=None) -> None:  # type: ignore[override]
         super().__init__(app)
@@ -75,6 +93,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         except Exception:
             TryRefreshTokenError = None  # type: ignore[assignment]
 
+        # Compute path up-front so it is available in the except handler below.
+        path = request.url.path
+
         identity: AuthIdentity
         try:
             if container is not None:
@@ -87,18 +108,28 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if TryRefreshTokenError is not None and isinstance(
                 exc, TryRefreshTokenError
             ):
-                return JSONResponse(
-                    status_code=401, content={"error": "Token expired"}
-                )
-            logger.warning("identity resolution error: %s", exc)
-            identity = AuthIdentity()
+                # Static/navigable paths (see STATIC_NAVIGABLE) are fetched by a
+                # top-level browser navigation with no fetch interceptor to catch
+                # a 401 and refresh — so hard-401'ing them stops the SPA from ever
+                # loading and running its own recovery. Serve them anonymously on
+                # an expired token so the SPA can boot and refresh itself. All
+                # other paths (notably custom fetch-driven /auth/* routes) keep
+                # returning 401 so the client refreshes its session.
+                if any(path.startswith(p) for p in self.STATIC_NAVIGABLE):
+                    identity = AuthIdentity()
+                else:
+                    return JSONResponse(
+                        status_code=401, content={"error": "Token expired"}
+                    )
+            else:
+                logger.warning("identity resolution error: %s", exc)
+                identity = AuthIdentity()
 
         request.state.identity = identity
         request.state.auth_identity = identity
 
         # Route-class enforcement only when dashboard auth is enabled.
         if self._auth_enabled(container):
-            path = request.url.path
             if not any(path.startswith(p) for p in self.UNPROTECTED):
                 if any(path.startswith(p) for p in self.AUTH_REQUIRED):
                     if not identity.is_authenticated and not identity.is_bootstrap:
