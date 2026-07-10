@@ -333,12 +333,22 @@ sudo -u elephantbroker /opt/elephantbroker/.venv/bin/ebrun \
   --org-name "YourOrg" \
   --team-name "YourTeam" \
   --admin-name "admin" \
-  --admin-handles "email:you@example.com"
+  --admin-email "you@example.com"
 ```
 
 (This is the one place we use `sudo -u elephantbroker` — `ebrun` is the
 admin CLI and should run as the service user so any local state it creates
 inherits the right ownership.)
+
+**`--admin-email` is what wires the admin actor to the dashboard login.** It
+adds a normalized `email:you@example.com` handle to the admin actor; when you
+later sign up on the dashboard with that same email (while
+`dashboard_auth.bootstrap_complete` is still `false`), the runtime auto-links
+that login to this authority-90 admin actor instead of creating a fresh
+"pending" (authority-0) account. See **§ 7a. Claim the dashboard admin account**
+below for the exact ordering — it matters. (`--admin-email` is a convenience
+wrapper over `--admin-handles`; the raw `--admin-handles "email:you@example.com"`
+form still works and is equivalent.)
 
 Bootstrap is one-shot — only works on an empty graph *for the given
 gateway_id*. Recovery depends on whether your DB VM is single-tenant or
@@ -412,6 +422,67 @@ curl http://localhost:8420/health/    # note trailing slash
 curl http://localhost:8421/health
 journalctl -u elephantbroker -f       # follow runtime logs
 ```
+
+### 7a. Claim the dashboard admin account (when `dashboard_auth.enabled`)
+
+If you enabled the dashboard (`dashboard_auth.enabled: true`), the admin actor
+created by `bootstrap` is an EB actor — it is **not** yet a dashboard login
+(SuperTokens email/password). You claim it by signing up on the dashboard with
+the **same email** you passed to `--admin-email`. While
+`dashboard_auth.bootstrap_complete` is `false`, that first login auto-links to
+your authority-90 admin actor; flip the flag afterwards to close the window.
+
+**The ordering is load-bearing — do these in this exact sequence:**
+
+1. **Bootstrap with `--admin-email you@example.com`** (§ 5) so the admin actor
+   carries an `email:you@example.com` handle.
+2. Leave `dashboard_auth.bootstrap_complete: false` in
+   `/etc/elephantbroker/default.yaml` (the default) and start the runtime (§ 6).
+3. **Sign up on the dashboard** at `<website_domain>/ui/` (e.g.
+   `http://10.0.0.10:8420/ui/`) with `you@example.com` and a password. The
+   runtime matches that email to the pre-provisioned admin actor and binds your
+   login to it — you land in the dashboard as admin (authority 90), no manual
+   elevation.
+4. **Verify** you have admin access, then set
+   `dashboard_auth.bootstrap_complete: true` and
+   `sudo systemctl restart elephantbroker`.
+
+> **Do step 4 only after step 3 succeeds.** Flipping `bootstrap_complete: true`
+> *before* the admin has signed up permanently disables email-linking — a later
+> signup then lands at authority 0 and must be elevated by hand (see below).
+
+**Security note (single-tenant / controlled-network only):** SuperTokens
+email/password signup does **not** verify email ownership, so during the open
+window anyone who can reach `/auth/signup` and registers the admin's email
+*before you do* would inherit admin authority. The runtime bounds this — linking
+is gated on `bootstrap_complete: false`, only binds to an **unclaimed** actor,
+and is gateway-scoped — but the residual pre-emptive-signup risk is real. Keep
+the runtime off untrusted networks during bootstrap and **flip
+`bootstrap_complete: true` immediately after claiming.** For a hard guarantee,
+put the dashboard behind your own SSO/VPN.
+
+**Manual elevation (fallback).** If linking didn't fire (flag already flipped,
+email mismatch, or a pre-existing authority-0 signup), elevate the dashboard
+actor by hand using the admin actor as the caller:
+
+```bash
+# Find the dashboard actor's id (authority 0, handle dashboard:*)
+EB_ACTOR_ID=<admin-actor-id> ebrun --runtime-url http://localhost:8420 actor list
+
+# Elevate it (register_actor requires min authority 70; the admin actor is 90)
+curl -s -X PUT http://localhost:8420/admin/actors/<dashboard-actor-id> \
+  -H "Content-Type: application/json" \
+  -H "X-EB-Actor-Id: <admin-actor-id>" \
+  -d '{"authority_level": 90}'
+```
+
+> **`{"error":"Token expired"}` when opening `/ui/` or `/auth/identity`?** The
+> SuperTokens access token is short-lived (~1h) and only the dashboard SPA's
+> `fetch` interceptor auto-refreshes it — a **direct browser navigation** to
+> `/auth/identity` (or a stale tab) has no interceptor and returns this 401 once
+> the token lapses. It is not a server error. Fix: open `<website_domain>/ui/`
+> and **sign in again** (a fresh sign-in mints a new session). Do not curl
+> `/auth/identity` to read your actor id — use `ebrun actor list` instead.
 
 ### 8. Optional: enable Neo4j fact indexes
 
@@ -733,3 +804,4 @@ runs. The script is the contract.
 9. **`uv sync --frozen` errors on lockfile drift** — If `pyproject.toml` has been modified since the last `uv lock`, `update.sh` will refuse to install. Run `update.sh --upgrade` to regenerate the lockfile, OR commit a fresh `uv lock` from a dev machine first. See `deploy/UPDATING-DEPS.md` for the full upgrade workflow.
 10. **Qdrant version pairing** — Qdrant server is pinned to v1.17.0 in both `docker-compose.yml` and `docker-compose.test.yml` — must stay aligned with `qdrant-client` version in `pyproject.toml`. If upgrading the client, update both compose files to match.
 11. **Service user ownership (C3 narrowed model)** — `/opt/elephantbroker` stays `root:root 755` (service user can read + traverse but not write). Only the 3 Cognee runtime paths inside the venv are chowned to `elephantbroker:elephantbroker`. `/etc/elephantbroker` is `elephantbroker:elephantbroker 750` with `root:elephantbroker 640` for the env files specifically. `/var/lib/elephantbroker` and `/var/cache/elephantbroker` are `elephantbroker:elephantbroker 750`. If you copy files in manually under these paths, follow the C3 model: `/opt/elephantbroker` manual copies stay `root:root`, `/etc/elephantbroker`/`/var/lib/elephantbroker`/`/var/cache/elephantbroker` manual copies get `chown elephantbroker:elephantbroker`, and env files get `chown root:elephantbroker`. Re-running `deploy/install.sh` is the safest way to restore correct ownership.
+12. **SuperTokens core ↔ SDK version pairing (dashboard signup 500)** — the pinned `supertokens-python` SDK negotiates a single CDI version with the SuperTokens **core** container; if the core is too old to advertise it, every `/auth/signup` (and session call) fails with HTTP 500 and `"The running SuperTokens core version is not compatible with this python SDK"` in the journal. The core image in `infrastructure/docker-compose.yml` (`registry.supertokens.io/supertokens/supertokens-postgresql:<tag>`) must be new enough for the SDK: the current SDK requires CDI **5.3** (core **10.0+**, pinned to `11.4.5`). If you bump the SDK, bump the core tag in lockstep and confirm with `curl -s http://<core-host>:3567/apiversion` that the advertised `versions` list includes the SDK's CDI. The SuperTokens Postgres DB auto-migrates on core startup; with no dashboard users yet, a stuck migration can be reset by dropping and recreating the (SuperTokens-only) `supertokens` database.

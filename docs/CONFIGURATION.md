@@ -3750,8 +3750,9 @@ ebrun bootstrap [OPTIONS]
 | `--team-name` | Yes | -- | Team name |
 | `--team-label` | No | first 20 chars of team-name | Short display label |
 | `--admin-name` | Yes | -- | Admin actor display name |
+| `--admin-email` | No | (none) | Admin email. Auto-adds a normalized `email:<addr>` handle so the dashboard signup with this email auto-claims admin while `dashboard_auth.bootstrap_complete` is `false`. Preferred over raw `--admin-handles`. |
 | `--admin-authority` | No | `90` | Admin authority level (0-100) |
-| `--admin-handles` | No | (none) | Admin handles, repeatable (e.g. `email:admin@acme.com`) |
+| `--admin-handles` | No | (none) | Extra admin handles, repeatable (e.g. `telegram:alex`). An `email:<addr>` handle is added automatically from `--admin-email`. |
 
 **Example:**
 
@@ -3761,10 +3762,12 @@ ebrun bootstrap \
   --team-name "Backend" \
   --admin-name "Admin" \
   --admin-authority 90 \
-  --admin-handles "email:admin@acme.com"
+  --admin-email "admin@acme.com"
 ```
 
-This creates the org, team, and admin actor sequentially via the admin API, then saves the resulting `actor_id` and `runtime_url` to `~/.elephantbroker/config.json`.
+This creates the org, team, and admin actor sequentially via the admin API, then saves the resulting `actor_id` and `runtime_url` to `~/.elephantbroker/config.json`. It also prints the "Next steps" to claim the matching dashboard admin login.
+
+**Dashboard admin claim (email-linking).** When `dashboard_auth.enabled: true`, the admin actor is not yet a dashboard login. Signing up on the dashboard with the `--admin-email` address — **while `dashboard_auth.bootstrap_complete` is still `false`** — auto-links that first login to the pre-provisioned admin actor (inheriting authority 90) instead of creating a fresh authority-0 account. Flip `bootstrap_complete: true` only *after* the admin has signed up; flipping it earlier permanently disables email-linking and a later signup lands at authority 0 (needs manual elevation). See [DEPLOYMENT.md § 7a](./DEPLOYMENT.md) for the full sequence and the pre-emptive-signup security note.
 
 #### `ebrun org` -- Organization Management
 

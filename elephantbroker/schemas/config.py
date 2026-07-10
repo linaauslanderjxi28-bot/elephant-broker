@@ -337,8 +337,14 @@ class DashboardAuthConfig(_StrictBase):
     ``core_uri`` / ``api_domain`` / ``website_domain`` and the two cookie fields
     are consumed by ``api/auth/supertokens_config.py::init_supertokens``.
     ``static_dir`` is the built dashboard bundle served same-origin at ``/ui``
-    in production (empty = not served). ``bootstrap_complete`` gates the
-    first-admin self-bootstrap path (see ``api/routes/auth.py``).
+    in production (empty = not served). ``bootstrap_complete`` gates two
+    first-admin conveniences while it is ``False``: the anonymous API-key
+    self-bootstrap path (see ``api/routes/auth.py::_bootstrap_allowed``) and
+    dashboard email-linking — a first dashboard login whose email matches a
+    pre-provisioned actor's ``email:`` handle (e.g. the admin created by
+    ``ebrun bootstrap``) binds to that actor instead of a fresh authority-0 one
+    (see ``api/auth/identity.py::_email_link_enabled``). Flip to ``True`` right
+    after the admin claims their dashboard account to close both paths.
     """
     enabled: bool = False
     core_uri: str = "http://localhost:3567"

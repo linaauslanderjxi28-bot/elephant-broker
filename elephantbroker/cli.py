@@ -226,11 +226,16 @@ def config_show() -> None:
 @click.option("--team-name", required=True, help="Team name")
 @click.option("--team-label", default="", help="Short display label")
 @click.option("--admin-name", required=True, help="Admin actor display name")
+@click.option("--admin-email", default="", help="Admin email. Auto-adds an 'email:<addr>' handle "
+              "so the dashboard signup with this email auto-claims admin while "
+              "dashboard_auth.bootstrap_complete is false (recommended over raw --admin-handles).")
 @click.option("--admin-authority", default=90, type=int, help="Admin authority level")
-@click.option("--admin-handles", multiple=True, help="Admin handles (e.g. email:admin@acme.com)")
+@click.option("--admin-handles", multiple=True, help="Extra admin handles (e.g. telegram:alex). "
+              "An 'email:<addr>' handle is added automatically from --admin-email.")
 @click.pass_context
 def bootstrap(ctx: click.Context, org_name: str, org_label: str, team_name: str,
-              team_label: str, admin_name: str, admin_authority: int, admin_handles: tuple) -> None:
+              team_label: str, admin_name: str, admin_email: str, admin_authority: int,
+              admin_handles: tuple) -> None:
     """Bootstrap: create first org, team, and admin actor (requires empty graph)."""
     url = ctx.obj["runtime_url"]
 
@@ -254,6 +259,21 @@ def bootstrap(ctx: click.Context, org_name: str, org_label: str, team_name: str,
     team_id = team["team_id"]
     click.echo(f"Team created: team_id={team_id}")
 
+    # Build handles — prepend a normalized email handle from --admin-email so the
+    # dashboard signup with that email auto-links to this admin actor (identity
+    # email-linking, gated on dashboard_auth.bootstrap_complete=False).
+    handles = list(admin_handles)
+    claim_email = admin_email.strip().lower()
+    if claim_email:
+        email_handle = f"email:{claim_email}"
+        if email_handle not in handles:
+            handles.insert(0, email_handle)
+    else:
+        # Fall back to any email:<addr> the operator passed via --admin-handles.
+        claim_email = next(
+            (h.split("email:", 1)[1] for h in handles if h.startswith("email:")), ""
+        )
+
     # Create admin actor
     actor = _api("POST", f"{url}/admin/actors", "", {
         "type": "human_coordinator",
@@ -261,7 +281,7 @@ def bootstrap(ctx: click.Context, org_name: str, org_label: str, team_name: str,
         "authority_level": admin_authority,
         "org_id": org_id,
         "team_ids": [team_id],
-        "handles": list(admin_handles),
+        "handles": handles,
     })
     actor_id = actor.get("id", "unknown")
     click.echo(f"Admin actor created: actor_id={actor_id} (authority_level={admin_authority})")
@@ -269,6 +289,34 @@ def bootstrap(ctx: click.Context, org_name: str, org_label: str, team_name: str,
     # Save to config
     _save_config({"actor_id": actor_id, "runtime_url": url})
     click.echo(f"Config saved: actor-id={actor_id}, runtime-url={url}")
+
+    # Guide the operator through claiming the matching dashboard admin account.
+    # Ordering matters: the email-link only fires while bootstrap_complete=False,
+    # so the dashboard signup MUST happen before that flag is flipped to true.
+    click.echo("")
+    click.echo("Next: claim the dashboard admin account (if dashboard_auth.enabled):")
+    if claim_email:
+        click.echo(
+            f"  1. Sign up on the dashboard (<website_domain>/ui/) with {claim_email} "
+            "while dashboard_auth.bootstrap_complete is FALSE —"
+        )
+        click.echo(
+            f"     the first login with that email auto-links to this admin actor "
+            f"(authority {admin_authority}), no manual elevation needed."
+        )
+    else:
+        click.echo(
+            "  1. Re-run with --admin-email <addr> (or add an 'email:<addr>' handle) so the "
+            "dashboard signup can auto-link to this admin."
+        )
+    click.echo(
+        "  2. Confirm you land in the dashboard as admin, THEN set "
+        "dashboard_auth.bootstrap_complete: true and restart the runtime."
+    )
+    click.echo(
+        "     (Flipping bootstrap_complete before claiming disables email-linking — "
+        "a later signup would land at authority 0 and need manual elevation.)"
+    )
 
     click.echo(f"\n{'='*60}")
     click.echo(f"ACTION REQUIRED: Set EB_ORG_ID in your environment")
