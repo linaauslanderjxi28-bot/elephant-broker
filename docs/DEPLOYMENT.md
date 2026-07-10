@@ -333,22 +333,37 @@ sudo -u elephantbroker /opt/elephantbroker/.venv/bin/ebrun \
   --org-name "YourOrg" \
   --team-name "YourTeam" \
   --admin-name "admin" \
-  --admin-email "you@example.com"
+  --admin-email "you@example.com" \
+  --admin-password "ElephantBroker2026"
 ```
 
 (This is the one place we use `sudo -u elephantbroker` — `ebrun` is the
 admin CLI and should run as the service user so any local state it creates
 inherits the right ownership.)
 
-**`--admin-email` is what wires the admin actor to the dashboard login.** It
-adds a normalized `email:you@example.com` handle to the admin actor; when you
-later sign up on the dashboard with that same email (while
-`dashboard_auth.bootstrap_complete` is still `false`), the runtime auto-links
-that login to this authority-90 admin actor instead of creating a fresh
-"pending" (authority-0) account. See **§ 7a. Claim the dashboard admin account**
-below for the exact ordering — it matters. (`--admin-email` is a convenience
-wrapper over `--admin-handles`; the raw `--admin-handles "email:you@example.com"`
-form still works and is equivalent.)
+**Bootstrap creates your dashboard admin login for you.** When dashboard auth
+is enabled (`dashboard_auth.enabled: true`), `--admin-email` is used as the
+dashboard login username and bootstrap directly creates the matching SuperTokens
+email/password credential — bound to the same **authority-90 admin actor** — then
+prints the credentials:
+
+```
+============================================================
+DASHBOARD ADMIN LOGIN CREATED (authority 90):
+  URL:      <website_domain>/ui/
+  Email:    you@example.com
+  Password: ElephantBroker2026
+  ** CHANGE THIS PASSWORD immediately after your first login. **
+============================================================
+```
+
+`--admin-password` defaults to `ElephantBroker2026` — a well-known default, so
+**change it immediately after your first login**. There is no self-service signup
+and no manual authority elevation: you log straight into the dashboard as admin.
+See **§ 7a** below for first-login steps. (`--admin-email` also adds a normalized
+`email:you@example.com` handle to the admin actor. If dashboard auth is disabled
+or SuperTokens is not up yet, bootstrap prints a non-fatal NOTE and you can create
+the login later with `ebrun dashboard-user create` — see § 7a.)
 
 Bootstrap is one-shot — only works on an empty graph *for the given
 gateway_id*. Recovery depends on whether your DB VM is single-tenant or
@@ -423,50 +438,52 @@ curl http://localhost:8421/health
 journalctl -u elephantbroker -f       # follow runtime logs
 ```
 
-### 7a. Claim the dashboard admin account (when `dashboard_auth.enabled`)
+### 7a. Log into the dashboard as admin (when `dashboard_auth.enabled`)
 
-If you enabled the dashboard (`dashboard_auth.enabled: true`), the admin actor
-created by `bootstrap` is an EB actor — it is **not** yet a dashboard login
-(SuperTokens email/password). You claim it by signing up on the dashboard with
-the **same email** you passed to `--admin-email`. While
-`dashboard_auth.bootstrap_complete` is `false`, that first login auto-links to
-your authority-90 admin actor; flip the flag afterwards to close the window.
+If you enabled the dashboard (`dashboard_auth.enabled: true`), **`bootstrap`
+already created your dashboard login** — the SuperTokens email/password
+credential for `--admin-email`, bound to the authority-90 admin actor, printed in
+the `DASHBOARD ADMIN LOGIN CREATED` block (§ 5). There is nothing to "claim": you
+log straight in.
 
-**The ordering is load-bearing — do these in this exact sequence:**
+1. Start the runtime (§ 6).
+2. Open `<website_domain>/ui/` (e.g. `http://10.0.0.10:8420/ui/`) and **log in**
+   with the email and password from the bootstrap output. You land in the
+   dashboard as admin (authority 90) — no signup, no manual elevation.
+3. **Change the password immediately** (the default `ElephantBroker2026` is
+   well-known) via the dashboard's account settings.
 
-1. **Bootstrap with `--admin-email you@example.com`** (§ 5) so the admin actor
-   carries an `email:you@example.com` handle.
-2. Leave `dashboard_auth.bootstrap_complete: false` in
-   `/etc/elephantbroker/default.yaml` (the default) and start the runtime (§ 6).
-3. **Sign up on the dashboard** at `<website_domain>/ui/` (e.g.
-   `http://10.0.0.10:8420/ui/`) with `you@example.com` and a password. The
-   runtime matches that email to the pre-provisioned admin actor and binds your
-   login to it — you land in the dashboard as admin (authority 90), no manual
-   elevation.
-4. **Verify** you have admin access, then set
-   `dashboard_auth.bootstrap_complete: true` and
-   `sudo systemctl restart elephantbroker`.
+> **How the link works.** Bootstrap calls `POST /admin/dashboard-users`, which
+> creates the SuperTokens user and binds it to the admin actor two ways — an
+> `eb_actor_id` entry in the user's SuperTokens metadata and a stable
+> `dashboard:<st-user-id>` handle on the actor — so every login resolves straight
+> to the authority-90 actor. The route is authority-capped: the caller's authority
+> must be ≥ the target actor's, so a lower-authority principal cannot mint an admin
+> login.
 
-> **Do step 4 only after step 3 succeeds.** Flipping `bootstrap_complete: true`
-> *before* the admin has signed up permanently disables email-linking — a later
-> signup then lands at authority 0 and must be elevated by hand (see below).
-
-**Security note (single-tenant / controlled-network only):** SuperTokens
-email/password signup does **not** verify email ownership, so during the open
-window anyone who can reach `/auth/signup` and registers the admin's email
-*before you do* would inherit admin authority. The runtime bounds this — linking
-is gated on `bootstrap_complete: false`, only binds to an **unclaimed** actor,
-and is gateway-scoped — but the residual pre-emptive-signup risk is real. Keep
-the runtime off untrusted networks during bootstrap and **flip
-`bootstrap_complete: true` immediately after claiming.** For a hard guarantee,
-put the dashboard behind your own SSO/VPN.
-
-**Manual elevation (fallback).** If linking didn't fire (flag already flipped,
-email mismatch, or a pre-existing authority-0 signup), elevate the dashboard
-actor by hand using the admin actor as the caller:
+**If bootstrap could not create the login** (dashboard auth was disabled at
+bootstrap time, or the SuperTokens core wasn't up yet), bootstrap prints a
+non-fatal NOTE instead of the credentials block. Create it after the runtime is
+up with:
 
 ```bash
-# Find the dashboard actor's id (authority 0, handle dashboard:*)
+sudo -u elephantbroker /opt/elephantbroker/.venv/bin/ebrun \
+  --runtime-url http://localhost:8420 dashboard-user create \
+  --email "you@example.com" \
+  --password "ElephantBroker2026" \
+  --actor-id "<admin-actor-id>"
+```
+
+(`<admin-actor-id>` is printed by bootstrap and saved to
+`~/.elephantbroker/config.json`; `ebrun dashboard-user create` uses that stored
+admin as the caller so the authority cap is satisfied.)
+
+**Manual elevation (last resort).** If a stray authority-0 dashboard actor already
+exists (e.g. someone self-signed-up before you enabled deterministic
+provisioning), elevate it by hand using the admin actor as the caller:
+
+```bash
+# Find the stray dashboard actor's id (authority 0, handle dashboard:*)
 EB_ACTOR_ID=<admin-actor-id> ebrun --runtime-url http://localhost:8420 actor list
 
 # Elevate it (register_actor requires min authority 70; the admin actor is 90)

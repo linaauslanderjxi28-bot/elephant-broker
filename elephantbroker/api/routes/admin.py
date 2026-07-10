@@ -12,7 +12,11 @@ from cognee.tasks.storage import add_data_points
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from elephantbroker.api.auth.identity import get_identity
+from elephantbroker.api.auth.identity import (
+    _dashboard_handle,
+    _persist_actor_mapping,
+    get_identity,
+)
 from elephantbroker.api.routes._authority import check_authority
 from elephantbroker.runtime.adapters.cognee.datapoints import (
     ActorDataPoint,
@@ -589,6 +593,124 @@ async def update_actor(actor_id: str, request: Request):
     # Re-store
     await container.actor_registry.register_actor(actor)
     return actor.model_dump(mode="json")
+
+
+class CreateDashboardUserRequest(BaseModel):
+    email: str = Field(min_length=3)
+    password: str = Field(min_length=8)
+    actor_id: str = Field(min_length=1)
+
+
+@router.post("/dashboard-users")
+async def create_dashboard_user(request: Request):
+    """Create a SuperTokens email/password login and bind it to an existing actor.
+
+    Deterministic dashboard-admin provisioning: ``ebrun bootstrap`` calls this
+    (authenticated as the just-created authority-90 admin actor) so the operator
+    gets a ready-to-use dashboard login instead of a self-service signup that
+    lands at authority 0 and needs manual elevation. The created SuperTokens user
+    is linked to ``actor_id`` two ways — the ``eb_actor_id`` user-metadata mapping
+    (the fast path in ``resolve_actor_from_st_user``) AND a stable
+    ``dashboard:{st_user_id}`` handle on the actor — so the first (and every)
+    dashboard login resolves straight to that actor and inherits its authority.
+
+    Authority cap (privilege-escalation guard). The base gate is ``register_actor``
+    (authority >= 70), but that alone would let a level-70 caller mint a login for
+    a level-90 actor and then log in AS admin. So we additionally require the
+    CALLER's authority >= the TARGET actor's authority (mirrors how
+    ``create_api_key`` caps the granted level at the caller's own). The bootstrap
+    admin linking to itself (90 -> 90) passes; a genuine 70 -> 90 attempt is 403.
+    (The raw ``X-EB-Actor-Id`` legacy-header trust is a pre-existing property of
+    the whole ``/admin`` surface — this cap protects against an *authenticated*
+    lower-authority principal, e.g. a dashboard session, escalating.)
+    """
+    body = await request.json()
+    await _auth(request, "register_actor")  # base floor: authority >= 70
+    container, caller_id = _get_deps(request)
+
+    payload = CreateDashboardUserRequest(**body)
+    email = payload.email.strip().lower()
+    target_actor_id = payload.actor_id.strip()
+
+    # Target actor must exist.
+    target = await container.actor_registry.resolve_actor(uuid.UUID(target_actor_id))
+    if target is None:
+        raise HTTPException(status_code=404, detail="Target actor not found")
+
+    # Privilege-escalation guard: caller authority >= target authority.
+    caller = None
+    if caller_id:
+        try:
+            caller = await container.actor_registry.resolve_actor(uuid.UUID(caller_id))
+        except Exception:  # noqa: BLE001 - malformed / absent caller id
+            caller = None
+    caller_authority = getattr(caller, "authority_level", 0) or 0
+    target_authority = getattr(target, "authority_level", 0) or 0
+    if caller_authority < target_authority:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Caller authority is below the target actor's authority; cannot "
+                "create a dashboard login for a higher-authority actor."
+            ),
+        )
+
+    # SuperTokens must be initialized to create an emailpassword user.
+    from elephantbroker.api.auth import supertokens_config
+
+    if not supertokens_config.is_initialized():
+        raise HTTPException(
+            status_code=503,
+            detail="Dashboard auth (SuperTokens) is not enabled/initialized.",
+        )
+
+    # Heavy optional dependency — import lazily, only on this path.
+    from supertokens_python.recipe.emailpassword.asyncio import sign_up
+
+    try:
+        result = await sign_up("public", email, payload.password)
+    except Exception as exc:  # noqa: BLE001 - ST core down / network
+        logger.warning("dashboard-user sign_up failed for %s: %s", email, exc)
+        raise HTTPException(status_code=502, detail=f"SuperTokens sign_up error: {exc}")
+
+    # Version-robust result handling: check ``.status`` rather than isinstance so
+    # this survives SDK class-name drift across supertokens-python generations.
+    status = getattr(result, "status", None)
+    if status == "OK":
+        st_user_id = result.user.id  # primary user id == session.get_user_id()
+        created = True
+    elif status == "EMAIL_ALREADY_EXISTS_ERROR":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A dashboard account already exists for {email}. Log in with it, "
+                "or elevate its actor manually via PUT /admin/actors/{id}."
+            ),
+        )
+    else:
+        raise HTTPException(
+            status_code=502, detail=f"SuperTokens sign_up returned status {status!r}"
+        )
+
+    # Link ST user -> actor: metadata mapping (fast path) + stable dashboard handle.
+    await _persist_actor_mapping(st_user_id, target_actor_id)
+    handle = _dashboard_handle(st_user_id)
+    handles = list(getattr(target, "handles", []) or [])
+    if handle not in handles:
+        handles.append(handle)
+        target.handles = handles
+        await container.actor_registry.register_actor(target)
+
+    logger.info(
+        "Created dashboard login %s (st_user=%s) linked to actor %s (authority %s)",
+        email, st_user_id, target_actor_id, target_authority,
+    )
+    return {
+        "st_user_id": st_user_id,
+        "email": email,
+        "linked_actor_id": target_actor_id,
+        "created": created,
+    }
 
 
 @router.post("/actors/{actor_id}/merge")

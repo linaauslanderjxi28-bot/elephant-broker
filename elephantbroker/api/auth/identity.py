@@ -183,79 +183,6 @@ async def _fetch_st_user_display_name(st_user_id: str) -> str | None:
     return None
 
 
-async def _fetch_st_user_email(st_user_id: str) -> str | None:
-    """Best-effort, normalized (lowercased) primary email for a SuperTokens user.
-
-    Used only for first-login account linking (``resolve_actor_from_st_user``):
-    the returned value is matched against an existing actor's ``email:<addr>``
-    handle. Distinct from ``_fetch_st_user_display_name`` — that helper may fall
-    back to a name and exists for display, whereas this one returns an email or
-    nothing, so a display name can never accidentally become a linking key.
-    Same lazy-import / guarded multi-generation SDK probing as its sibling.
-    """
-    # 1. usermetadata explicit email.
-    try:
-        from supertokens_python.recipe.usermetadata.asyncio import (
-            get_user_metadata,
-        )
-
-        meta = (await get_user_metadata(st_user_id)).metadata or {}
-        email = meta.get("email")
-        if isinstance(email, str) and email.strip():
-            return email.strip().lower()
-    except Exception as exc:  # noqa: BLE001 - ST unavailable / no metadata
-        logger.debug("usermetadata email lookup unavailable for %s: %s", st_user_id, exc)
-
-    # 2. emailpassword recipe user record (older SDK generations).
-    try:
-        from supertokens_python.recipe.emailpassword.asyncio import (
-            get_user_by_id,
-        )
-
-        user = await get_user_by_id(st_user_id)
-        email = getattr(user, "email", None)
-        if isinstance(email, str) and email.strip():
-            return email.strip().lower()
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("emailpassword email lookup unavailable for %s: %s", st_user_id, exc)
-
-    # 3. Generic user lookup (newer SDK generations expose `.emails`).
-    try:
-        from supertokens_python.asyncio import get_user
-
-        user = await get_user(st_user_id)
-        emails = getattr(user, "emails", None)
-        if emails:
-            first_email = emails[0]
-            if isinstance(first_email, str) and first_email.strip():
-                return first_email.strip().lower()
-        email = getattr(user, "email", None)
-        if isinstance(email, str) and email.strip():
-            return email.strip().lower()
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("generic email lookup unavailable for %s: %s", st_user_id, exc)
-
-    return None
-
-
-def _email_link_enabled(container: Any) -> bool:
-    """True while the dashboard first-admin bootstrap window is open.
-
-    Email-based account linking — binding a first dashboard login to a
-    pre-provisioned actor that already carries a matching ``email:`` handle
-    (e.g. the admin created by ``ebrun bootstrap``) — is active ONLY while
-    ``dashboard_auth.bootstrap_complete`` is False. The operator flips that flag
-    to True once the admin has claimed their account, which permanently closes
-    the linking path (subsequent signups fall back to a fresh authority-0
-    actor). Mirrors the same-flag gate in
-    ``api/routes/auth.py::_bootstrap_allowed``.
-    """
-    cfg = getattr(getattr(container, "config", None), "dashboard_auth", None)
-    if cfg is None:
-        return False
-    return not bool(getattr(cfg, "bootstrap_complete", False))
-
-
 async def _persist_actor_mapping(st_user_id: str, actor_id: str) -> None:
     """Persist ``eb_actor_id`` into SuperTokens user metadata (best-effort)."""
     try:
@@ -328,13 +255,7 @@ async def resolve_actor_from_st_user(container: Any, st_user_id: str) -> str | N
        (authoritative fallback: even when the metadata write failed on a prior
        login, we find and reuse that actor instead of creating a duplicate, and
        repair the missing metadata mapping).
-    2.5. Email-based linking, bootstrap window only (``_email_link_enabled``):
-       bind to a pre-provisioned actor that already carries a matching
-       ``email:<addr>`` handle — e.g. the admin ``ebrun bootstrap`` created — so
-       the first dashboard login by that email lands as admin instead of a fresh
-       authority-0 actor. Gated / unclaimed-only / gateway-scoped (see the inline
-       SECURITY note). Only ever runs on a genuine first login (1-2 miss).
-    3. Only when none of the above match: create a NEW actor with a real ``display_name``
+    3. Only when neither exists: create a NEW actor with a real ``display_name``
        resolved from the SuperTokens email/name (actors-orgs-15 / auth-5 /
        cross-cutting-4), and persist the mapping.
 
@@ -379,65 +300,6 @@ async def resolve_actor_from_st_user(container: Any, st_user_id: str) -> str | N
                 if existing_actor is not None:
                     mapped_id = str(existing_actor.id)
                     await _persist_actor_mapping(st_user_id, mapped_id)
-
-            # 2.5. Email-based account linking (bootstrap window only).
-            #      Bind a first dashboard login to an EXISTING actor that already
-            #      carries a matching `email:<addr>` handle — e.g. the admin
-            #      `ebrun bootstrap` created — so the operator lands as that actor
-            #      (authority inherited, reflected on THIS request) instead of a
-            #      fresh authority-0 "pending" actor.
-            #
-            #      SECURITY: SuperTokens emailpassword does NOT verify email
-            #      ownership, so this is a pre-emptive-signup surface — whoever
-            #      registers the admin's email first during the window inherits
-            #      its authority. Bounded by three constraints: (a) gated on
-            #      dashboard_auth.bootstrap_complete=False (the operator closes
-            #      the window right after claiming), (b) links only to an
-            #      UNCLAIMED actor (no existing `dashboard:` handle, so a second
-            #      signup for the same email cannot hijack an already-linked
-            #      admin), (c) resolve_by_handle is gateway-scoped. Acceptable
-            #      only for the single-tenant / controlled-network deployment the
-            #      docs describe. Re-logins never reach here (steps 1-2 resolve).
-            if (
-                mapped_id is None
-                and registry is not None
-                and hasattr(registry, "resolve_by_handle")
-                and _email_link_enabled(container)
-            ):
-                email = await _fetch_st_user_email(st_user_id)
-                if email:
-                    try:
-                        candidate = await registry.resolve_by_handle(f"email:{email}")
-                    except Exception as exc:  # noqa: BLE001
-                        candidate = None
-                        logger.debug(
-                            "email-link resolve_by_handle failed for %s: %s", email, exc
-                        )
-                    if candidate is not None and not any(
-                        str(h).startswith("dashboard:")
-                        for h in (getattr(candidate, "handles", None) or [])
-                    ):
-                        try:
-                            candidate.handles = list(candidate.handles or []) + [handle]
-                            await registry.register_actor(candidate)
-                            mapped_id = str(candidate.id)
-                            await _persist_actor_mapping(st_user_id, mapped_id)
-                            logger.info(
-                                "Dashboard login %s claimed pre-provisioned actor %s "
-                                "via email handle (authority_level=%s) during the "
-                                "bootstrap window",
-                                st_user_id,
-                                mapped_id,
-                                getattr(candidate, "authority_level", "?"),
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning(
-                                "email-link bind failed for ST user %s -> actor %s: %s",
-                                st_user_id,
-                                getattr(candidate, "id", "?"),
-                                exc,
-                            )
-                            mapped_id = None  # fall through to fresh authority-0 create
 
             # 3. First login: create an actor with a real display name and a
             #    handle-derived deterministic id, and remember the mapping.

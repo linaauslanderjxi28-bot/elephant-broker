@@ -42,6 +42,12 @@ _API_KEY: str | None = None
 # unauthenticated request (used by the ``--bootstrap`` key-creation flow).
 _USE_GLOBAL = object()
 
+# Default password for the dashboard admin login that ``ebrun bootstrap`` (and
+# ``ebrun dashboard-user create``) provisions. A well-known default — the docs
+# and the post-bootstrap output both tell the operator to change it immediately
+# after the first login.
+DEFAULT_ADMIN_PASSWORD = "ElephantBroker2026"
+
 
 def _config_path() -> str:
     return os.path.expanduser("~/.elephantbroker/config.json")
@@ -87,13 +93,18 @@ def _resolve_runtime_url(ctx_url: str | None) -> str:
 
 
 def _api(method: str, url: str, actor_id: str, body: dict | None = None,
-         api_key: object = _USE_GLOBAL) -> dict:
+         api_key: object = _USE_GLOBAL, allow_error: bool = False) -> dict:
     """Make an HTTP request to the runtime API.
 
     Header selection: when an API key is available (``api_key`` arg, else the
     resolved module global ``_API_KEY``) send ``X-EB-API-Key``; otherwise fall
     back to the Phase 8 ``X-EB-Actor-Id`` header. Pass ``api_key=None`` to force
     an unauthenticated request (bootstrap key creation).
+
+    ``allow_error=True`` turns a >=400 response or a connection failure into a
+    returned ``{"_status", "_error"}`` dict instead of a hard ``sys.exit(1)`` —
+    so an optional, best-effort call (e.g. auto-creating the dashboard login
+    during bootstrap) can fail without aborting the whole command.
     """
     import httpx
     headers = {"Content-Type": "application/json"}
@@ -116,10 +127,14 @@ def _api(method: str, url: str, actor_id: str, body: dict | None = None,
             click.echo(f"Unknown method: {method}")
             sys.exit(1)
         if r.status_code >= 400:
+            if allow_error:
+                return {"_status": r.status_code, "_error": r.text}
             click.echo(f"Error {r.status_code}: {r.text}")
             sys.exit(1)
         return r.json()
     except httpx.ConnectError:
+        if allow_error:
+            return {"_status": 0, "_error": "cannot connect to runtime"}
         click.echo("Cannot connect to runtime. Is it running?")
         sys.exit(1)
 
@@ -226,17 +241,28 @@ def config_show() -> None:
 @click.option("--team-name", required=True, help="Team name")
 @click.option("--team-label", default="", help="Short display label")
 @click.option("--admin-name", required=True, help="Admin actor display name")
-@click.option("--admin-email", default="", help="Admin email. Auto-adds an 'email:<addr>' handle "
-              "so the dashboard signup with this email auto-claims admin while "
-              "dashboard_auth.bootstrap_complete is false (recommended over raw --admin-handles).")
+@click.option("--admin-email", default="", help="Admin email. Used as the dashboard login "
+              "username AND added as an 'email:<addr>' handle on the admin actor. When "
+              "dashboard auth is enabled, bootstrap creates this login directly (see "
+              "--admin-password).")
+@click.option("--admin-password", default=DEFAULT_ADMIN_PASSWORD, show_default=True,
+              help="Password for the dashboard login bootstrap creates for --admin-email. "
+              "Change it after first login.")
 @click.option("--admin-authority", default=90, type=int, help="Admin authority level")
 @click.option("--admin-handles", multiple=True, help="Extra admin handles (e.g. telegram:alex). "
               "An 'email:<addr>' handle is added automatically from --admin-email.")
 @click.pass_context
 def bootstrap(ctx: click.Context, org_name: str, org_label: str, team_name: str,
-              team_label: str, admin_name: str, admin_email: str, admin_authority: int,
-              admin_handles: tuple) -> None:
-    """Bootstrap: create first org, team, and admin actor (requires empty graph)."""
+              team_label: str, admin_name: str, admin_email: str, admin_password: str,
+              admin_authority: int, admin_handles: tuple) -> None:
+    """Bootstrap: create first org, team, and admin actor (requires empty graph).
+
+    When ``--admin-email`` is given and dashboard auth is enabled, bootstrap also
+    creates the matching SuperTokens dashboard login (default password
+    ``ElephantBroker2026``) bound to the authority-90 admin actor, and prints the
+    credentials — so you can log into the dashboard as admin immediately, with no
+    self-service signup and no manual authority elevation.
+    """
     url = ctx.obj["runtime_url"]
 
     # Check bootstrap status
@@ -259,9 +285,9 @@ def bootstrap(ctx: click.Context, org_name: str, org_label: str, team_name: str,
     team_id = team["team_id"]
     click.echo(f"Team created: team_id={team_id}")
 
-    # Build handles — prepend a normalized email handle from --admin-email so the
-    # dashboard signup with that email auto-links to this admin actor (identity
-    # email-linking, gated on dashboard_auth.bootstrap_complete=False).
+    # Build handles — prepend a normalized email handle from --admin-email. The
+    # same address is used as the dashboard login username below; the handle keeps
+    # the actor discoverable by email in the graph.
     handles = list(admin_handles)
     claim_email = admin_email.strip().lower()
     if claim_email:
@@ -290,33 +316,48 @@ def bootstrap(ctx: click.Context, org_name: str, org_label: str, team_name: str,
     _save_config({"actor_id": actor_id, "runtime_url": url})
     click.echo(f"Config saved: actor-id={actor_id}, runtime-url={url}")
 
-    # Guide the operator through claiming the matching dashboard admin account.
-    # Ordering matters: the email-link only fires while bootstrap_complete=False,
-    # so the dashboard signup MUST happen before that flag is flipped to true.
-    click.echo("")
-    click.echo("Next: claim the dashboard admin account (if dashboard_auth.enabled):")
+    # Deterministic dashboard admin: create the SuperTokens email/password login
+    # NOW and bind it to THIS authority-90 admin actor, so the operator can log
+    # into the dashboard immediately — no self-service signup, no manual authority
+    # elevation. Best-effort: if dashboard auth is disabled or the SuperTokens core
+    # is not yet up, this is a warning, not a bootstrap failure (the operator can
+    # retry later with `ebrun dashboard-user create`).
     if claim_email:
-        click.echo(
-            f"  1. Sign up on the dashboard (<website_domain>/ui/) with {claim_email} "
-            "while dashboard_auth.bootstrap_complete is FALSE —"
-        )
-        click.echo(
-            f"     the first login with that email auto-links to this admin actor "
-            f"(authority {admin_authority}), no manual elevation needed."
-        )
+        resp = _api("POST", f"{url}/admin/dashboard-users", actor_id, {
+            "email": claim_email,
+            "password": admin_password,
+            "actor_id": actor_id,
+        }, allow_error=True)
+        if not resp.get("_error") and resp.get("st_user_id"):
+            click.echo("")
+            click.echo("=" * 60)
+            click.echo(f"DASHBOARD ADMIN LOGIN CREATED (authority {admin_authority}):")
+            click.echo(f"  URL:      <website_domain>/ui/")
+            click.echo(f"  Email:    {claim_email}")
+            click.echo(f"  Password: {admin_password}")
+            click.echo("  ** CHANGE THIS PASSWORD immediately after your first login. **")
+            click.echo("=" * 60)
+        else:
+            detail = resp.get("_error", "unknown error")
+            click.echo("")
+            click.echo(
+                f"NOTE: could not auto-create the dashboard login "
+                f"(status {resp.get('_status')}: {detail})."
+            )
+            click.echo(
+                "  This is non-fatal — the admin actor was created. Once dashboard auth "
+                "is enabled and SuperTokens is up, run:"
+            )
+            click.echo(
+                f"    ebrun dashboard-user create --email {claim_email} --actor-id {actor_id}"
+            )
     else:
+        click.echo("")
         click.echo(
-            "  1. Re-run with --admin-email <addr> (or add an 'email:<addr>' handle) so the "
-            "dashboard signup can auto-link to this admin."
+            "NOTE: no --admin-email given, so no dashboard login was created. Pass "
+            "--admin-email (and optionally --admin-password) to auto-create the "
+            "dashboard admin login, or run `ebrun dashboard-user create` later."
         )
-    click.echo(
-        "  2. Confirm you land in the dashboard as admin, THEN set "
-        "dashboard_auth.bootstrap_complete: true and restart the runtime."
-    )
-    click.echo(
-        "     (Flipping bootstrap_complete before claiming disables email-linking — "
-        "a later signup would land at authority 0 and need manual elevation.)"
-    )
 
     click.echo(f"\n{'='*60}")
     click.echo(f"ACTION REQUIRED: Set EB_ORG_ID in your environment")
@@ -325,6 +366,46 @@ def bootstrap(ctx: click.Context, org_name: str, org_label: str, team_name: str,
     click.echo(f"  Add to /etc/elephantbroker/env (or default.yaml gateway.org_id)")
     click.echo(f"  Then restart: sudo systemctl restart elephantbroker")
     click.echo(f"{'='*60}\n")
+
+
+# ---------------------------------------------------------------------------
+# Dashboard users
+# ---------------------------------------------------------------------------
+
+@cli.group("dashboard-user")
+def dashboard_user_group() -> None:
+    """Dashboard login (SuperTokens email/password) management."""
+
+
+@dashboard_user_group.command("create")
+@click.option("--email", required=True, help="Login email (username).")
+@click.option("--password", default=DEFAULT_ADMIN_PASSWORD, show_default=True,
+              help="Login password. Change it after first login.")
+@click.option("--actor-id", required=True,
+              help="Actor to bind the login to — the login inherits its authority.")
+@click.pass_context
+def dashboard_user_create(ctx: click.Context, email: str, password: str, actor_id: str) -> None:
+    """Create a dashboard login and bind it to an existing actor.
+
+    Companion / recovery path for ``ebrun bootstrap``: use it when the login could
+    not be created at bootstrap time (SuperTokens not yet up, dashboard auth
+    enabled later) or to provision a login for any other actor. The caller is the
+    actor stored in ~/.elephantbroker/config.json (the bootstrap admin) so the
+    authority cap (caller authority >= target authority) is satisfied.
+    """
+    url = ctx.obj["runtime_url"]
+    # Caller = stored admin actor (authority 90); falls back to the target itself.
+    caller_id = _load_config().get("actor_id") or actor_id
+    resp = _api("POST", f"{url}/admin/dashboard-users", caller_id, {
+        "email": email.strip().lower(),
+        "password": password,
+        "actor_id": actor_id,
+    })
+    click.echo(
+        f"Dashboard login created: {resp['email']} -> actor {resp['linked_actor_id']} "
+        f"(st_user={resp['st_user_id']}, created={resp['created']})"
+    )
+    click.echo("Change the password after first login.")
 
 
 # ---------------------------------------------------------------------------

@@ -3750,7 +3750,8 @@ ebrun bootstrap [OPTIONS]
 | `--team-name` | Yes | -- | Team name |
 | `--team-label` | No | first 20 chars of team-name | Short display label |
 | `--admin-name` | Yes | -- | Admin actor display name |
-| `--admin-email` | No | (none) | Admin email. Auto-adds a normalized `email:<addr>` handle so the dashboard signup with this email auto-claims admin while `dashboard_auth.bootstrap_complete` is `false`. Preferred over raw `--admin-handles`. |
+| `--admin-email` | No | (none) | Admin email. Used as the dashboard login username AND added as a normalized `email:<addr>` handle. When dashboard auth is enabled, bootstrap creates this login directly (see `--admin-password`). |
+| `--admin-password` | No | `ElephantBroker2026` | Password for the dashboard login bootstrap creates for `--admin-email`. A well-known default — change it after first login. |
 | `--admin-authority` | No | `90` | Admin authority level (0-100) |
 | `--admin-handles` | No | (none) | Extra admin handles, repeatable (e.g. `telegram:alex`). An `email:<addr>` handle is added automatically from `--admin-email`. |
 
@@ -3762,12 +3763,25 @@ ebrun bootstrap \
   --team-name "Backend" \
   --admin-name "Admin" \
   --admin-authority 90 \
-  --admin-email "admin@acme.com"
+  --admin-email "admin@acme.com" \
+  --admin-password "ElephantBroker2026"
 ```
 
-This creates the org, team, and admin actor sequentially via the admin API, then saves the resulting `actor_id` and `runtime_url` to `~/.elephantbroker/config.json`. It also prints the "Next steps" to claim the matching dashboard admin login.
+This creates the org, team, and admin actor sequentially via the admin API, then saves the resulting `actor_id` and `runtime_url` to `~/.elephantbroker/config.json`.
 
-**Dashboard admin claim (email-linking).** When `dashboard_auth.enabled: true`, the admin actor is not yet a dashboard login. Signing up on the dashboard with the `--admin-email` address — **while `dashboard_auth.bootstrap_complete` is still `false`** — auto-links that first login to the pre-provisioned admin actor (inheriting authority 90) instead of creating a fresh authority-0 account. Flip `bootstrap_complete: true` only *after* the admin has signed up; flipping it earlier permanently disables email-linking and a later signup lands at authority 0 (needs manual elevation). See [DEPLOYMENT.md § 7a](./DEPLOYMENT.md) for the full sequence and the pre-emptive-signup security note.
+**Dashboard admin login (created deterministically at bootstrap).** When `dashboard_auth.enabled: true` and `--admin-email` is given, bootstrap calls `POST /admin/dashboard-users` to create the SuperTokens email/password login directly and bind it to the authority-90 admin actor, then prints the credentials (URL / email / password). You log straight into the dashboard as admin — no self-service signup, no manual authority elevation. The default password `ElephantBroker2026` is well-known; change it after first login. If dashboard auth is disabled or SuperTokens is not up at bootstrap time, bootstrap prints a non-fatal NOTE and you can create the login later with `ebrun dashboard-user create --email <addr> --actor-id <admin-actor-id>`. See [DEPLOYMENT.md § 7a](./DEPLOYMENT.md) for first-login steps. The route is authority-capped (caller authority must be ≥ the target actor's) so a lower-authority principal cannot mint an admin login.
+
+##### `ebrun dashboard-user create`
+
+Create a dashboard email/password login and bind it to an existing actor (the login inherits that actor's authority). Companion / recovery path for `ebrun bootstrap` — use it when the login could not be created at bootstrap time, or to provision a login for another actor.
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--email` | Yes | -- | Login email (username). |
+| `--password` | No | `ElephantBroker2026` | Login password. Change it after first login. |
+| `--actor-id` | Yes | -- | Actor to bind the login to. The login inherits its authority. |
+
+The caller is the admin actor stored in `~/.elephantbroker/config.json`, so the authority cap (caller authority ≥ target authority) is satisfied when binding to a lower-or-equal-authority actor.
 
 #### `ebrun org` -- Organization Management
 
