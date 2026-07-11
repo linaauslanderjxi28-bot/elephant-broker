@@ -159,8 +159,10 @@ RESEARCH_PROFILE = ProfilePolicy(
         isolation_level=IsolationLevel.NONE,
         isolation_scope=IsolationScope.GLOBAL,
         structural_fetch_k=15,
+        keyword_fetch_k=15,      # default, exposed for tuning
         vector_fetch_k=25,
         artifact_fetch_k=15,
+        root_top_k=40,           # default, exposed for tuning (final fused-candidate cap)
     ),
     autorecall=AutorecallPolicy(
         retrieval=RetrievalPolicy(
@@ -173,8 +175,10 @@ RESEARCH_PROFILE = ProfilePolicy(
             isolation_level=IsolationLevel.NONE,
             isolation_scope=IsolationScope.GLOBAL,
             structural_fetch_k=15,
+            keyword_fetch_k=15,      # default, exposed for tuning
             vector_fetch_k=25,
             artifact_fetch_k=15,
+            root_top_k=40,           # default, exposed for tuning (final fused-candidate cap)
         ),
         extraction_focus=["findings", "hypotheses", "methodology", "data sources", "citations"],
         custom_categories=["hypothesis", "finding", "methodology", "citation"],
