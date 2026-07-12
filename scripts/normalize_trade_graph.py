@@ -131,6 +131,34 @@ def canonicalize(label: str, props: dict[str, Any]) -> tuple[str, dict[str, Any]
     return normalize_key(name), {"canonical_name": name, "identity_status": "provisional_name_based"}
 
 
+ISO4217_CODES = {"CNY", "EUR", "JPY", "MXN", "USD"}
+
+
+async def add_currency_master_data(session, *, apply: bool, now: str, run_id: str) -> int:
+    if not apply:
+        return len(ISO4217_CODES)
+    rows = json.load(open("/usr/share/iso-codes/json/iso_4217.json", encoding="utf-8"))["4217"]
+    by_code = {row["alpha_3"]: row for row in rows}
+    for code in ISO4217_CODES:
+        row = by_code[code]
+        await session.run(
+            """
+            MERGE (n:CanonicalEntity:CanonicalCurrency {namespace:$namespace,canonical_key:$code})
+            ON CREATE SET n.created_at=$now
+            SET n.canonical_name=$name,n.iso4217=$code,n.numeric_code=$numeric,
+                n.scheme='ISO_4217',n.identity_status='standardized',n.updated_at=$now,
+                n.standardization_run_id=$run_id
+            """,
+            namespace=RUN_NAMESPACE,
+            code=code,
+            name=row["name"],
+            numeric=row["numeric"],
+            now=now,
+            run_id=run_id,
+        )
+    return len(ISO4217_CODES)
+
+
 async def run(config: ElephantBrokerConfig, apply: bool) -> dict[str, Any]:
     driver = AsyncGraphDatabase.driver(
         config.cognee.neo4j_uri, auth=(config.cognee.neo4j_user, config.cognee.neo4j_password)
@@ -148,6 +176,8 @@ async def run(config: ElephantBrokerConfig, apply: bool) -> dict[str, Any]:
                     FOR (n:CanonicalEntity) REQUIRE (n.namespace,n.canonical_key) IS UNIQUE
                     """
                 )
+            currency_count = await add_currency_master_data(session, apply=apply, now=now, run_id=run_id)
+            stats["Currency"] = currency_count
             for label, (canonical_label, scheme) in TARGETS.items():
                 result = await session.run(
                     f"MATCH (n:{label}) RETURN elementId(n) AS source_id, properties(n) AS props"
