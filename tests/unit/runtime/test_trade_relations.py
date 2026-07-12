@@ -86,6 +86,28 @@ class TestTradeRelationBuilder:
         assert any("HAS_HS_CODE" in c for c in cyphers)
         assert any("SUPPLIES" in c for c in cyphers)
 
+    async def test_apply_uses_existing_master_data_unique_keys(self):
+        fact = _fact(
+            {
+                "name": "portable fan",
+                "hs_code": "841451",
+                "market": "EU",
+                "certifications": ["CE"],
+            },
+            "Product",
+            "portable fan",
+        )
+        graph = AsyncMock()
+        graph.query_cypher = AsyncMock(return_value=[])
+
+        await apply_trade_relation_plan(graph, fact)
+
+        node_calls = [call for call in graph.query_cypher.call_args_list if "MERGE (n:" in call.args[0]]
+        assert any("MERGE (n:Market {code: $match_value})" in call.args[0] for call in node_calls)
+        assert any("MERGE (n:HSCode {code: $match_value})" in call.args[0] for call in node_calls)
+        assert any("MERGE (n:Certification {code: $match_value})" in call.args[0] for call in node_calls)
+        assert any("MERGE (n:TradeProduct {name: $match_value})" in call.args[0] for call in node_calls)
+
     def test_tariff_rule_links_hs_origin_and_destination(self):
         fact = _fact(
             {

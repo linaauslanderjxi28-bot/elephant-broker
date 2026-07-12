@@ -104,7 +104,7 @@ def _cert_node(name: str) -> TradeNode | None:
     name = str(name or "").strip().upper()
     if not name:
         return None
-    return TradeNode("Certification", _slug(name), name, {"name": name})
+    return TradeNode("Certification", _slug(name), name, {"name": name, "code": name})
 
 
 def _named_node(label: str, name: str, properties: dict[str, Any] | None = None) -> TradeNode | None:
@@ -288,31 +288,43 @@ def build_trade_relation_plan(fact: FactAssertion) -> TradeRelationPlan:
 
 
 async def apply_trade_relation_plan(graph, fact: FactAssertion) -> dict[str, int]:
-    """Apply trade relation plan to Neo4j via GraphAdapter.query_cypher."""
+    """Apply a plan using existing Neo4j master-data unique keys when defined."""
     plan = build_trade_relation_plan(fact)
     if not plan.nodes and not plan.edges:
         return {"nodes": 0, "edges": 0}
     gateway_id = getattr(fact, "gateway_id", "") or ""
+    master_data_keys = {
+        "TradeProduct": "name",
+        "HSCode": "code",
+        "Market": "code",
+        "Certification": "code",
+    }
+
+    def node_identity(node: TradeNode) -> tuple[str, str]:
+        field = master_data_keys.get(node.label, "trade_id")
+        return field, str(node.properties.get(field) or (node.name if field == "name" else node.trade_id))
 
     for node in plan.nodes:
-        label = node.label
         props = dict(node.properties)
-        props.update({"trade_id": node.trade_id, "key": node.key, "name": node.name, "gateway_id": gateway_id})
-        cypher = f"MERGE (n:{label} {{trade_id: $trade_id, gateway_id: $gateway_id}}) SET n += $props"
-        await graph.query_cypher(cypher, {"trade_id": node.trade_id, "gateway_id": gateway_id, "props": props})
+        props.update({"trade_id": node.trade_id, "key": node.key, "name": node.name})
+        match_field, match_value = node_identity(node)
+        cypher = f"MERGE (n:{node.label} {{{match_field}: $match_value}}) SET n += $props"
+        await graph.query_cypher(cypher, {"match_value": match_value, "props": props})
 
     for edge in plan.edges:
+        source_field, source_value = node_identity(edge.source)
+        target_field, target_value = node_identity(edge.target)
         cypher = (
-            f"MATCH (a:{edge.source.label} {{trade_id: $source_id, gateway_id: $gateway_id}}), "
-            f"(b:{edge.target.label} {{trade_id: $target_id, gateway_id: $gateway_id}}) "
+            f"MATCH (a:{edge.source.label} {{{source_field}: $source_value}}), "
+            f"(b:{edge.target.label} {{{target_field}: $target_value}}) "
             f"MERGE (a)-[r:{edge.rel_type}]->(b) "
             "SET r.gateway_id = $gateway_id"
         )
         await graph.query_cypher(
             cypher,
             {
-                "source_id": edge.source.trade_id,
-                "target_id": edge.target.trade_id,
+                "source_value": source_value,
+                "target_value": target_value,
                 "gateway_id": gateway_id,
             },
         )
