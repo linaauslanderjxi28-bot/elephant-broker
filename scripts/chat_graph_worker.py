@@ -90,6 +90,24 @@ async def scan(conn: asyncpg.Connection, config: ElephantBrokerConfig, limit: in
     return totals
 
 
+async def _cognify_with_configparser_url_escape(cognee, dataset: str):
+    """Work around Cognee 1.2.2/Alembic URL interpolation for encoded passwords."""
+    from alembic.config import Config
+
+    original = Config.set_section_option
+
+    def escaped_set_section_option(self, section, name, value):
+        if name == "SQLALCHEMY_DATABASE_URI" and isinstance(value, str):
+            value = value.replace("%", "%%")
+        return original(self, section, name, value)
+
+    Config.set_section_option = escaped_set_section_option
+    try:
+        return await cognee.cognify(datasets=[dataset], run_in_background=True)
+    finally:
+        Config.set_section_option = original
+
+
 async def run_one(conn: asyncpg.Connection, config: ElephantBrokerConfig) -> dict[str, Any]:
     async with conn.transaction():
         job = await conn.fetchrow(
@@ -119,7 +137,7 @@ async def run_one(conn: asyncpg.Connection, config: ElephantBrokerConfig) -> dic
 
         await configure_cognee(config.cognee, config.llm, gateway_id=config.gateway.gateway_id)
         await cognee.add(job["fact_text"], dataset_name=dataset)
-        result = await cognee.cognify(datasets=[dataset], run_in_background=True)
+        result = await _cognify_with_configparser_url_escape(cognee, dataset)
         run_id = str(result)
         await conn.execute(
             """
