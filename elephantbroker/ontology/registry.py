@@ -8,6 +8,7 @@ do not reject storage. This keeps backward compatibility while
 surfacing ontology drift. Set ``EB_STRICT_ONTOLOGY=true`` to
 reject unregistered types.
 """
+
 from __future__ import annotations
 
 import json
@@ -39,8 +40,14 @@ ENTITY_TYPES: dict[str, dict[str, Any]] = {
     },
     "ResearchDecision": {
         "required_fields": ["verdict", "status"],
-        "optional_fields": ["reasoning", "confidence", "linked_products", "linked_signals",
-                           "evidence_count", "maturity"],
+        "optional_fields": [
+            "reasoning",
+            "confidence",
+            "linked_products",
+            "linked_signals",
+            "evidence_count",
+            "maturity",
+        ],
         "description": "A research decision connecting signals to actions",
     },
     "RiskAlert": {
@@ -70,8 +77,7 @@ ENTITY_TYPES: dict[str, dict[str, Any]] = {
     },
     "Prospect": {
         "required_fields": ["company"],
-        "optional_fields": ["industry", "source", "contact_name", "email", "phone",
-                           "importing", "status"],
+        "optional_fields": ["industry", "source", "contact_name", "email", "phone", "importing", "status"],
         "description": "A potential overseas buyer",
     },
     "SentimentReport": {
@@ -83,6 +89,31 @@ ENTITY_TYPES: dict[str, dict[str, Any]] = {
         "required_fields": ["name"],
         "optional_fields": ["org_type", "region", "industry"],
         "description": "An organization entity",
+    },
+    "ExporterDemand": {
+        "required_fields": ["company_name", "demand_type"],
+        "optional_fields": ["product", "target_markets", "pain_point", "evidence_quote"],
+        "description": "An evidence-backed demand expressed by a domestic exporter",
+    },
+    "ExpoExhibitor": {
+        "required_fields": ["company_name", "expo_id", "edition"],
+        "optional_fields": ["expo_name", "country", "booth", "provenance_url"],
+        "description": "A company listed in an official exhibition catalog edition",
+    },
+    "HotProductPrediction": {
+        "required_fields": ["keyword", "market"],
+        "optional_fields": ["hs_code", "hot_score", "signal_ids", "run_id"],
+        "description": "A traceable product opportunity prediction",
+    },
+    "SkillIndex": {
+        "required_fields": ["name"],
+        "optional_fields": ["produces", "consumes", "feeds_into", "depends_on"],
+        "description": "A trade-skill capability and dependency descriptor",
+    },
+    "TariffRule": {
+        "required_fields": ["hs_code", "origin_country", "destination_country"],
+        "optional_fields": ["total_rate", "mfn_rate", "preferential_rate", "source"],
+        "description": "A tariff rule for a specific HS code and origin-destination route",
     },
 }
 
@@ -150,13 +181,12 @@ def validate_relation(from_type: str, to_type: str) -> bool:
         return True
     logger.debug(
         "Unregistered relation: %s → %s (allowed: %s)",
-        from_type, to_type,
+        from_type,
+        to_type,
         ", ".join(f"{s}→{t}" for s, t in ALLOWED_RELATIONS),
     )
     if os.environ.get("EB_STRICT_ONTOLOGY") == "true":
-        raise ValueError(
-            f"Relation {from_type} → {to_type} is not in the allowed relation set"
-        )
+        raise ValueError(f"Relation {from_type} → {to_type} is not in the allowed relation set")
     return False
 
 
