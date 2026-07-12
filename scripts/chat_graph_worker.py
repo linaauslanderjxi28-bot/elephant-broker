@@ -1,144 +1,141 @@
 #!/usr/bin/env python3
-"""Asynchronously LLM-extract graphs from high-value trade chat facts.
-
-`scan` reads recently stored FactDataPoint nodes from Neo4j, applies a fail-closed
-trade gate, and appends only eligible facts to PostgreSQL's task ledger.
-`run` processes at most one eligible fact in an isolated Cognee dataset.
-"""
+"""Single-Neo4j asynchronous LLM trade-chat graph extractor (no Cognee cognify)."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import os
-from typing import Any
+import re
+from datetime import UTC, datetime
 
 import asyncpg
 from neo4j import AsyncGraphDatabase
 
-from elephantbroker.runtime.adapters.cognee.config import configure_cognee
-from elephantbroker.runtime.chat_graph_gate import classify_trade_chat
+from elephantbroker.runtime.adapters.llm.client import LLMClient
 from elephantbroker.schemas.config import ElephantBrokerConfig
 
-
-async def scan(conn: asyncpg.Connection, config: ElephantBrokerConfig, limit: int) -> dict[str, int]:
-    driver = AsyncGraphDatabase.driver(
-        config.cognee.neo4j_uri,
-        auth=(config.cognee.neo4j_user, config.cognee.neo4j_password),
-    )
-    try:
-        async with driver.session() as session:
-            result = await session.run(
-                """
-                MATCH (f:FactDataPoint {gateway_id: $gateway_id, scope: 'session'})
-                WHERE f.archived = false
-                RETURN f.eb_id AS fact_id, f.text AS fact_text, f.session_key AS session_key,
-                       coalesce(f.confidence, 0.0) AS confidence, f.decision_domain AS decision_domain
-                ORDER BY f.eb_created_at DESC
-                LIMIT $limit
-                """,
-                gateway_id=config.gateway.gateway_id,
-                limit=limit,
-            )
-            facts = await result.data()
-    finally:
-        await driver.close()
-
-    totals = {"facts": 0, "eligible": 0, "rejected": 0, "deduplicated": 0}
-    for fact in facts:
-        text = str(fact.get("fact_text") or "")
-        decision = classify_trade_chat(
-            text=text,
-            confidence=float(fact.get("confidence") or 0.0),
-            decision_domain=fact.get("decision_domain"),
-        )
-        if decision.status != "eligible":
-            totals["rejected"] += 1
-            continue
-        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        job_id = await conn.fetchval(
-            """
-            INSERT INTO chat_graph_extraction_jobs
-              (fact_id,content_hash,fact_text,session_key,gateway_id,confidence,decision_domain,
-               gate_status,gate_score,gate_reasons)
-            VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,'eligible',$8,$9::jsonb)
-            ON CONFLICT (fact_id,content_hash) DO NOTHING
-            RETURNING id
-            """,
-            fact["fact_id"],
-            content_hash,
-            text,
-            fact.get("session_key"),
-            config.gateway.gateway_id,
-            float(fact.get("confidence") or 0.0),
-            fact.get("decision_domain"),
-            decision.score,
-            json.dumps(decision.reasons),
-        )
-        if job_id is None:
-            totals["deduplicated"] += 1
-            continue
-        await conn.execute(
-            "INSERT INTO chat_graph_extraction_events (job_id,event_type,payload) VALUES ($1,'queued',$2::jsonb)",
-            job_id,
-            json.dumps({"score": decision.score}),
-        )
-        totals["facts"] += 1
-        totals["eligible"] += 1
-    return totals
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "triples": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "predicate": {"type": "string"},
+                    "object": {"type": "string"},
+                    "confidence": {"type": "number"},
+                },
+                "required": ["subject", "predicate", "object", "confidence"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["triples"],
+    "additionalProperties": False,
+}
+SYSTEM = (
+    "Extract only explicit cross-border-trade relations from this chat fact. "
+    "Return JSON only. A triple must have concrete subject and object, an "
+    "UPPER_SNAKE_CASE predicate, and confidence 0..1. Never infer unstated facts. "
+    'Return {"triples":[]} if no reliable explicit relation exists.'
+)
+NAMESPACE = "llm_chat_v1"
 
 
-async def _cognify_with_configparser_url_escape(cognee, dataset: str):
-    """Work around Cognee 1.2.2/Alembic URL interpolation for encoded passwords."""
-    from alembic.config import Config
-
-    original = Config.set_section_option
-
-    def escaped_set_section_option(self, section, name, value):
-        if name == "SQLALCHEMY_DATABASE_URI" and isinstance(value, str):
-            value = value.replace("%", "%%")
-        return original(self, section, name, value)
-
-    Config.set_section_option = escaped_set_section_option
-    try:
-        return await cognee.cognify(datasets=[dataset], run_in_background=True)
-    finally:
-        Config.set_section_option = original
+def key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:180]
 
 
-async def run_one(conn: asyncpg.Connection, config: ElephantBrokerConfig) -> dict[str, Any]:
+async def run_one(conn, config):
     async with conn.transaction():
         job = await conn.fetchrow(
             """
-            SELECT * FROM chat_graph_extraction_jobs WHERE gate_status='eligible'
-            ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
+            SELECT * FROM chat_graph_extraction_jobs
+            WHERE gate_status='eligible'
+            ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1
             """
         )
-        if job is None:
+        if not job:
             return {"status": "idle"}
-        dataset = f"trade-chat-{job['id']}-{job['content_hash'][:12]}"
         await conn.execute(
             """
-            UPDATE chat_graph_extraction_jobs SET gate_status='running', attempt_count=attempt_count+1,
-            started_at=NOW(), cognee_dataset=$2 WHERE id=$1
+            UPDATE chat_graph_extraction_jobs
+            SET gate_status='running', attempt_count=attempt_count+1, started_at=NOW()
+            WHERE id=$1
             """,
             job["id"],
-            dataset,
         )
         await conn.execute(
-            "INSERT INTO chat_graph_extraction_events (job_id,event_type,payload) VALUES ($1,'started',$2::jsonb)",
+            """
+            INSERT INTO chat_graph_extraction_events(job_id,event_type,payload)
+            VALUES($1,'started','{}'::jsonb)
+            """,
             job["id"],
-            json.dumps({"dataset": dataset}),
         )
+    client = LLMClient(config.llm)
     try:
-        import cognee
-
-        await configure_cognee(config.cognee, config.llm, gateway_id=config.gateway.gateway_id)
-        await cognee.add(job["fact_text"], dataset_name=dataset)
-        result = await _cognify_with_configparser_url_escape(cognee, dataset)
-        run_id = str(result)
+        parsed = await asyncio.wait_for(
+            client.complete_json(SYSTEM, job["fact_text"], max_tokens=600, json_schema=SCHEMA),
+            timeout=90,
+        )
+        triples = [
+            item
+            for item in parsed.get("triples", [])
+            if item.get("subject")
+            and item.get("object")
+            and re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", str(item.get("predicate", "")))
+            and float(item.get("confidence", 0)) >= 0.80
+        ]
+        driver = AsyncGraphDatabase.driver(
+            config.cognee.neo4j_uri,
+            auth=(config.cognee.neo4j_user, config.cognee.neo4j_password),
+        )
+        try:
+            async with driver.session() as session:
+                await session.run(
+                    """
+                    CREATE CONSTRAINT llm_chat_entity_key IF NOT EXISTS
+                    FOR (n:LLMChatEntity) REQUIRE (n.namespace,n.canonical_key) IS UNIQUE
+                    """
+                )
+                for item in triples:
+                    await session.run(
+                        """
+                        MERGE (s:LLMChatEntity {namespace:$ns,canonical_key:$sk})
+                        ON CREATE SET s.name=$subject,s.created_at=$now
+                        MERGE (o:LLMChatEntity {namespace:$ns,canonical_key:$ok})
+                        ON CREATE SET o.name=$object,o.created_at=$now
+                        MERGE (f:FactDataPoint {eb_id:$fact_id})
+                        MERGE (s)-[r:LLM_CHAT_RELATION {
+                            source_fact_id:$fact_id,predicate:$predicate
+                        }]->(o)
+                        SET r.namespace=$ns,r.confidence=$confidence,
+                            r.extraction_model=$model,r.extracted_at=$now
+                        MERGE (f)-[:LLM_EXTRACTED_FROM {namespace:$ns}]->(s)
+                        MERGE (f)-[:LLM_EXTRACTED_FROM {namespace:$ns}]->(o)
+                        """,
+                        ns=NAMESPACE,
+                        sk=key(item["subject"]),
+                        ok=key(item["object"]),
+                        subject=item["subject"],
+                        object=item["object"],
+                        fact_id=str(job["fact_id"]),
+                        predicate=item["predicate"],
+                        confidence=float(item["confidence"]),
+                        model=config.llm.model,
+                        now=datetime.now(UTC).isoformat(),
+                    )
+        finally:
+            await driver.close()
+        result = {
+            "triples": len(triples),
+            "raw_triples": len(parsed.get("triples", [])),
+            "namespace": NAMESPACE,
+        }
         await conn.execute(
             """
             UPDATE chat_graph_extraction_jobs
@@ -146,50 +143,48 @@ async def run_one(conn: asyncpg.Connection, config: ElephantBrokerConfig) -> dic
             WHERE id=$1
             """,
             job["id"],
-            run_id,
+            json.dumps(result),
         )
         await conn.execute(
-            "INSERT INTO chat_graph_extraction_events (job_id,event_type,payload) VALUES ($1,'completed',$2::jsonb)",
+            """
+            INSERT INTO chat_graph_extraction_events(job_id,event_type,payload)
+            VALUES($1,'completed',$2::jsonb)
+            """,
             job["id"],
-            json.dumps({"dataset": dataset, "cognee_result": run_id}),
+            json.dumps(result),
         )
-        return {"status": "completed", "job_id": job["id"], "dataset": dataset}
+        return {"status": "completed", "job_id": job["id"]} | result
     except Exception as exc:
         await conn.execute(
-            "UPDATE chat_graph_extraction_jobs SET gate_status='failed', last_error=$2 WHERE id=$1",
+            "UPDATE chat_graph_extraction_jobs SET gate_status='failed',last_error=$2 WHERE id=$1",
             job["id"],
             str(exc)[:4000],
         )
         await conn.execute(
-            "INSERT INTO chat_graph_extraction_events (job_id,event_type,payload) VALUES ($1,'failed',$2::jsonb)",
+            """
+            INSERT INTO chat_graph_extraction_events(job_id,event_type,payload)
+            VALUES($1,'failed',$2::jsonb)
+            """,
             job["id"],
             json.dumps({"error": str(exc)[:4000]}),
         )
         raise
+    finally:
+        await client.close()
 
 
-async def main_async(args: argparse.Namespace) -> int:
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config-path", default="/etc/elephantbroker/default.yaml")
+    parser.add_argument("--postgres-dsn", default=os.getenv("EB_POSTGRES_DSN", ""))
+    args = parser.parse_args()
     config = ElephantBrokerConfig.load(args.config_path)
-    conn = await asyncpg.connect(args.postgres_dsn)
+    conn = await asyncpg.connect(args.postgres_dsn or config.postgres_dsn)
     try:
-        result = await scan(conn, config, args.limit) if args.command == "scan" else await run_one(conn, config)
-        print(json.dumps(result, ensure_ascii=False))
+        print(json.dumps(await run_one(conn, config), ensure_ascii=False))
     finally:
         await conn.close()
-    return 0
-
-
-def main() -> int:
-    p = argparse.ArgumentParser()
-    p.add_argument("command", choices=("scan", "run"))
-    p.add_argument("--limit", type=int, default=100)
-    p.add_argument("--postgres-dsn", default=os.getenv("EB_POSTGRES_DSN", ""))
-    p.add_argument("--config-path", default=None)
-    args = p.parse_args()
-    if not args.postgres_dsn:
-        p.error("EB_POSTGRES_DSN is required")
-    return asyncio.run(main_async(args))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    asyncio.run(main())
