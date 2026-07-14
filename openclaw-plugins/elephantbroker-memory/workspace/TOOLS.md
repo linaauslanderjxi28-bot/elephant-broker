@@ -43,7 +43,7 @@
   **`session_goals_list`** — View the full goal tree with IDs, status, blockers, sub-goals, and confidence.
     Always call this first before creating goals to avoid duplicates.
 
-  **`goal_create`** — Create a goal or sub-task with optional scope (session, actor, team, organization, global).
+  **`goal_create`** — Create a session goal or sub-task (always session-scoped; no `scope` parameter — persistent goals are created via admin tools only).
     Break complex work into sub-goals using parent_goal_id.
 
   **`session_goals_update_status`** — Mark goal as completed, paused, or abandoned.

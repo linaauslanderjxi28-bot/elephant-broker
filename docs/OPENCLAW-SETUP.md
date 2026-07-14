@@ -194,7 +194,7 @@ Phase 5 adds 9 new tools to the MemoryPlugin (5 session goal management + 4 proc
 | Tool | Description | Parameters |
 |------|-------------|------------|
 | `session_goals_list` | View the full goal tree with IDs, status, blockers, sub-goals, confidence | None |
-| `session_goals_create` | Create a session goal or sub-task | `title` (required), `description`, `parent_goal_id`, `success_criteria[]` |
+| `goal_create` | Create a session goal or sub-task (always session-scoped; no `scope` param) | `title` (required), `description`, `parent_goal_id`, `success_criteria[]` |
 | `session_goals_update_status` | Complete, pause, or abandon a goal | `goal_id` (required), `status` (required: completed/paused/abandoned), `evidence` |
 | `session_goals_add_blocker` | Report an obstacle on a goal | `goal_id` (required), `blocker` (required) |
 | `session_goals_progress` | Record meaningful progress | `goal_id` (required), `evidence` (required) |
@@ -228,9 +228,10 @@ but it never creates root goals on its own.
   Always call this first before creating goals to avoid duplicates.
   Returns all goals with their IDs (needed for other tools), status, blockers, and sub-goals.
 
-**`session_goals_create`** — Create a goal or sub-task
+**`goal_create`** — Create a session goal or sub-task
   You set the direction. Break complex work into sub-goals using parent_goal_id
   (get the ID from session_goals_list). Each sub-goal gets tracked and scored independently.
+  Always session-scoped — there is no `scope` parameter; persistent goals are created via admin tools only.
   Example: Create "Fix JWT token expiry" as a sub-goal of "Fix login bug"
 
 **`session_goals_update_status`** — Mark goal as completed, paused, or abandoned
@@ -313,7 +314,7 @@ When you detect a repeatable multi-step pattern in your work:
 
 The agent is the planner. The extraction system is the scorekeeper.
 
-- Root goals are ONLY created by explicit agent action via `session_goals_create`
+- Root goals are ONLY created by explicit agent action via `goal_create` (always session-scoped; no `scope` parameter — persistent goals are created via admin tools only)
 - The extraction system NEVER creates root goals from conversation
 - Sub-goals can be created by the agent (explicit) or by extraction (detected sub-task under existing parent)
 - Status changes (completed, blocked, progressed, abandoned) can come from either the agent (explicit tool use) or extraction (automatic detection)
@@ -721,6 +722,7 @@ Edit `~/.openclaw/workspace/TOOLS.md` — add the ElephantBroker tool documentat
 EB tools to document (24 total):
 - 5 memory: `memory_store`, `memory_search`, `memory_get`, `memory_update`, `memory_forget`
 - 5 session goals: `session_goals_list`, `goal_create`, `session_goals_update_status`, `session_goals_add_blocker`, `session_goals_progress`
+  > **Alignment note:** document `goal_create` as **always session-scoped** — it takes no `scope` parameter; persistent goals are created via admin tools only. This must match the `goal_create` entries in the TOOLS.MD Additions block above, the AGENTS.MD Goal Lifecycle note, and the reference template below — do not re-introduce a `scope` argument.
 - 4 procedures: `procedure_create`, `procedure_activate`, `procedure_complete_step`, `procedure_session_status`
   > **Migration note (R2-P2.1, #1146):** `POST /procedures/` now requires either `activation_modes: [...]` (non-empty) OR `is_manual_only: true`. The default (`is_manual_only: false` + empty `activation_modes`) returns 422. The TS memory plugin's `procedures.create` defaults `is_manual_only: true` automatically (PR #7, H3); direct-API callers must update.
 - 2 artifacts: `artifact_search`, `create_artifact`
