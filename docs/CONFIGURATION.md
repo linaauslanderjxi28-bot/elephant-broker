@@ -441,6 +441,20 @@ enable_trace_ledger: true
 max_concurrent_sessions: 100
 ```
 
+> **Durable trace read-back — the four-flag rule.** To make `/trace` (the dashboard
+> Trace Explorer) read durable history from ClickHouse, set **all four** together:
+> `enable_trace_ledger: false` (read source) + `infra.trace.otel_logs_enabled: true`
+> (write bridge) + `infra.clickhouse.enabled: true` (read-back client) +
+> `infra.otel_endpoint` set (OTLP egress). Miss `otel_logs_enabled` and ClickHouse is
+> never populated → Trace Explorer is silently empty even though every other flag
+> looks right.
+>
+> **Not every panel uses ClickHouse.** Only the **Trace Explorer** (`/trace/*`) and
+> **memory-stats** read ClickHouse; the **Overview, Sessions, Guards, and Profiles**
+> panels always read the in-memory ledger (which is written unconditionally, so it
+> can never be turned off). Overview can therefore diverge from Trace Explorer when
+> only one store has data.
+
 ---
 
 ### Top-Level Parameters (`ElephantBrokerConfig`)
@@ -449,7 +463,7 @@ max_concurrent_sessions: 100
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
 | `default_profile` | `str` | `"coding"` | `EB_DEFAULT_PROFILE` | -- | Which profile (coding/research/managerial/worker/personal_assistant) governs scoring weights, retrieval policy, compaction policy, guard strictness, and autorecall when no profile is specified | Wrong profile name causes fallback or error at bootstrap; wrong profile type yields suboptimal scoring weights and retrieval behavior | `coding` / `coding` / `coding` (or per-deployment) |
 | `tier` | `BusinessTier` | `BusinessTier.FULL` | `EB_TIER` | enum (`memory_only`/`context_only`/`full`) | Business tier selecting which runtime modules are wired. `memory_only` = MemoryStoreFacade + ingest pipelines only (no working set, no context engine). `context_only` = ContextEngine + working set only (no memory store). `full` = both | Wrong value rejected at `from_yaml()` with `ValidationError` (caught by `elephantbroker config validate`); silent tier mismatch is impossible | `full` / `full` / per-deployment (`memory_only` for memory-only product) |
-| `enable_trace_ledger` | `bool` | `True` | `EB_ENABLE_TRACE_LEDGER` | -- | Selects the /trace **read** source only; never gates writes/export (the in-memory ledger always keeps writing + exporting to OTEL). `true` = /trace reads the in-memory recent ring buffer (dev/testing; lost on restart). `false` = /trace reads durable history back from ClickHouse so timelines/sessions survive restart (requires `clickhouse.enabled`; falls back to the in-memory ledger if ClickHouse is disabled/unavailable, surfacing an honest source indicator) | Setting `false` without ClickHouse deployed = /trace silently falls back to the in-memory ledger (no error, but no durable read-back) | `true` / `true` / `false` (prod, with ClickHouse) |
+| `enable_trace_ledger` | `bool` | `True` | `EB_ENABLE_TRACE_LEDGER` | -- | Selects the /trace **read** source only; never gates writes/export (the in-memory ledger always keeps writing + exporting to OTEL). `true` = /trace reads the in-memory recent ring buffer (dev/testing; lost on restart). `false` = /trace reads durable history back from ClickHouse so timelines/sessions survive restart. **Durable read-back requires ALL of `infra.trace.otel_logs_enabled:true` (write bridge — else ClickHouse is never populated) + `infra.clickhouse.enabled:true` + `infra.otel_endpoint` set.** Falls back to the in-memory ledger only when the ClickHouse client is *unavailable* (disabled/unreachable), NOT when ClickHouse is reachable-but-empty or a query errors | Setting `false` with `otel_logs_enabled:false` = ClickHouse is never written, so /trace read-back is silently empty (the reachable-but-empty case is not caught by the fallback); setting `false` with ClickHouse fully disabled = honest fallback to the in-memory ledger | `true` / `true` / `false` (prod, with ClickHouse) |
 | `max_concurrent_sessions` | `int` | `100` | `EB_MAX_CONCURRENT_SESSIONS` | `ge=1` | Limits concurrent sessions the runtime will accept | Too low causes session rejections under load; too high risks OOM from Redis/Neo4j connection pressure | `10` / `50` / `100`-`500` |
 | `consolidation_min_retention_seconds` | `int` | `172800` (48h) | `EB_CONSOLIDATION_MIN_RETENTION_SECONDS` | `ge=3600` | Minimum age (seconds) a fact must have before consolidation pipeline can decay/archive it | Too low causes premature fact decay (data loss); too high means stale facts linger forever | `3600` / `86400` / `172800` |
 

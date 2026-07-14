@@ -672,6 +672,37 @@ Wired only when the OTEL/ClickHouse/Jaeger/Grafana profile is enabled.
 
 > **Note:** The Jaeger UI (16686) and Grafana UI (13000) ship with **no authentication** and are intended for development use.
 
+#### Enable durable trace history
+
+The observability profile ships the pipes but does **not** enable durable trace
+read-back on its own. To make the dashboard's Trace Explorer read persistent
+history from ClickHouse (instead of the in-memory ring buffer, which is lost on
+restart), set **all four** flags in `/etc/elephantbroker/default.yaml` and restart
+the runtime:
+
+```yaml
+infra:
+  otel_endpoint: "http://localhost:4317"   # OTLP egress to the collector
+  trace:
+    otel_logs_enabled: true                # write bridge: trace events → OTEL logs → ClickHouse
+  clickhouse:
+    enabled: true                          # ClickHouse read-back client
+enable_trace_ledger: false                 # /trace reads ClickHouse, not the ring buffer
+```
+
+The common trap is leaving `otel_logs_enabled: false`: nothing is ever written to
+ClickHouse, so Trace Explorer stays empty even though `enable_trace_ledger: false`
+and `clickhouse.enabled: true` look correct. Verify the write path after restart:
+
+```bash
+curl -s -u default: "http://localhost:8123/" \
+  --data-binary "SELECT count() FROM otel.otel_logs"   # climbs above 0 as events flow
+```
+
+Only events emitted after the restart are stored (no backfill), and the collector's
+exporter TTL is 72h. The Overview / Sessions / Guards panels always read the
+in-memory ledger regardless of these flags.
+
 ## Updating the Runtime
 
 ### DB VM (runtime + HITL)
