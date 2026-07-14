@@ -50,14 +50,20 @@ def key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:180]
 
 
-async def run_one(conn, config):
+async def run_one(conn, config, *, retry_failed: bool = False, max_attempts: int = 3):
+    claim_statuses = ("eligible", "failed") if retry_failed else ("eligible",)
     async with conn.transaction():
         job = await conn.fetchrow(
             """
             SELECT * FROM chat_graph_extraction_jobs
-            WHERE gate_status='eligible'
-            ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1
-            """
+            WHERE gate_status = ANY($1::text[])
+              AND attempt_count < $2
+            ORDER BY CASE gate_status WHEN 'eligible' THEN 0 ELSE 1 END, id
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+            """,
+            claim_statuses,
+            max_attempts,
         )
         if not job:
             return {"status": "idle"}
@@ -134,6 +140,9 @@ async def run_one(conn, config):
         result = {
             "triples": len(triples),
             "raw_triples": len(parsed.get("triples", [])),
+            "rejected_triples": len(parsed.get("triples", [])) - len(triples),
+            "nodes": len({key(item["subject"]) for item in triples} | {key(item["object"]) for item in triples}),
+            "edges": len(triples),
             "namespace": NAMESPACE,
         }
         await conn.execute(
@@ -177,11 +186,23 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-path", default="/etc/elephantbroker/default.yaml")
     parser.add_argument("--postgres-dsn", default=os.getenv("EB_POSTGRES_DSN", ""))
+    parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument("--max-attempts", type=int, default=3)
     args = parser.parse_args()
     config = ElephantBrokerConfig.load(args.config_path)
     conn = await asyncpg.connect(args.postgres_dsn or config.postgres_dsn)
     try:
-        print(json.dumps(await run_one(conn, config), ensure_ascii=False))
+        print(
+            json.dumps(
+                await run_one(
+                    conn,
+                    config,
+                    retry_failed=args.retry_failed,
+                    max_attempts=max(1, args.max_attempts),
+                ),
+                ensure_ascii=False,
+            )
+        )
     finally:
         await conn.close()
 

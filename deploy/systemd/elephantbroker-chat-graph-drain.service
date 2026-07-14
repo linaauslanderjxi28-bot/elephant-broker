@@ -1,0 +1,19 @@
+[Unit]
+Description=ElephantBroker bounded trade-chat graph extraction drain
+After=network-online.target elephantbroker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=elephantbroker
+Group=elephantbroker
+WorkingDirectory=/var/lib/elephantbroker
+EnvironmentFile=/etc/elephantbroker/env
+ExecStart=/opt/elephantbroker/.venv/bin/python /opt/elephantbroker/scripts/drain_chat_graph_queue.py --max-jobs 10 --max-attempts 3 --retry-failed
+TimeoutStartSec=15min
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/elephantbroker /opt/elephantbroker/.venv/lib /var/cache/elephantbroker
+UMask=0027
