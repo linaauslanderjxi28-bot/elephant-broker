@@ -104,7 +104,11 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         try:
             add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
             return self._extract_cognee_data_id(add_result)
-        except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+        except Exception as exc:
+            # Cognee text capture is auxiliary to the typed FactDataPoint
+            # write below. Some raw document chunks begin with HTML/XML and
+            # Cognee can misclassify them as filesystem paths; record the
+            # capture failure but preserve the primary PG/Neo4j/Qdrant write.
             await self._emit_capture_failure(
                 operation=operation,
                 fact_id=fact.id,
