@@ -101,6 +101,17 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         *,
         operation: str,
     ) -> uuid.UUID | None:
+        # Document chunks already persist through add_data_points() below. Sending
+        # them through cognee.add() again is redundant file-I/O/relational work;
+        # it also treats text beginning with `/Sheet...` as a filesystem path.
+        # Keep the primary FactDataPoint (Neo4j + Qdrant) write and deliberately
+        # leave cognee_data_id unset for document-derived facts.
+        if fact.entity_type in {"Document", "Invoice", "FinancialReport", "Contract"}:
+            self._log.debug(
+                "Skipping auxiliary Cognee raw capture for document-derived fact %s",
+                fact.id,
+            )
+            return None
         try:
             add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
             return self._extract_cognee_data_id(add_result)

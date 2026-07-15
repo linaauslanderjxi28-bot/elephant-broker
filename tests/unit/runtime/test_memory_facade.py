@@ -127,6 +127,19 @@ class TestMemoryStoreFacade:
         text = mock_cognee.add.call_args[0][0]
         assert text == "Important fact"
 
+    async def test_store_skips_auxiliary_cognee_add_for_document_fact(self, monkeypatch, mock_add_data_points, mock_cognee):
+        """Document chunks use the primary DataPoint write without raw Cognee ingest."""
+        facade, graph, vector, emb, _ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        fact = make_fact_assertion(text="/Sheet1/A1 : spreadsheet chunk", entity_type="Document")
+
+        await facade.store(fact)
+
+        mock_cognee.add.assert_not_called()
+        dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert dp.cognee_data_id is None
+
     async def test_store_does_not_call_vector_index_embedding(self, monkeypatch, mock_add_data_points, mock_cognee):
         """store() no longer calls VectorAdapter methods directly."""
         facade, graph, vector, emb, _ = self._make()
