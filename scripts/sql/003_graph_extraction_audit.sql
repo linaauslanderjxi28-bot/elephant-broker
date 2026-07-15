@@ -75,3 +75,24 @@ CREATE INDEX IF NOT EXISTS idx_chat_graph_jobs_running_started
 CREATE INDEX IF NOT EXISTS idx_document_graph_jobs_running_started
     ON document_graph_extraction_jobs (started_at)
     WHERE gate_status = 'running';
+
+-- Semantic relations extracted from high-value chats. This is separate from
+-- Cognee's structural `graph_relationship_ledger`, whose UUID node contract is
+-- not suitable for provenance-rich textual triples.
+CREATE TABLE IF NOT EXISTS graph_relationship_audit_v1 (
+    id TEXT PRIMARY KEY,
+    job_id BIGINT NOT NULL REFERENCES chat_graph_extraction_jobs(id) ON DELETE RESTRICT,
+    fact_id UUID NOT NULL,
+    subject TEXT NOT NULL,
+    predicate TEXT NOT NULL,
+    object TEXT NOT NULL,
+    confidence NUMERIC(4,3) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+    extraction_model TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (job_id, predicate, subject, object)
+);
+CREATE INDEX IF NOT EXISTS idx_graph_relation_audit_fact
+    ON graph_relationship_audit_v1 (fact_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_graph_relation_audit_predicate
+    ON graph_relationship_audit_v1 (predicate, created_at DESC);

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -47,7 +48,18 @@ NAMESPACE = "llm_chat_v1"
 
 
 def key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:180]
+    """Return a stable readable entity key, preserving non-Latin text distinctions."""
+    normalized = re.sub(r"\s+", " ", str(value or "").strip().casefold())
+    slug = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+    if slug:
+        return slug[:140]
+    return f"u-{hashlib.sha256(normalized.encode('utf-8')).hexdigest()[:32]}"
+
+
+def ledger_id(job_id: int, predicate: str, subject: str, object_: str) -> str:
+    """Deterministic ID keeps the append-only relation audit idempotent."""
+    material = f"{job_id}\x1f{predicate}\x1f{subject}\x1f{object_}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()[:32]
 
 
 async def run_one(conn, config, *, retry_failed: bool = False, max_attempts: int = 3):
@@ -137,6 +149,25 @@ async def run_one(conn, config, *, retry_failed: bool = False, max_attempts: int
                     )
         finally:
             await driver.close()
+        for item in triples:
+            await conn.execute(
+                """
+                INSERT INTO graph_relationship_audit_v1
+                  (id, job_id, fact_id, subject, predicate, object, confidence,
+                   extraction_model, namespace)
+                VALUES ($1,$2,$3::uuid,$4,$5,$6,$7,$8,$9)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                ledger_id(job["id"], item["predicate"], item["subject"], item["object"]),
+                job["id"],
+                str(job["fact_id"]),
+                item["subject"],
+                item["predicate"],
+                item["object"],
+                float(item["confidence"]),
+                config.llm.model,
+                NAMESPACE,
+            )
         result = {
             "triples": len(triples),
             "raw_triples": len(parsed.get("triples", [])),
