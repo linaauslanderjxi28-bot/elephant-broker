@@ -16,7 +16,8 @@ class TestHermesPluginMetadata(unittest.TestCase):
         plugin_yaml = read_plugin_yaml()
 
         self.assertIn("name: elephantbroker", plugin_yaml)
-        self.assertIn("version: 1.0.0", plugin_yaml)
+        self.assertIn("version: 1.1.0", plugin_yaml)
+        self.assertIn("governed explicit-fact memory provider", plugin_yaml)
         self.assertIn("provider_type: memory", plugin_yaml)
         self.assertIn("hooks:", plugin_yaml)
         self.assertIn("  - system_prompt_block", plugin_yaml)

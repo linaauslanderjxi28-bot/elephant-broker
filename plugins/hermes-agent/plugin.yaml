@@ -1,6 +1,6 @@
 name: elephantbroker
-version: 1.0.0
-description: "ElephantBroker — Memory provider plugin for NousResearch Hermes Agent with session-scoped persistence, semantic search, and fact extraction."
+version: 1.1.0
+description: "ElephantBroker — governed explicit-fact memory provider for NousResearch Hermes Agent; raw turns and tool output are never auto-persisted."
 provider_type: memory
 hooks:
   - system_prompt_block

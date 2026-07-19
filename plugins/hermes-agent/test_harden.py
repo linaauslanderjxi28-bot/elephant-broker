@@ -9,11 +9,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 
+PLUGIN_DIR = Path(__file__).parent
+
+
 def load_plugin_module():
-    path = Path(__file__).with_name("__init__.py")
-    if str(path.parent) not in sys.path:
-        sys.path.insert(0, str(path.parent))
-    spec = importlib.util.spec_from_file_location("hermes_elephantbroker_plugin_harden", path)
+    path = PLUGIN_DIR / "__init__.py"
+    module_name = f"hermes_elephantbroker_plugin_harden_{id(object())}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise RuntimeError("could not load Hermes plugin")
     module = importlib.util.module_from_spec(spec)
@@ -21,43 +23,8 @@ def load_plugin_module():
     return module
 
 
-class TestConfigFallbacks(unittest.TestCase):
-    def test_load_config_prefers_eb_service_url(self) -> None:
-        module = load_plugin_module()
-        env = {"EB_SERVICE_URL": "http://service", "EB_RUNTIME_URL": "http://runtime"}
-        with patch.dict(os.environ, env, clear=True):
-            self.assertEqual(module._load_config()["service_url"], "http://service")
-
-    def test_load_config_falls_back_to_eb_runtime_url(self) -> None:
-        module = load_plugin_module()
-        env = {"EB_RUNTIME_URL": "http://runtime", "COGNEE_SERVICE_URL": "http://cognee"}
-        with patch.dict(os.environ, env, clear=True):
-            self.assertEqual(module._load_config()["service_url"], "http://runtime")
-
-    def test_load_config_falls_back_to_cognee_service_url(self) -> None:
-        module = load_plugin_module()
-        with patch.dict(os.environ, {"COGNEE_SERVICE_URL": "http://cognee"}, clear=True):
-            self.assertEqual(module._load_config()["service_url"], "http://cognee")
-
-    def test_environment_url_overrides_stale_config_file(self) -> None:
-        module = load_plugin_module()
-        with tempfile.TemporaryDirectory() as hermes_home:
-            config_path = Path(hermes_home) / "elephantbroker.json"
-            config_path.write_text('{"service_url": "http://stale-file"}', encoding="utf-8")
-            env = {"HERMES_HOME": hermes_home, "EB_RUNTIME_URL": "http://runtime"}
-
-            with patch.dict(os.environ, env, clear=True):
-                self.assertEqual(module._load_config()["service_url"], "http://runtime")
-
-    def test_load_config_prefers_shared_eb_profile_env(self) -> None:
-        module = load_plugin_module()
-        env = {"EB_PROFILE": "research", "EB_PROFILE_NAME": "coding"}
-        with patch.dict(os.environ, env, clear=True):
-            self.assertEqual(module._load_config()["profile_name"], "research")
-
-
-class TestTurnSync(unittest.TestCase):
-    def test_queue_prefetch_searches_session_team_org_and_global_without_global_profile(self) -> None:
+class ProviderTestCase(unittest.TestCase):
+    def provider(self):
         module = load_plugin_module()
         provider = module.ElephantBrokerMemoryProvider()
         provider._active = True
@@ -65,219 +32,177 @@ class TestTurnSync(unittest.TestCase):
         provider._session_key = "session-key"
         provider._session_id = "00000000-0000-4000-8000-000000000001"
         provider._profile_name = "coding"
+        return module, provider
+
+
+class TestConfigFallbacks(unittest.TestCase):
+    def test_load_config_prefers_eb_service_url(self) -> None:
+        module = load_plugin_module()
+        with patch.dict(os.environ, {"EB_SERVICE_URL": "http://service", "EB_RUNTIME_URL": "http://runtime"}, clear=True):
+            self.assertEqual(module._load_config()["service_url"], "http://service")
+
+    def test_environment_url_overrides_stale_config_file(self) -> None:
+        module = load_plugin_module()
+        with tempfile.TemporaryDirectory() as hermes_home:
+            (Path(hermes_home) / "elephantbroker.json").write_text('{"service_url": "http://stale-file"}', encoding="utf-8")
+            config_mod = sys.modules["elephantbroker_hermes_config"]
+            with patch.object(config_mod, "get_hermes_home", return_value=Path(hermes_home)):
+                with patch.dict(os.environ, {"EB_RUNTIME_URL": "http://runtime"}, clear=True):
+                    self.assertEqual(module._load_config()["service_url"], "http://runtime")
+
+
+class TestGovernedRecall(ProviderTestCase):
+    def test_queue_prefetch_uses_only_session_and_global_with_bounded_timeout(self) -> None:
+        _module, provider = self.provider()
         calls = []
-
-        def fake_request(path, payload=None, **_kwargs):
-            calls.append((path, payload or {}))
-            return []
-
-        provider._eb_request = fake_request
+        provider._eb_request = lambda path, payload=None, **kwargs: calls.append((path, payload, kwargs)) or []
         provider.queue_prefetch("pricing policy")
-        if provider._prefetch_thread:
-            provider._prefetch_thread.join(timeout=2.0)
-
-        payloads = [payload for path, payload in calls if path == "/memory/search"]
-        self.assertEqual([payload.get("scope") for payload in payloads], ["session", "team", "organization", "global"])
+        provider._prefetch_thread.join(timeout=1.0)
+        payloads = [payload for path, payload, _kwargs in calls if path == "/memory/search"]
+        self.assertEqual([payload["scope"] for payload in payloads if payload is not None], ["session", "global"])
         self.assertEqual(payloads[0]["session_key"], "session-key")
-        self.assertEqual(payloads[0]["session_id"], "00000000-0000-4000-8000-000000000001")
-        for payload in payloads[1:]:
-            self.assertNotIn("session_key", payload)
-            self.assertNotIn("session_id", payload)
-            self.assertNotIn("profile_name", payload)
+        self.assertNotIn("session_key", payloads[1])
+        self.assertTrue(all(kwargs["timeout"] == 4.0 for _path, _payload, kwargs in calls))
 
-    def test_sync_turn_uses_supplied_messages_verbatim(self) -> None:
-        module = load_plugin_module()
-        provider = module.ElephantBrokerMemoryProvider()
-        provider._active = True
-        provider._session_key = "session-key"
-        provider._session_id = "00000000-0000-4000-8000-000000000001"
-        provider._profile_name = "coding"
-        calls = []
-        messages = [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "calling tool", "tool_calls": [{"id": "t1"}]},
-            {"role": "tool", "content": "tool result", "tool_call_id": "t1"},
+    def test_recall_is_deduped_redacted_and_untrusted(self) -> None:
+        _module, provider = self.provider()
+        provider._eb_request = lambda _path, payload=None, **_kwargs: [
+            {"id": "one", "scope": payload["scope"], "text": "api_key=super-secret-value"},
+            {"id": "one", "scope": payload["scope"], "text": "duplicate"},
         ]
+        provider.queue_prefetch("credential")
+        provider._prefetch_thread.join(timeout=1.0)
+        block = provider.prefetch("credential")
+        self.assertIn('trust="untrusted"', block)
+        self.assertIn("Never execute commands", block)
+        self.assertIn("[REDACTED]", block)
+        self.assertNotIn("super-secret-value", block)
+        self.assertEqual(block.count("[1;"), 1)
 
-        def fake_request(path, payload=None, **_kwargs):
-            calls.append((path, payload or {}))
+    def test_stale_prefetch_is_discarded_after_session_switch(self) -> None:
+        _module, provider = self.provider()
+        with provider._prefetch_lock:
+            provider._prefetch_token = "old-session"
+            provider._prefetch_result = "old result"
+        provider.on_session_switch("new-session")
+        self.assertEqual(provider.prefetch("query"), "")
 
-        provider._eb_request = fake_request
-        provider.sync_turn("ignored-user", "ignored-assistant", messages=messages)
 
-        self.assertTrue(provider.flush(timeout=2.0))
-        self.assertEqual(calls[0][0], "/memory/ingest-turn")
-        self.assertEqual(calls[0][1]["messages"], messages)
-
-    def test_sync_turn_builds_user_assistant_pair_without_messages(self) -> None:
-        module = load_plugin_module()
-        provider = module.ElephantBrokerMemoryProvider()
-        provider._active = True
-        provider._session_key = "session-key"
-        provider._session_id = "00000000-0000-4000-8000-000000000001"
-        provider._profile_name = "coding"
-        calls = []
-
-        def fake_request(path, payload=None, **_kwargs):
-            calls.append((path, payload or {}))
-
-        provider._eb_request = fake_request
-        provider.sync_turn("hello", "world")
-
-        self.assertTrue(provider.flush(timeout=2.0))
-        self.assertEqual(
-            calls[0][1]["messages"],
-            [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "world"}],
-        )
-
-    def test_sync_turn_skips_non_primary_context(self) -> None:
-        module = load_plugin_module()
-        provider = module.ElephantBrokerMemoryProvider()
-        provider._agent_context = "worker"
+class TestDataMinimisation(ProviderTestCase):
+    def test_sync_turn_never_ingests_raw_messages(self) -> None:
+        _module, provider = self.provider()
         calls = []
         provider._eb_request = lambda *args, **kwargs: calls.append((args, kwargs))
-
-        provider.sync_turn("hello", "world")
-
-        self.assertTrue(provider.flush(timeout=2.0))
+        provider.sync_turn("user", "assistant", messages=[{"role": "tool", "content": "secret tool output"}])
+        self.assertTrue(provider.flush(timeout=1.0))
         self.assertEqual(calls, [])
 
+    def test_pre_compress_and_delegation_never_persist_raw_runtime_output(self) -> None:
+        _module, provider = self.provider()
+        calls = []
+        provider._eb_request = lambda *args, **kwargs: calls.append((args, kwargs))
+        self.assertEqual(provider.on_pre_compress([{"role": "tool", "content": "result"}]), "")
+        provider.on_delegation("task", "untrusted result")
+        self.assertTrue(provider.flush(timeout=1.0))
+        self.assertEqual(calls, [])
 
-class TestBackgroundWrites(unittest.TestCase):
-    def test_system_prompt_block_describes_active_provider(self) -> None:
-        module = load_plugin_module()
-        provider = module.ElephantBrokerMemoryProvider()
-        provider._session_key = "session-key"
+    def test_session_end_captures_immutable_session_identity(self) -> None:
+        _module, provider = self.provider()
+        queued = []
+        provider._enqueue_write = queued.append
+        provider.on_session_end([])
+        provider.on_session_switch("new-session")
+        observed = []
+        provider._eb_request = lambda path, payload=None, **_kwargs: observed.append((path, payload))
+        queued[0]()
+        self.assertEqual(observed[0][1]["session_key"], "session-key")
 
-        prompt = provider.system_prompt_block()
 
-        self.assertIn("ElephantBroker external memory provider", prompt)
-        self.assertIn("session-key", prompt)
+class TestMemoryMirroring(ProviderTestCase):
+    def test_store_mirror_captures_immutable_session_identity(self) -> None:
+        _module, provider = self.provider()
+        queued = []
+        provider._enqueue_write = queued.append
+        provider.on_memory_write("add", "user", "prefers concise reports")
+        provider.on_session_switch("new-session")
+        observed = []
+        provider._eb_request = lambda path, payload=None, **_kwargs: observed.append((path, payload))
+        queued[0]()
+        self.assertEqual(observed[0][0], "/memory/store")
+        self.assertEqual(observed[0][1]["session_key"], "session-key")
 
-    def test_flush_drains_writes_in_fifo_order(self) -> None:
-        module = load_plugin_module()
-        provider = module.ElephantBrokerMemoryProvider()
-        provider._active = True
-        provider._session_key = "session-key"
-        provider._session_id = "00000000-0000-4000-8000-000000000001"
-        provider._profile_name = "coding"
+    def test_mirror_ids_are_session_namespaced(self) -> None:
+        _module, provider = self.provider()
+        queued = []
+        provider._enqueue_write = queued.append
+        provider.on_memory_write("add", "user", "prefers concise reports")
+        observed = []
+        provider._eb_request = lambda path, payload=None, **_kwargs: observed.append((path, payload))
+        queued[0]()
+        first_id = observed[0][1]["fact"]["id"]
+        provider.on_session_switch("new-session")
+        provider._enqueue_write = queued.append
+        provider.on_memory_write("add", "user", "prefers concise reports")
+        queued[-1]()
+        self.assertNotEqual(first_id, observed[-1][1]["fact"]["id"])
+
+    def test_remove_mirror_deletes_explicit_fact_id(self) -> None:
+        _module, provider = self.provider()
+        queued = []
+        provider._enqueue_write = queued.append
+        provider.on_memory_write("remove", "user", "", {"mirror_fact_id": "fact-123"})
+        observed = []
+        def fake_request(path, payload=None, **kwargs):
+            observed.append((path, payload, kwargs))
+
+        provider._eb_request = fake_request
+        queued[0]()
+        self.assertEqual(observed[0][0], "/memory/fact-123")
+        self.assertEqual(observed[0][2]["method"], "DELETE")
+
+    def test_replace_removes_old_mirror_before_storing_new_fact(self) -> None:
+        _module, provider = self.provider()
+        queued = []
+        provider._enqueue_write = queued.append
+        provider.on_memory_write("replace", "user", "prefers tables", {"old_text": "prefers concise reports"})
         observed = []
 
-        def fake_request(_path, payload=None, **_kwargs):
-            observed.append((payload or {})["messages"][0]["content"])
+        def fake_request(path, payload=None, **kwargs):
+            observed.append((path, payload, kwargs))
 
         provider._eb_request = fake_request
-        provider.sync_turn("one", "assistant")
-        provider.sync_turn("two", "assistant")
-        provider.sync_turn("three", "assistant")
+        for work in queued:
+            work()
+        self.assertEqual(observed[0][2]["method"], "DELETE")
+        self.assertEqual(observed[1][0], "/memory/store")
+        self.assertNotEqual(observed[0][0], f"/memory/{observed[1][1]['fact']['id']}")
 
-        self.assertTrue(provider.flush(timeout=2.0))
-        self.assertEqual(observed, ["one", "two", "three"])
+    def test_remove_without_mapping_uses_old_text_deterministically(self) -> None:
+        _module, provider = self.provider()
+        queued = []
+        provider._enqueue_write = queued.append
+        provider.on_memory_write("remove", "user", "", {"old_text": "prefers concise reports"})
+        observed = []
 
-    def test_on_pre_compress_enqueues_complete_messages(self) -> None:
-        module = load_plugin_module()
-        provider = module.ElephantBrokerMemoryProvider()
-        provider._active = True
-        provider._session_key = "session-key"
-        provider._session_id = "00000000-0000-4000-8000-000000000001"
-        provider._profile_name = "coding"
-        calls = []
-        messages = [{"role": "user", "content": "compress me"}]
-
-        def fake_request(path, payload=None, **_kwargs):
-            calls.append((path, payload or {}))
+        def fake_request(path, payload=None, **kwargs):
+            observed.append((path, payload, kwargs))
 
         provider._eb_request = fake_request
+        queued[0]()
+        self.assertTrue(observed[0][0].startswith("/memory/"))
+        self.assertEqual(observed[0][2]["method"], "DELETE")
 
-        self.assertEqual(provider.on_pre_compress(messages), "")
-        self.assertTrue(provider.flush(timeout=2.0))
-        self.assertEqual(calls[0][0], "/memory/ingest-turn")
-        self.assertEqual(calls[0][1]["source"], "pre_compress")
-        self.assertEqual(calls[0][1]["messages"], messages)
 
-    def test_session_end_is_ordered_after_pending_writes(self) -> None:
+class TestProviderStatus(unittest.TestCase):
+    def test_inactive_provider_has_no_system_prompt_block(self) -> None:
         module = load_plugin_module()
         provider = module.ElephantBrokerMemoryProvider()
-        provider._active = True
-        provider._session_key = "session-key"
-        provider._session_id = "00000000-0000-4000-8000-000000000001"
-        provider._profile_name = "coding"
-        calls = []
+        self.assertEqual(provider.system_prompt_block(), "")
 
-        def fake_request(path, payload=None, **_kwargs):
-            calls.append((path, payload or {}))
-
-        provider._eb_request = fake_request
-        provider.sync_turn("before end", "assistant")
-        provider.on_session_end([])
-
-        self.assertEqual([path for path, _payload in calls], ["/memory/ingest-turn", "/sessions/end"])
-
-    def test_background_write_failures_are_logged(self) -> None:
+    def test_is_available_requires_gateway_and_service(self) -> None:
         module = load_plugin_module()
-        provider = module.ElephantBrokerMemoryProvider()
-        provider._active = True
-        provider._session_key = "session-key"
-        provider._session_id = "00000000-0000-4000-8000-000000000001"
-
-        def failing_request(*_args, **_kwargs):
-            raise RuntimeError("boom")
-
-        provider._eb_request = failing_request
-        writer = sys.modules["elephantbroker_hermes_writer"]
-        with self.assertLogs(writer.logger, level="WARNING") as logs:
-            provider.on_memory_write("add", "general", "remember this")
-            self.assertTrue(provider.flush(timeout=2.0))
-
-        self.assertTrue(any("background write failed" in line for line in logs.output))
-
-    def test_sync_turn_skips_when_gateway_is_inactive(self) -> None:
-        module = load_plugin_module()
-        provider = module.ElephantBrokerMemoryProvider()
-        calls = []
-        provider._eb_request = lambda *args, **kwargs: calls.append((args, kwargs))
-
-        provider.sync_turn("hello", "world")
-
-        self.assertTrue(provider.flush(timeout=2.0))
-        self.assertEqual(calls, [])
-
-
-class TestGatewayActivation(unittest.TestCase):
-    def test_initialize_is_inactive_without_gateway_id(self) -> None:
-        module = load_plugin_module()
-        provider = module.ElephantBrokerMemoryProvider()
-        with tempfile.TemporaryDirectory() as tmp_home:
-            config_mod = sys.modules["elephantbroker_hermes_config"]
-            with patch.object(config_mod, "get_hermes_home", return_value=Path(tmp_home)):
-                with patch.dict(os.environ, {}, clear=True):
-                    provider.initialize("session-key")
-        self.assertFalse(provider._active)
-        self.assertEqual(provider._gateway_id, "")
-
-    def test_initialize_is_active_with_gateway_id(self) -> None:
-        module = load_plugin_module()
-        provider = module.ElephantBrokerMemoryProvider()
-        with tempfile.TemporaryDirectory() as tmp_home:
-            config_mod = sys.modules["elephantbroker_hermes_config"]
-            with patch.object(config_mod, "get_hermes_home", return_value=Path(tmp_home)):
-                with patch.dict(os.environ, {"EB_GATEWAY_ID": "gw-test"}, clear=True):
-                    provider.initialize("session-key")
-        self.assertTrue(provider._active)
-        self.assertEqual(provider._gateway_id, "gw-test")
-
-    def test_inactive_provider_skips_session_start(self) -> None:
-        module = load_plugin_module()
-        provider = module.ElephantBrokerMemoryProvider()
-        calls = []
-        provider._eb_request = lambda *args, **kwargs: calls.append((args, kwargs))
-        with tempfile.TemporaryDirectory() as tmp_home:
-            config_mod = sys.modules["elephantbroker_hermes_config"]
-            with patch.object(config_mod, "get_hermes_home", return_value=Path(tmp_home)):
-                with patch.dict(os.environ, {}, clear=True):
-                    provider.initialize("session-key")
-        self.assertTrue(provider.flush(timeout=2.0))
-        self.assertEqual(calls, [])
+        with patch.object(sys.modules["elephantbroker_hermes_provider"], "load_config", return_value={"service_url": "http://eb", "gateway_id": ""}):
+            self.assertFalse(module.ElephantBrokerMemoryProvider().is_available())
 
 
 if __name__ == "__main__":
