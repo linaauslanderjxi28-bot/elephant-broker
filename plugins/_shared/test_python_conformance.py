@@ -85,6 +85,34 @@ def test_antigravity_identity_contract() -> None:
     assert_stable_uuid_contract(module._stable_uuid)
     assert_request_skips_without_gateway(module)
 
+    # Conformance assertion: Verify _plugin_common's _service_url_for_eb priority
+    common = load_module("contract_antigravity_plugin_common", ROOT / "antigravity-cli/scripts/_plugin_common.py")
+    assert_service_url_priority(common._service_url_for_eb)
+
+    # Conformance assertion: Read-only paths like /memory/search must NOT be blocked without gateway ID
+    calls = []
+    class FakeRequest:
+        def __init__(self, *args, **kwargs) -> None:
+            calls.append("request")
+    class FakeResponse:
+        def __enter__(self) -> FakeResponse:
+            return self
+        def __exit__(self, *args) -> None:
+            pass
+        def read(self) -> bytes:
+            calls.append("read")
+            return b"[]"
+    def fake_urlopen(*args, **kwargs) -> FakeResponse:
+        calls.append("urlopen")
+        return FakeResponse()
+
+    with patch.dict(os.environ, {"EB_SERVICE_URL": "http://runtime.test"}, clear=True):
+        with patch.object(module.urllib.request, "Request", FakeRequest):
+            with patch.object(module.urllib.request, "urlopen", fake_urlopen):
+                result = module._eb_request("/memory/search", {"query": "test"}, method="POST")
+    assert result == []
+    assert "urlopen" in calls
+
 
 def test_hermes_identity_contract() -> None:
     module = load_module("contract_hermes_client", ROOT / "hermes-agent/client.py")

@@ -90,6 +90,15 @@ def _default_headers() -> dict[str, str]:
     return headers
 
 
+_WRITE_PATHS = {
+    "/memory/store",
+    "/memory/ingest-turn",
+    "/memory/ingest-messages",
+    "/sessions/start",
+    "/sessions/end",
+}
+
+
 def _eb_request(
     path: str,
     payload: dict | None = None,
@@ -98,9 +107,10 @@ def _eb_request(
     timeout: float = 30.0,
 ):
     """Low-level HTTP helper — mirrors ``_json_http_request`` in plugin_common."""
-    if not _gateway_id():
-        _hook_log("request_skipped_no_gateway_id", {"path": path, "method": method})
-        return None
+    if path in _WRITE_PATHS or method in ("PUT", "PATCH", "DELETE"):
+        if not _gateway_id():
+            _hook_log("write_skipped_no_gateway_id", {"path": path, "method": method})
+            return None
     base = _service_url()
     headers = _default_headers()
     data = json.dumps(payload).encode("utf-8") if payload is not None else None

@@ -32,13 +32,13 @@ import urllib.request
 
 plugin_dir = pathlib.Path(sys.argv[1])
 import os
-service_url = (os.environ.get("COGNEE_SERVICE_URL") or os.environ.get("COGNEE_LOCAL_API_URL") or "http://localhost:8011").strip()
+service_url = (os.environ.get("EB_SERVICE_URL") or os.environ.get("EB_RUNTIME_URL") or os.environ.get("COGNEE_SERVICE_URL") or os.environ.get("COGNEE_LOCAL_API_URL") or "http://localhost:8011").strip()
 api_key = (os.environ.get("COGNEE_API_KEY") or "").strip()
 agent_name = (os.environ.get("COGNEE_AGENT_NAME") or "").strip()
 is_eb = False
 if (os.environ.get("EB_MODE") or "").strip().lower() in ("1", "true", "yes"):
     is_eb = True
-elif ":8420" in service_url:
+elif ":8420" in service_url or "EB_SERVICE_URL" in os.environ or "EB_RUNTIME_URL" in os.environ:
     is_eb = True
 if agent_name:
     if agent_name.endswith("@cognee.agent"):
@@ -160,6 +160,8 @@ fi
 _IS_EB=false
 if [ "${EB_MODE:-}" = "true" ] || [ "${EB_MODE:-}" = "1" ] || [ "${EB_MODE:-}" = "yes" ]; then
     _IS_EB=true
+elif [ -n "${EB_SERVICE_URL:-}" ] || [ -n "${EB_RUNTIME_URL:-}" ]; then
+    _IS_EB=true
 elif echo "${COGNEE_SERVICE_URL:-}" | grep -q ":8420"; then
     _IS_EB=true
 fi
@@ -177,7 +179,7 @@ mode, query, top_k, dataset, session_id, is_eb_str, depth_mode, entity_type = (s
 is_eb = sys.argv[6].lower() == "true"
 depth_mode = sys.argv[7].lower()
 request_timeout = 45 if depth_mode == "deep" else 35
-service_url = (os.environ.get("COGNEE_SERVICE_URL") or os.environ.get("COGNEE_LOCAL_API_URL") or "http://localhost:8011").strip().rstrip("/")
+service_url = (os.environ.get("EB_SERVICE_URL") or os.environ.get("EB_RUNTIME_URL") or os.environ.get("COGNEE_SERVICE_URL") or os.environ.get("COGNEE_LOCAL_API_URL") or "http://localhost:8011").strip().rstrip("/")
 api_key = (os.environ.get("COGNEE_API_KEY") or "").strip()
 agent_name = (os.environ.get("COGNEE_AGENT_NAME") or "").strip()
 

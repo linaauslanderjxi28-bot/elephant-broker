@@ -441,7 +441,7 @@ def sync_lock(owner: str):
 # ── EB adapter delegation ────────────────────────────────────────────
 
 def _service_url_for_eb() -> str:
-    return (os.environ.get("EB_SERVICE_URL") or os.environ.get("COGNEE_SERVICE_URL") or "http://localhost:8420").strip().rstrip("/")
+    return (os.environ.get("EB_SERVICE_URL") or os.environ.get("EB_RUNTIME_URL") or os.environ.get("COGNEE_SERVICE_URL") or "http://localhost:8420").strip().rstrip("/")
 
 
 def _eb_module():
