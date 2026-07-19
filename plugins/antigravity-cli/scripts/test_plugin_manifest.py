@@ -31,7 +31,7 @@ class TestAntigravityManifest(unittest.TestCase):
         for match in re.finditer(r'"timeout"\s*:\s*(\d+)', hooks):
             timeouts.append(int(match.group(1)))
 
-        self.assertEqual(timeouts, [15000, 20000, 30000])
+        self.assertEqual(timeouts, [15000, 5000, 30000])
         self.assertTrue(all(timeout >= 1000 for timeout in timeouts))
 
 

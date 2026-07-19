@@ -18,20 +18,8 @@
           {
             "type": "command",
             "command": "python3 scripts/agy-pre-invocation.py",
-            "timeout": 20000,
+            "timeout": 5000,
             "statusMessage": "Searching ElephantBroker memory..."
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "run_command|invoke_subagent|view_file|write_to_file|replace_file_content|multi_replace_file_content|grep_search|list_dir|read_url_content|search_web",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 scripts/store-to-session.py",
-            "async": true
           }
         ]
       }
@@ -52,14 +40,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 scripts/store-to-session.py --stop",
-            "async": true
-          },
-          {
-            "type": "command",
             "command": "python3 scripts/sync-session-to-graph.py --session-end",
             "timeout": 30000,
-            "statusMessage": "Syncing ElephantBroker memory..."
+            "statusMessage": "Closing ElephantBroker memory session..."
           }
         ]
       }

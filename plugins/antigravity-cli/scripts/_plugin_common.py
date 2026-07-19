@@ -508,14 +508,15 @@ def recall_via_http(
     scope: list[str],
     only_context: bool = True,
     search_type: str | None = None,
-    timeout: float = 60.0,
+    timeout: float = 4.0,
 ) -> list:
+    """Fetch bounded session or global recall for hook injection."""
     eb = _eb_module()
     scope_set = {str(s).lower() for s in (scope or [])}
     if "global" in scope_set and "session" not in scope_set:
-        result = eb.eb_search_global(query, max_results=top_k)
+        result = eb.eb_search_global(query, max_results=top_k, timeout=timeout)
     else:
-        result = eb.eb_search(query, max_results=top_k, session_key=session_id)
+        result = eb.eb_search(query, max_results=top_k, session_key=session_id, scope="session", timeout=timeout)
     return result if isinstance(result, list) else []
 
 

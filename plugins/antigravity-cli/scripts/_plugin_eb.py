@@ -215,7 +215,7 @@ def eb_search(
     scope: str | None = None,
     memory_class: str | None = None,
     auto_recall: bool = False,
-    timeout: float = 60.0,
+    timeout: float = 4.0,
 ) -> list[dict]:
     """Search memory via ``POST /memory/search``.
 
@@ -253,7 +253,7 @@ def eb_search_global(
     session_key: str | None = None,
     memory_class: str | None = None,
     auto_recall: bool = False,
-    timeout: float = 60.0,
+    timeout: float = 4.0,
 ) -> list[dict]:
     payload: dict[str, object] = {
         "query": query,
@@ -286,9 +286,8 @@ def eb_session_start(
 
     Replaces Cognee's ``/api/v1/agents/register``.
     """
-    payload: dict[str, object] = {"session_key": session_key}
-    if session_id:
-        payload["session_id"] = session_id
+    session_id = _stable_uuid(session_key)
+    payload: dict[str, object] = {"session_key": session_key, "session_id": session_id}
     if agent_id:
         payload["agent_id"] = agent_id
     if gateway_short_name:
@@ -310,6 +309,7 @@ def eb_session_end(
 
     Replaces Cognee's ``/api/v1/agents/unregister``.
     """
+    session_id = _stable_uuid(session_key)
     payload: dict[str, object] = {"session_key": session_key, "session_id": session_id, "reason": reason}
     if agent_key:
         payload["agent_key"] = agent_key

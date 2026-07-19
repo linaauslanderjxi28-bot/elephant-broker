@@ -25,7 +25,7 @@ Examples:
 - a long context block from a conversation
 - a chunk of documentation you want the system to absorb
 
-Interactive hook writes are staged locally and flushed through `/memory/ingest-turn` during sync so slow backend store paths do not block the agent. Explicit short fact writes may try `POST /memory/store` first with a short deadline and then fall back to ingest.
+Interactive hook writes are **not** automatic. The PostInvocation hook persists only when the user's prompt explicitly asks to remember something; it redacts common credential patterns and stores a bounded user/assistant pair through `/memory/ingest-turn`. Raw tool outputs, terminal output, file contents, and web pages are never captured by the hook.
 
 ## When to use
 
