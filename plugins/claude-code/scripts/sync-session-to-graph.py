@@ -6,44 +6,30 @@ Runs the integration's explicit session bridge:
   2. Sync graph knowledge back into the session cache for recall
 
 Configuration:
-    Resolves session identity from Cognee endpoints via API auth.
+    Resolves session identity from ElephantBroker runtime state.
 """
 
 import asyncio
 import hashlib
+import importlib
 import json
 import os
 import signal
 import subprocess
 import sys
 import time
-from contextlib import nullcontext
 from pathlib import Path
 
 # Add scripts dir to path for config/_plugin_common imports
 sys.path.insert(0, os.path.dirname(__file__))
-from _plugin_common import (
-    get_session_key,
-    hook_log,
-    http_api_ready,
-    load_resolved,
-    persist_session_cache_to_graph_via_http,
-    resolve_session_key_from_payload,
-    resolve_user,
-    resolved_http_endpoint_auth,
-    set_session_key,
-    sync_lock,
-    unregister_agent_via_http,
-)
-from config import (
-    ensure_cognee_ready,
-    ensure_dataset_ready,
-    get_dataset,
-    get_session_id,
-    load_config,
-    persist_session_cache_to_graph,
-    sync_graph_context_to_session,
-)
+_plugin_common = importlib.import_module("_plugin_common")
+get_session_key = _plugin_common.get_session_key
+hook_log = _plugin_common.hook_log
+load_resolved = _plugin_common.load_resolved
+persist_session_cache_to_graph_via_http = _plugin_common.persist_session_cache_to_graph_via_http
+resolve_session_key_from_payload = _plugin_common.resolve_session_key_from_payload
+set_session_key = _plugin_common.set_session_key
+unregister_agent_via_http = _plugin_common.unregister_agent_via_http
 
 _STATE_DIR = Path(os.environ.get("CLAUDE_PLUGIN_DATA") or Path.home() / ".elephantbroker")
 _WATCHER_PID = _STATE_DIR / "watcher.pid"
@@ -118,9 +104,7 @@ def _claim_final_sync_once() -> bool:
         # No stable identity available; do not risk skipping final sync.
         hook_log("final_sync_once_no_token", {"source": source})
         return True
-
-    digest = hashlib.sha1(token.encode("utf-8")).hexdigest()
-    marker = _FINAL_SYNC_ONCE_DIR / f"{digest}.done"
+    marker = _FINAL_SYNC_ONCE_DIR / f"{hashlib.sha1(token.encode('utf-8')).hexdigest()}.done"
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
@@ -132,9 +116,22 @@ def _claim_final_sync_once() -> bool:
         hook_log("final_sync_once_already_claimed", {"source": source, "marker": str(marker)})
         return False
     except Exception as exc:
-        # On marker failure, prefer proceeding to avoid data loss.
         hook_log("final_sync_once_claim_failed", {"source": source, "error": str(exc)[:200]})
         return True
+
+
+def _release_final_sync_claim() -> None:
+    token, source = _final_sync_identity()
+    if not token:
+        return
+    marker = _FINAL_SYNC_ONCE_DIR / f"{hashlib.sha1(token.encode('utf-8')).hexdigest()}.done"
+    try:
+        marker.unlink(missing_ok=True)
+        hook_log("final_sync_once_released", {"source": source, "marker": str(marker)})
+    except OSError as exc:
+        hook_log("final_sync_once_release_failed", {"source": source, "error": str(exc)[:200]})
+
+    return
 
 
 def _prune_final_sync_markers() -> None:
@@ -190,7 +187,7 @@ def _is_session_end_payload(payload_raw: str) -> bool:
     return event == "SessionEnd" or _contains_session_end(payload)
 
 
-def _load_resolved() -> tuple:
+def _load_resolved() -> tuple[str, str, str, str, bool, bool, str]:
     """
     Load session ID, dataset, user ID,
     agent session name, registration marker, and API key marker.
@@ -199,11 +196,11 @@ def _load_resolved() -> tuple:
     env_session_id = str(os.environ.get("COGNEE_SYNC_SESSION_ID", "") or "").strip()
     env_dataset = str(os.environ.get("COGNEE_SYNC_DATASET", "") or "").strip()
     env_agent_session_name = str(os.environ.get("COGNEE_AGENT_SESSION_NAME", "") or "").strip()
-    env_api_key = str(os.environ.get("COGNEE_API_KEY", "") or "").strip()
     env_service_url = str(os.environ.get("COGNEE_SERVICE_URL", "") or "").strip()
-    resolved_service_url, resolved_api_key = resolved_http_endpoint_auth()
-    env_api_key = env_api_key or resolved_api_key
-    env_service_url = env_service_url or resolved_service_url
+    has_eb_auth = any(
+        str(os.environ.get(name, "") or "").strip()
+        for name in ("EB_AUTH_TOKEN", "EB_AGENT_KEY", "EB_GATEWAY_ID")
+    )
 
     if not session_key:
         hook_log("sync_missing_session_key")
@@ -220,28 +217,26 @@ def _load_resolved() -> tuple:
             data.get("user_id", ""),
             env_agent_session_name or data.get("agent_session_name", ""),
             bool(data.get("registered", False)),
-            bool(env_api_key or data.get("api_key", "")),
+            has_eb_auth,
             session_key,
         )
 
-    config = load_config()
-    fallback_session_id = get_session_id(config)
     fallback_agent_session_name = session_key or ""
     if env_service_url:
         os.environ["COGNEE_SERVICE_URL"] = env_service_url
     return (
-        env_session_id or fallback_session_id,
-        env_dataset or get_dataset(config),
+        env_session_id or session_key or "claude_session",
+        env_dataset or "claude_sessions",
         "",
         env_agent_session_name or fallback_agent_session_name,
         False,
-        bool(env_api_key),
+        has_eb_auth,
         session_key,
     )
 
 
 async def _sync(stop_watcher: bool, unregister_on_finish: bool = False):
-    session_id, dataset, user_id, agent_session_name, was_registered, has_api_key, session_key = (
+    session_id, dataset, user_id, agent_session_name, was_registered, has_eb_auth, session_key = (
         _load_resolved()
     )
     hook_log(
@@ -254,63 +249,21 @@ async def _sync(stop_watcher: bool, unregister_on_finish: bool = False):
         },
     )
 
-    try:
-        if stop_watcher:
-            _stop_idle_watcher()
-            hook_log("sync_stopped_watcher", {"session": session_id, "dataset": dataset})
+    if stop_watcher:
+        _stop_idle_watcher()
+        hook_log("sync_stopped_watcher", {"session": session_id, "dataset": dataset})
 
-        config = load_config()
-        api_mode = http_api_ready()
-        lock = nullcontext(True) if api_mode else sync_lock("sync-session-to-graph")
-        with lock as acquired:
-            if not acquired:
-                hook_log("sync_skipped_lock_busy", {"session": session_id, "dataset": dataset})
-                print("cognee-sync: skipped, another sync is running", file=sys.stderr)
-                return
-
-            if api_mode:
-                wrote = persist_session_cache_to_graph_via_http(dataset, session_id)
-                hook_log(
-                    "sync_bridge_done",
-                    {
-                        "session": session_id,
-                        "dataset": dataset,
-                        "via": "eb_flush",
-                        "wrote": wrote,
-                    },
-                )
-                print(
-                    "cognee-sync: "
-                    f"dataset={dataset} session={session_id} via=eb_flush wrote={wrote}",
-                    file=sys.stderr,
-                )
-                return
-
-            await ensure_cognee_ready(config)
-            user = await resolve_user(user_id)
-            await ensure_dataset_ready(dataset, user)
-            wrote = await persist_session_cache_to_graph(dataset, session_id, user)
-            graph_result = await sync_graph_context_to_session(dataset, session_id, user)
-
-            hook_log(
-                "sync_bridge_done",
-                {
-                    "session": session_id,
-                    "dataset": dataset,
-                    "user_id": str(getattr(user, "id", "")),
-                    "wrote": wrote,
-                    "graph_synced": graph_result.get("synced", 0),
-                },
-            )
-            print(
-                "cognee-sync: "
-                f"dataset={dataset} session={session_id} wrote={wrote} "
-                f"graph_synced={graph_result.get('synced', 0)}",
-                file=sys.stderr,
-            )
-    finally:
-        if unregister_on_finish:
-            if not (was_registered or has_api_key):
+    result = persist_session_cache_to_graph_via_http(dataset, session_id)
+    hook_log(
+        "sync_bridge_done",
+        {"session": session_id, "dataset": dataset, "via": "eb_flush", "status": result.status.value},
+    )
+    print(
+        f"cognee-sync: dataset={dataset} session={session_id} via=eb_flush status={result.status.value}",
+        file=sys.stderr,
+    )
+    if unregister_on_finish and result.terminal_success:
+            if not (was_registered or has_eb_auth):
                 hook_log(
                     "agent_unregister_skipped_no_auth",
                     {"session": session_id, "dataset": dataset},
@@ -335,6 +288,7 @@ async def _sync(stop_watcher: bool, unregister_on_finish: bool = False):
                         "cached_registered": was_registered,
                     },
                 )
+    return result
 
 
 def main():
@@ -395,10 +349,19 @@ def main():
             os.environ.get("COGNEE_SYNC_RETRY_DELAY", str(_DETACHED_RETRY_DELAY_DEFAULT))
         )
 
+    completed_successfully = False
     for attempt in range(1, max(1, attempts) + 1):
         try:
-            asyncio.run(_sync(stop_watcher=False, unregister_on_finish=unregister_on_finish))
-            return
+            final_result = asyncio.run(
+                _sync(stop_watcher=False, unregister_on_finish=unregister_on_finish)
+            )
+            if final_result.terminal_success:
+                completed_successfully = True
+                return
+            hook_log(
+                "sync_failed",
+                {"attempt": attempt, "attempts": attempts, "status": final_result.status.value},
+            )
         except Exception as exc:
             # Non-fatal: session sync failure should not crash Codex.
             hook_log(
@@ -406,9 +369,11 @@ def main():
                 {"attempt": attempt, "attempts": attempts, "error": str(exc)[:300]},
             )
             print(f"cognee-sync: failed ({exc})", file=sys.stderr)
-            if attempt < attempts:
-                hook_log("sync_retry_scheduled", {"attempt": attempt + 1, "delay": retry_delay})
-                time.sleep(retry_delay)
+        if attempt < attempts:
+            hook_log("sync_retry_scheduled", {"attempt": attempt + 1, "delay": retry_delay})
+            time.sleep(retry_delay)
+    if detached_final and not completed_successfully:
+        _release_final_sync_claim()
 
 
 if __name__ == "__main__":

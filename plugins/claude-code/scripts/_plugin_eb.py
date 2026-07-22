@@ -33,7 +33,9 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 
 
@@ -53,6 +55,38 @@ def _stable_uuid(text: str) -> str:
     return str(uuid.UUID(hashlib.sha256(str(text).encode("utf-8")).hexdigest()[:32]))
 
 _PLUGIN_DIR = Path(os.environ.get("CLAUDE_PLUGIN_DATA") or Path.home() / ".elephantbroker")
+
+
+class PersistStatus(str, Enum):
+    FLUSHED = "flushed"
+    EMPTY = "empty"
+    UNCHANGED = "unchanged"
+    LOCK_BUSY = "lock_busy"
+    HEALTH_FAILED = "health_failed"
+    INGEST_FAILED = "ingest_failed"
+    BACKEND_REJECTED = "backend_rejected"
+    ACK_FAILED = "ack_failed"
+
+
+@dataclass(frozen=True, slots=True)
+class PersistResult:
+    status: PersistStatus
+    message_count: int = 0
+
+    @property
+    def terminal_success(self) -> bool:
+        return self.status in {
+            PersistStatus.FLUSHED,
+            PersistStatus.EMPTY,
+            PersistStatus.UNCHANGED,
+        }
+
+    @property
+    def retryable(self) -> bool:
+        return not self.terminal_success
+
+    def __bool__(self) -> bool:
+        return self.status is PersistStatus.FLUSHED
 
 # ── helpers ──────────────────────────────────────────────────────────
 
@@ -418,89 +452,98 @@ def eb_persist_session(
     dataset: str,
     session_id: str,
     timeout: float = 300.0,
-) -> bool:
+) -> PersistResult:
     """Bridge cached session QA/trace into EB via ingest-turn.
 
     ``/memory/ingest-turn`` is the correct entry point in FULL mode.
     ``/memory/ingest-messages`` is gated and silently skips extraction.
     ``/memory/store`` can fail when the embedding path is degraded.
 
-    Returns ``True`` if at least one message batch was accepted.
+    Returns a status-bearing result so callers can distinguish retryable
+    infrastructure failures from legitimate empty/unchanged completion.
     """
     from _plugin_common import (
         _HTTP_BRIDGE_CACHE,
         _HTTP_BRIDGE_STATE,
         _bridge_cache_key,
         _load_json_file,
-        _write_json_file,
+        sync_lock,
     )
 
-    base_url = _service_url()
-    if not base_url:
-        return False
-    try:
-        with urllib.request.urlopen(f"{base_url}/health/", timeout=2.0):
-            pass
-    except Exception:
-        return False
+    with sync_lock("eb-persist-session") as acquired:
+        if not acquired:
+            return PersistResult(PersistStatus.LOCK_BUSY)
 
-    status = eb_memory_status(timeout=3.0)
-    if status and not status.get("embedding_available", False):
+        cache = _load_json_file(_HTTP_BRIDGE_CACHE)
+        key = _bridge_cache_key(dataset, session_id)
+        session_cache = cache.get(key, {}) if isinstance(cache, dict) else {}
+        submitted_qa = list(session_cache.get("qa", []) or [])
+        submitted_trace = list(session_cache.get("trace", []) or [])
+
+        messages: list[dict[str, str]] = []
+        for entry in submitted_qa:
+            question = str(entry.get("question") or "").strip()
+            answer = str(entry.get("answer") or "").strip()
+            if question:
+                messages.append({"role": "user", "content": question})
+            if answer:
+                messages.append({"role": "assistant", "content": answer})
+        for entry in submitted_trace:
+            text = str(entry or "").strip()
+            if text:
+                messages.append({"role": "tool", "content": text})
+
+        if not messages:
+            state = _load_json_file(_HTTP_BRIDGE_STATE)
+            state_key = f"{key}:eb_ingest_turn"
+            status_value = PersistStatus.UNCHANGED if state.get(state_key) else PersistStatus.EMPTY
+            return PersistResult(status_value)
+
+        base_url = _service_url()
+        if not base_url:
+            return PersistResult(PersistStatus.HEALTH_FAILED)
+        try:
+            with urllib.request.urlopen(f"{base_url}/health/", timeout=2.0):
+                pass
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            _hook_log("eb_persist_health_failed", {"error": str(exc)[:200]})
+            return PersistResult(PersistStatus.HEALTH_FAILED)
+
+        try:
+            result = eb_ingest_turn(session_id, messages, session_id=session_id, timeout=timeout)
+        except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            _hook_log("eb_persist_ingest_failed", {"error": str(exc)[:200]})
+            return PersistResult(PersistStatus.INGEST_FAILED, len(messages))
+        if not isinstance(result, dict) or result.get("facts_extracted") is None:
+            return PersistResult(PersistStatus.BACKEND_REJECTED, len(messages))
+
+        current = _load_json_file(_HTTP_BRIDGE_CACHE)
+        current_session = current.get(key, {}) if isinstance(current, dict) else {}
+        current_qa = list(current_session.get("qa", []) or [])
+        current_trace = list(current_session.get("trace", []) or [])
+        if current_qa[: len(submitted_qa)] != submitted_qa or current_trace[: len(submitted_trace)] != submitted_trace:
+            return PersistResult(PersistStatus.ACK_FAILED, len(messages))
+        current_session["qa"] = current_qa[len(submitted_qa) :]
+        current_session["trace"] = current_trace[len(submitted_trace) :]
+        current[key] = current_session
+        try:
+            _atomic_write_json(_HTTP_BRIDGE_CACHE, current)
+        except OSError as exc:
+            _hook_log("eb_persist_ack_failed", {"error": str(exc)[:200]})
+            return PersistResult(PersistStatus.ACK_FAILED, len(messages))
+
         _hook_log(
-            "eb_persist_degraded_status",
-            {"dataset": dataset, "session_id": session_id, "reason": "embedding_unavailable"},
-        )
-
-    cache = _load_json_file(_HTTP_BRIDGE_CACHE)
-    key = _bridge_cache_key(dataset, session_id)
-    session_cache = cache.get(key, {}) if isinstance(cache, dict) else {}
-
-    messages: list[dict[str, str]] = []
-    for entry in session_cache.get("qa", []) or []:
-        question = str(entry.get("question") or "").strip()
-        answer = str(entry.get("answer") or "").strip()
-        if question:
-            messages.append({"role": "user", "content": question})
-        if answer:
-            messages.append({"role": "assistant", "content": answer})
-
-    for entry in session_cache.get("trace", []) or []:
-        text = str(entry or "").strip()
-        if text:
-            messages.append({"role": "tool", "content": text})
-
-    if not messages:
-        _hook_log("eb_persist_skipped_empty", {"dataset": dataset, "session_id": session_id})
-        return False
-
-    state = _load_json_file(_HTTP_BRIDGE_STATE)
-    state_key = f"{_bridge_cache_key(dataset, session_id)}:eb_ingest_turn"
-    digest = hashlib.sha256(
-        json.dumps(messages, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    if state.get(state_key) == digest:
-        _hook_log(
-            "eb_persist_skipped_unchanged",
+            "eb_persist_result",
             {"dataset": dataset, "session_id": session_id, "message_count": len(messages)},
         )
-        return False
+        return PersistResult(PersistStatus.FLUSHED, len(messages))
 
-    result = eb_ingest_turn(session_id, messages, session_id=session_id, timeout=timeout)
-    accepted = isinstance(result, dict) and (result.get("facts_extracted") is not None)
-    if accepted:
-        state[state_key] = digest
-        _write_json_file(_HTTP_BRIDGE_STATE, state)
-    _hook_log(
-        "eb_persist_result",
-        {
-            "dataset": dataset,
-            "session_id": session_id,
-            "message_count": len(messages),
-            "accepted": accepted,
-            "result": result,
-        },
-    )
-    return accepted
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(temporary, path)
 
 
 # ── resolve runtime mode ─────────────────────────────────────────────

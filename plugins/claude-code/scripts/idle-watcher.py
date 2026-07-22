@@ -20,7 +20,6 @@ import os
 import signal
 import sys
 import time
-from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
@@ -87,72 +86,30 @@ async def _improve_once(session_id: str, dataset: str, config: dict) -> bool:
     sys.path.insert(0, os.path.dirname(__file__))
     try:
         from _plugin_common import (  # type: ignore
-            http_api_ready,
-            load_resolved,
             persist_session_cache_to_graph_via_http,
-            resolve_user,
             set_session_key,
-            sync_lock,
         )
 
         session_key = str(config.get("session_key") or "").strip()
         if session_key:
             set_session_key(session_key)
-        api_mode = http_api_ready()
-        lock = nullcontext(True) if api_mode else sync_lock("idle-watcher")
     except Exception as exc:
-        _log("sync_lock_import_error", error=str(exc)[:200])
-        api_mode = False
-        lock = nullcontext(True)
+        _log("bridge_import_error", error=str(exc)[:200])
+        return False
 
-    with lock as acquired:
-        if not acquired:
-            _log("bridge_skipped_lock_busy", session=session_id, dataset=dataset)
-            return False
-
-        try:
-            from config import (  # type: ignore
-                ensure_cognee_ready,
-                ensure_dataset_ready,
-                ensure_identity,
-                persist_session_cache_to_graph,
-                sync_graph_context_to_session,
-            )
-
-            if api_mode:
-                wrote = persist_session_cache_to_graph_via_http(dataset, session_id)
-                _log(
-                    "session_bridge_done",
-                    session=session_id,
-                    dataset=dataset,
-                    via="http_remember",
-                    wrote=wrote,
-                )
-                return True
-
-            await ensure_cognee_ready(config)
-            user_id = str(config.get("user_id") or load_resolved().get("user_id") or "")
-            if not user_id:
-                user_id, _ = await ensure_identity(config)
-
-            user = await resolve_user(user_id) if user_id else None
-            if user:
-                await ensure_dataset_ready(dataset, user)
-                wrote = await persist_session_cache_to_graph(dataset, session_id, user)
-                graph_result = await sync_graph_context_to_session(dataset, session_id, user)
-                _log(
-                    "session_bridge_done",
-                    session=session_id,
-                    dataset=dataset,
-                    user_id=str(user.id),
-                    wrote=wrote,
-                    graph_synced=graph_result.get("synced", 0),
-                )
-            return True
-        except Exception as exc:
-            _log("bridge_error", error=str(exc)[:300])
-            return False
-
+    try:
+        result = persist_session_cache_to_graph_via_http(dataset, session_id)
+        _log(
+            "session_bridge_done",
+            session=session_id,
+            dataset=dataset,
+            via="eb_ingest_turn",
+            status=result.status.value,
+        )
+        return result.terminal_success
+    except Exception as exc:
+        _log("bridge_error", error=str(exc)[:300])
+        return False
 
 async def _main_loop(session_id: str, dataset: str, config: dict) -> None:
     _log(
@@ -165,7 +122,6 @@ async def _main_loop(session_id: str, dataset: str, config: dict) -> None:
     )
     last_improved_at = 0.0
     exit_reason = "loop_complete"
-    bridge_disabled = False
 
     while not _should_stop:
         if _STOPFILE.exists():
@@ -186,8 +142,7 @@ async def _main_loop(session_id: str, dataset: str, config: dict) -> None:
         idle_for = now - ts
         time_since_improve = now - last_improved_at
         if (
-            not bridge_disabled
-            and idle_for >= IDLE_SECONDS
+            idle_for >= IDLE_SECONDS
             and time_since_improve >= IMPROVE_COOLDOWN
         ):
             _log("idle_trigger", idle_for=round(idle_for, 1))
@@ -197,8 +152,7 @@ async def _main_loop(session_id: str, dataset: str, config: dict) -> None:
                 _log("bridge_done")
                 exit_reason = "bridge_complete"
                 break
-            bridge_disabled = True
-            _log("bridge_disabled_after_failure")
+            _log("bridge_retry_after_failure")
 
         await asyncio.sleep(POLL_SECONDS)
 
@@ -207,8 +161,7 @@ async def _main_loop(session_id: str, dataset: str, config: dict) -> None:
 
     ts = _read_activity_ts()
     if (
-        not bridge_disabled
-        and exit_reason in {"signal", "stop_sentinel"}
+        exit_reason in {"signal", "stop_sentinel"}
         and ts
         and ts > last_improved_at
     ):

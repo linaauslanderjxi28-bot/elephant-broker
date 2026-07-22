@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 import urllib.request
 import uuid
 from contextlib import contextmanager
@@ -25,6 +26,8 @@ _ACTIVITY_FILE = _PLUGIN_DIR / "activity.ts"
 _ACTIVITY_LOG = _PLUGIN_DIR / "activity.log"
 _SAVE_COUNTER = _PLUGIN_DIR / "save_counter.json"
 _SYNC_LOCK = _PLUGIN_DIR / "sync.lock"
+_HTTP_BRIDGE_CACHE = _PLUGIN_DIR / "http_bridge_cache.json"
+_HTTP_BRIDGE_STATE = _PLUGIN_DIR / "http_bridge_state.json"
 _PENDING_PROMPTS = _PLUGIN_DIR / "pending_prompts.json"
 _SUBPROCESS_LOG = _PLUGIN_DIR / "subprocess.log"
 
@@ -150,6 +153,49 @@ def _write_json_file(path: Path, data: dict) -> None:
         path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
     except Exception as exc:
         hook_log("json_write_failed", {"path": str(path), "error": str(exc)[:200]})
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _bridge_cache_key(dataset: str, session_id: str) -> str:
+    return f"eb:{dataset}:{session_id}"
+
+
+def append_http_bridge_entry(
+    dataset: str,
+    session_id: str,
+    *,
+    question: str = "",
+    answer: str = "",
+    trace: str = "",
+) -> None:
+    if not dataset or not session_id or not (question or answer or trace):
+        return
+    deadline = time.monotonic() + 5.0
+    while True:
+        with sync_lock("eb-append-session") as acquired:
+            if acquired:
+                cache = _load_json_file(_HTTP_BRIDGE_CACHE)
+                session_cache = cache.setdefault(
+                    _bridge_cache_key(dataset, session_id),
+                    {"qa": [], "trace": []},
+                )
+                if question or answer:
+                    session_cache.setdefault("qa", []).append(
+                        {"question": question, "answer": answer},
+                    )
+                if trace:
+                    session_cache.setdefault("trace", []).append(trace)
+                _atomic_write_json(_HTTP_BRIDGE_CACHE, cache)
+                return
+        if time.monotonic() >= deadline:
+            raise TimeoutError("timed out waiting to stage ElephantBroker memory")
+        time.sleep(0.01)
 
 
 def hook_log(event: str, detail: Optional[dict] = None) -> None:
@@ -534,6 +580,12 @@ def remember_entry_via_http(
         return None
     text = _entry_to_text(entry)
     entry_type = str(entry.get("type") or "entry")
+    question = str(entry.get("question") or "").strip()
+    answer = str(entry.get("answer") or "").strip()
+    if question or answer:
+        append_http_bridge_entry(dataset, session_id, question=question, answer=answer)
+    else:
+        append_http_bridge_entry(dataset, session_id, trace=text)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     hook_log(
         "eb_entry_staged_for_final_sync",
@@ -552,7 +604,7 @@ def persist_session_cache_to_graph_via_http(
     dataset: str,
     session_id: str,
     timeout: float = 300.0,
-) -> bool:
+):
     """Flush staged session cache to EB via ingest-turn."""
     eb = _eb_module()
     return eb.eb_persist_session(dataset, session_id, timeout=timeout)
