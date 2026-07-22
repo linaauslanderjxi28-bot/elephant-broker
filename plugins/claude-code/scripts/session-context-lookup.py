@@ -26,10 +26,9 @@ from _plugin_common import (
     recall_via_http,
     resolve_runtime_mode,
     resolve_session_key_from_payload,
-    resolve_user,
     set_session_key,
 )
-from config import ensure_cognee_ready, get_session_id, load_config
+from config import get_session_id, load_config
 
 TOP_K = 5
 TRUNCATE_ANSWER = 500
@@ -101,45 +100,8 @@ def _has_entry_content(entry: dict) -> bool:
     return any(str(entry.get(field, "") or "").strip() for field in fields)
 
 
-async def _recent_trace_fallback(session_id: str, user_id: str, top_k: int) -> list[dict]:
-    """Return recent trace rows directly when semantic trace recall misses.
-
-    Tool calls are chronological session context, not only semantic context. A
-    casual next prompt often will not match the words in a tool output, but the
-    agent still needs to see the recent tool calls it just made.
-    """
-    try:
-        from cognee.infrastructure.session.get_session_manager import get_session_manager
-
-        sm = get_session_manager()
-        if not sm.is_available or not user_id:
-            return []
-        raw_trace = await sm.get_agent_trace_session(user_id=user_id, session_id=session_id)
-        entries = list(raw_trace or [])[-top_k:]
-    except Exception as exc:
-        hook_log("trace_fallback_error", {"error": str(exc)[:200]})
-        return []
-
-    normalized: list[dict] = []
-    for entry in entries:
-        if hasattr(entry, "model_dump"):
-            entry = entry.model_dump()
-        elif hasattr(entry, "dict"):
-            entry = entry.dict()
-        elif hasattr(entry, "__dict__"):
-            entry = dict(entry.__dict__)
-        if not isinstance(entry, dict):
-            continue
-        entry["source"] = "trace"
-        if _has_entry_content(entry):
-            normalized.append(entry)
-    return normalized
-
-
 async def _run(prompt: str) -> dict | None:
-    config = load_config()
     runtime = resolve_runtime_mode()
-    cloud_mode = runtime["mode"] in ("http", "eb")
     hook_log(
         "mode_decision",
         {
@@ -151,9 +113,6 @@ async def _run(prompt: str) -> dict | None:
             "api_key_present": runtime.get("api_key_present", False),
         },
     )
-    if not cloud_mode:
-        await ensure_cognee_ready(config)
-
     session_id = _load_session_id()
     if not session_id:
         hook_log("no_session_id", {"event": "context_lookup"})
@@ -172,34 +131,16 @@ async def _run(prompt: str) -> dict | None:
         (["graph_context"], None),
         (["graph"], "GRAPH_COMPLETION"),
     ]
-    if not cloud_mode:
-        import cognee
-        from cognee.modules.search.types import SearchType
-
-        user = await resolve_user(_load_user_id())
-
     for scope_list, qtype in scope_specs:
         try:
-            if cloud_mode:
-                part = recall_via_http(
-                    prompt,
-                    session_id=session_id,
-                    top_k=TOP_K,
-                    scope=scope_list,
-                    only_context=True,
-                    search_type=qtype,
-                )
-            else:
-                query_type = SearchType.GRAPH_COMPLETION if qtype == "GRAPH_COMPLETION" else None
-                part = await cognee.recall(
-                    prompt,
-                    session_id=session_id,
-                    top_k=TOP_K,
-                    scope=scope_list,
-                    only_context=True,
-                    query_type=query_type,
-                    user=user,
-                )
+            part = recall_via_http(
+                prompt,
+                session_id=session_id,
+                top_k=TOP_K,
+                scope=scope_list,
+                only_context=True,
+                search_type=qtype,
+            )
             if part:
                 results.extend(part)
         except Exception as exc:
@@ -223,16 +164,6 @@ async def _run(prompt: str) -> dict | None:
         if not _has_entry_content(r):
             continue
         by_source.setdefault(src, []).append(r)
-
-    if not cloud_mode and not by_source.get("trace"):
-        fallback_traces = await _recent_trace_fallback(
-            session_id,
-            _load_user_id(),
-            RECENT_TRACE_FALLBACK_TOP_K,
-        )
-        if fallback_traces:
-            by_source["trace"].extend(fallback_traces)
-            hook_log("trace_fallback_hit", {"count": len(fallback_traces)})
 
     counts = {k: len(v) for k, v in by_source.items()}
     total = sum(counts.values())
