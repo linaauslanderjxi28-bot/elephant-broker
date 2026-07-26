@@ -270,13 +270,17 @@ try:
                 else:
                     result = eb_search(query, "graph", req_max_results=top_k, req_memory_class="semantic", req_entity_type=entity_type)
         else:
-            fast_top_k = min(int(top_k), 2)
+            fast_top_k = max(int(top_k), 3)
             if mode == "session":
-                result = eb_search(query, "session", req_max_results=fast_top_k, include_session_id=False)
+                result = eb_search(query, "session", req_max_results=fast_top_k, include_session_id=True)
             elif mode == "graph":
-                result = eb_search(query, "graph", req_max_results=fast_top_k, include_session_id=False, req_memory_class="semantic", req_entity_type=entity_type)
+                result = eb_search(query, "graph", req_max_results=fast_top_k, include_session_id=True, req_memory_class="semantic", req_entity_type=entity_type)
             else:
-                result = eb_search(query, None, req_max_results=fast_top_k, include_session_id=False, req_entity_type=entity_type)
+                session_result = eb_search(query, "session", req_max_results=fast_top_k, include_session_id=True)
+                if session_result and session_result != []:
+                    result = session_result
+                else:
+                    result = eb_search(query, "graph", req_max_results=fast_top_k, include_session_id=True, req_memory_class="semantic", req_entity_type=entity_type)
     else:
         if mode == "graph":
             result = post_json("/api/v1/recall", {
