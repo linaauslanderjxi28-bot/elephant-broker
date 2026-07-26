@@ -19,7 +19,7 @@ start = eb_session_start('plan_smoke_session', session_id='plan_smoke_session')
 assert isinstance(start, dict)
 assert start.get('session_key') == 'plan_smoke_session'
 
-results = eb_search('plan smoke', session_key='plan_smoke_session', max_results=3)
+results = eb_search('plan smoke', session_key='plan_smoke_session', max_results=3, timeout=10.0)
 assert isinstance(results, list)
 
 end = eb_session_end('plan_smoke_session', session_id='plan_smoke_session', reason='plan-smoke')
