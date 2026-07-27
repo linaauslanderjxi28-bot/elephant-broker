@@ -269,7 +269,47 @@ class TestFlushProtocol(unittest.TestCase):
             self.assertEqual({result.status.value for result in results}, {"flushed", "lock_busy"})
 
 
-class TestSyncRetryProtocol(unittest.TestCase):
+class TestFlushCallerContract(unittest.TestCase):
+    """The watcher and SessionEnd hook must consume one structured EB result."""
+
+    def test_idle_watcher_flushes_through_current_eb_only_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, loaded_plugins(temp_dir) as (common, eb):
+            _stage(common, "Q1")
+            watcher = _load_module("idle-watcher.py", "claude_idle_watcher_contract")
+            with (
+                patch.object(eb.urllib.request, "urlopen"),
+                patch.object(eb, "_eb_request", return_value={"embedding_available": True}),
+                patch.object(eb, "eb_ingest_turn", return_value={"facts_extracted": []}),
+                patch.object(watcher, "_log"),
+            ):
+                completed = asyncio.run(
+                    watcher._improve_once(
+                        "session-1",
+                        "dataset-1",
+                        {"session_key": "session-1"},
+                    )
+                )
+
+            self.assertTrue(completed)
+
+    def test_session_end_sync_returns_structured_flush_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, loaded_plugins(temp_dir) as (common, eb):
+            _stage(common, "Q1")
+            sync = _load_module("sync-session-to-graph.py", "claude_sync_contract")
+            resolved = ("session-1", "dataset-1", "", "agent-session-1", True, True, "session-1")
+            with (
+                patch.object(eb.urllib.request, "urlopen"),
+                patch.object(eb, "_eb_request", return_value={"embedding_available": True}),
+                patch.object(eb, "eb_ingest_turn", return_value={"facts_extracted": []}),
+                patch.object(sync, "_load_resolved", return_value=resolved),
+                patch.object(sync, "hook_log"),
+            ):
+                result = asyncio.run(sync._sync(stop_watcher=False, unregister_on_finish=False))
+
+            self.assertIsInstance(result, eb.PersistResult)
+            self.assertEqual(result.status, eb.PersistStatus.FLUSHED)
+            self.assertTrue(result.terminal_success)
+
     def test_sync_failure_does_not_unregister(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, loaded_plugins(temp_dir) as (_common, eb):
             sync = _load_module("sync-session-to-graph.py", "claude_sync_failure")
@@ -382,7 +422,8 @@ class TestSearchUrlPriority(unittest.TestCase):
             thread.join(timeout=2)
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(_SearchHandler.calls, 1)
+        # Auto mode tries session recall first, then falls back to graph recall on no matches.
+        self.assertEqual(_SearchHandler.calls, 2)
 
 
 class TestModuleIsolation(unittest.TestCase):
