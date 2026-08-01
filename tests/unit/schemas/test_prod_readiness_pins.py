@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -39,6 +39,26 @@ from elephantbroker.schemas.guards import (
 from elephantbroker.schemas.procedure import ProcedureDefinition
 from elephantbroker.schemas.working_set import ScoringWeights
 from tests.fixtures.factories import make_fact_assertion
+
+
+@pytest.fixture(autouse=True)
+def _mock_cognee_apis(monkeypatch):
+    """Mock cognee.add/search and add_data_points in the facade — these tests
+    pin facade warning and decay behavior, not cognee integration."""
+    mock_cognee = MagicMock()
+    mock_cognee.add = AsyncMock(return_value=None)
+    mock_cognee.search = AsyncMock(return_value=[])
+
+    monkeypatch.setattr(
+        "elephantbroker.runtime.memory.facade.cognee", mock_cognee,
+    )
+
+    async def fake_add_data_points(data_points, context=None, custom_edges=None, embed_triplets=False):
+        return list(data_points)
+
+    monkeypatch.setattr(
+        "elephantbroker.runtime.memory.facade.add_data_points", fake_add_data_points,
+    )
 
 
 # ---------------------------------------------------------------------------

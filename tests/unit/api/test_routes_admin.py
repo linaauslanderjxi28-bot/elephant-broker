@@ -309,7 +309,7 @@ class TestTeamMemberDualWrite:
             "team_ids": [],
             "trust_level": 0.5,
             "tags": [],
-            "gateway_id": "test",
+            "gateway_id": "local",
         })
 
         recorded = []
@@ -352,7 +352,7 @@ class TestTeamMemberDualWrite:
             "team_ids": [team_id, other_team],
             "trust_level": 0.5,
             "tags": [],
-            "gateway_id": "test",
+            "gateway_id": "local",
         })
         # delete_relation exists on the mock
         mock_graph.delete_relation = AsyncMock()

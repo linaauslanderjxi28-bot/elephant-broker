@@ -182,7 +182,10 @@ class TestNormalAuthority:
 
 class TestRequireAuthorityDependencies:
     @pytest.mark.asyncio
-    async def test_missing_authority_store_fails_closed(self):
+    async def test_missing_authority_store_fails_closed(self, monkeypatch):
+        # Dev shell sets EB_SKIP_AUTHORITY=true (~/.bashrc) which short-circuits require_authority; force fail-closed path.
+        import elephantbroker.api.routes._authority as auth_mod
+        monkeypatch.setattr(auth_mod, "_SKIP", False)
         request = SimpleNamespace(
             state=SimpleNamespace(actor_id=str(uuid.uuid4()), agent_key="agent"),
             app=SimpleNamespace(state=SimpleNamespace(container=SimpleNamespace(
@@ -197,7 +200,10 @@ class TestRequireAuthorityDependencies:
         assert "authority_store" in exc_info.value.detail
 
     @pytest.mark.asyncio
-    async def test_missing_actor_registry_fails_closed(self):
+    async def test_missing_actor_registry_fails_closed(self, monkeypatch):
+        # Dev shell sets EB_SKIP_AUTHORITY=true (~/.bashrc) which short-circuits require_authority; force fail-closed path.
+        import elephantbroker.api.routes._authority as auth_mod
+        monkeypatch.setattr(auth_mod, "_SKIP", False)
         request = SimpleNamespace(
             state=SimpleNamespace(actor_id=str(uuid.uuid4()), agent_key="agent"),
             app=SimpleNamespace(state=SimpleNamespace(container=SimpleNamespace(

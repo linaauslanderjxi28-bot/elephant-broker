@@ -59,6 +59,7 @@ def mock_container():
     c.config = MagicMock()
     c.config.gateway = MagicMock()
     c.config.gateway.gateway_id = "test"
+    c.config.gateway.auth_token = ""
     c.config.hitl.runtime_auth_token = "runtime-token"
 
     return c

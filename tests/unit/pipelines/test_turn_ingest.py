@@ -372,13 +372,18 @@ class TestTurnIngestPipeline:
         assert store_call[1]["precomputed_embedding"] is not None
 
     @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
-    async def test_cognee_cognify_called(self, mock_cognee):
+    async def test_cognee_ingest_bypassed_facts_stored_via_facade(self, mock_cognee):
+        """Cognee ingest was removed as redundant — facts persist via facade.store."""
         mock_cognee.add = AsyncMock()
         mock_cognee.cognify = AsyncMock()
-        pipe = _make_pipeline()
-        await pipe.run("session:test", [{"role": "user", "content": "This should trigger cognee cognify call"}])
-        mock_cognee.add.assert_called()
-        mock_cognee.cognify.assert_called_once()
+        facade = _make_facade()
+        pipe = _make_pipeline(facade=facade)
+        result = await pipe.run("session:test", [{"role": "user", "content": "This should trigger cognee cognify call"}])
+
+        mock_cognee.add.assert_not_called()
+        mock_cognee.cognify.assert_not_called()
+        assert facade.store.called
+        assert result.facts_stored > 0
 
     @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
     async def test_emits_trace_events(self, mock_cognee):
@@ -395,8 +400,9 @@ class TestTurnIngestPipeline:
         assert "cognee_cognify_completed" in event_types
 
     @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
-    async def test_cognee_cognify_failure_records_error_metric(self, mock_cognee):
-        mock_cognee.add = AsyncMock()
+    async def test_cognee_ingest_bypassed_metrics_record_success(self, mock_cognee):
+        """Cognee ingest is bypassed — the pipeline records success regardless."""
+        mock_cognee.add = AsyncMock(side_effect=RuntimeError("add failed"))
         mock_cognee.cognify = AsyncMock(side_effect=RuntimeError("cognify failed"))
         metrics = MagicMock()
         trace = _make_trace()
@@ -404,13 +410,13 @@ class TestTurnIngestPipeline:
 
         result = await pipe.run(
             "session:test",
-            [{"role": "user", "content": "Should survive cognify failure"}],
+            [{"role": "user", "content": "Should survive cognee failure"}],
         )
 
-        metrics.inc_cognify.assert_called_once_with("error")
+        metrics.inc_cognify.assert_called_once_with("success")
         assert result.facts_stored > 0
         event_types = [call.args[0].event_type for call in trace.append_event.call_args_list]
-        assert TraceEventType.COGNEE_COGNIFY_COMPLETED not in event_types
+        assert TraceEventType.COGNEE_COGNIFY_COMPLETED in event_types
 
     # --- Edge-creation tests (supersession / contradiction) ---
 

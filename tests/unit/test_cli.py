@@ -155,7 +155,9 @@ class TestEbrunCLI:
 class TestConfigLoading:
     """Tests for YAML config loading."""
 
-    def test_from_yaml_loads_file(self, tmp_path):
+    def test_from_yaml_loads_file(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("EB_GATEWAY_ID", raising=False)
+        monkeypatch.delenv("EB_GATEWAY_SHORT_NAME", raising=False)
         from elephantbroker.schemas.config import ElephantBrokerConfig
         yaml_content = "gateway:\n  gateway_id: test-gw\ninfra:\n  log_level: debug\n"
         config_file = tmp_path / "test.yaml"
@@ -194,12 +196,14 @@ class TestConfigLoading:
         config = ElephantBrokerConfig.load()
         assert config.gateway.gateway_id is not None
 
-    def test_default_yaml_loads(self):
+    def test_default_yaml_loads(self, monkeypatch):
+        monkeypatch.delenv("EB_GATEWAY_ID", raising=False)
+        monkeypatch.delenv("EB_GATEWAY_SHORT_NAME", raising=False)
         import os
         from elephantbroker.schemas.config import ElephantBrokerConfig
         yaml_path = os.path.join(os.path.dirname(__file__), "..", "..", "elephantbroker", "config", "default.yaml")
         if os.path.exists(yaml_path):
             config = ElephantBrokerConfig.from_yaml(yaml_path)
-            # default.yaml ships with an empty gateway_id sentinel — operators
-            # MUST set EB_GATEWAY_ID before booting (Bucket A — A3 startup guard).
+
+
             assert config.gateway.gateway_id == ""

@@ -26,18 +26,18 @@ def _ev(
     *,
     actor_ids: list[uuid.UUID] | None = None,
     session_key: str | None = None,
-    gateway_id: str | None = "",
+    gateway_id: str | None = "local",
 ) -> TraceEvent:
     """Build a TraceEvent with a timestamp offset from the current time.
 
-    Defaults gateway_id to "" (empty string) to match the post-Bucket-A
-    GatewayIdentityMiddleware fallback. The app factory wires
-    container.config.gateway.gateway_id (default "") through to the middleware,
-    so seeded events must carry gateway_id="" to match request.state.gateway_id
-    in test-client requests that do not provide an explicit X-EB-Gateway-ID
-    header. Tests that want to exercise cross-gateway isolation pass an explicit
-    gateway_id value to this helper (e.g., "other-gw") to simulate events from a
-    different tenant.
+    Defaults gateway_id to "local" to match the conftest ``container``
+    fixture, which wires ``GatewayConfig(gateway_id="local")`` through the
+    GatewayIdentityMiddleware. Seeded events must carry gateway_id="local"
+    to match ``request.state.gateway_id`` in test-client requests that do
+    not provide an explicit X-EB-Gateway-ID header. Tests that want to
+    exercise cross-gateway isolation pass an explicit gateway_id value to
+    this helper (e.g., "other-gw") to simulate events from a different
+    tenant.
 
     Uses datetime.now(UTC) as base so events are not evicted by
     TraceLedger's TTL-based stale eviction (default 1 hour).
@@ -197,23 +197,24 @@ class TestTraceQueryEndpoint:
 
     async def test_filter_by_gateway_id(self, client, container):
         """Route enforces gateway isolation: only events matching the
-        middleware's gateway_id (post-Bucket-A default "") are returned, even
-        if the caller requests a different gateway_id in the body."""
+        middleware's gateway_id ("local" via the conftest container
+        fixture) are returned, even if the caller requests a different
+        gateway_id in the body."""
         container.trace_ledger._events.clear()
         sid = uuid.uuid4()
         await _seed_events(container, [
-            _ev(TraceEventType.FACT_EXTRACTED, sid, 0, gateway_id=""),
+            _ev(TraceEventType.FACT_EXTRACTED, sid, 0, gateway_id="local"),
             _ev(TraceEventType.FACT_EXTRACTED, sid, 1, gateway_id="other-gw"),
-            _ev(TraceEventType.FACT_EXTRACTED, sid, 2, gateway_id=""),
+            _ev(TraceEventType.FACT_EXTRACTED, sid, 2, gateway_id="local"),
         ])
-        # Even though we ask for "other-gw", the route overrides to the
-        # middleware-provided gateway_id ("" for the default test client).
+
+
         r = await client.post("/trace/query", json={
             "gateway_id": "other-gw",
         })
         assert r.status_code == 200
         data = r.json()
-        # Should return the 2 "" events, not the 1 "other-gw" event
+
         assert len(data) == 2
 
 
@@ -561,15 +562,15 @@ class TestListSessions:
     async def test_list_sessions_gateway_isolation(self, client, container):
         """Verify only current gateway's sessions returned.
 
-        The test client's middleware sets gateway_id to the post-Bucket-A
-        default ("") by default. Events with gateway_id="other-gw" must not
-        appear.
+        The test client's middleware sets gateway_id to "local" (via the
+        conftest container fixture). Events with gateway_id="other-gw"
+        must not appear.
         """
         container.trace_ledger._events.clear()
         sid_local = uuid.uuid4()
         sid_other = uuid.uuid4()
         await _seed_events(container, [
-            _ev(TraceEventType.FACT_EXTRACTED, sid_local, 0, session_key="s1", gateway_id=""),
+            _ev(TraceEventType.FACT_EXTRACTED, sid_local, 0, session_key="s1", gateway_id="local"),
             _ev(TraceEventType.FACT_EXTRACTED, sid_other, 1, session_key="s2", gateway_id="other-gw"),
         ])
         r = await client.get("/trace/sessions")

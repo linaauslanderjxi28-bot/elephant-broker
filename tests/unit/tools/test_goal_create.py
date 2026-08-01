@@ -14,6 +14,7 @@ from elephantbroker.runtime.profiles.org_override_store import OrgOverrideStore
 from elephantbroker.runtime.profiles.registry import ProfileRegistry
 from elephantbroker.runtime.trace.ledger import TraceLedger
 from elephantbroker.schemas.actor import ActorRef, ActorType
+from elephantbroker.schemas.config import ElephantBrokerConfig, GatewayConfig
 from elephantbroker.schemas.tiers import BusinessTier
 
 
@@ -27,6 +28,7 @@ async def goal_client(monkeypatch):
         await org_store.init_db()
 
         c = RuntimeContainer()
+        c.config = ElephantBrokerConfig(gateway=GatewayConfig(gateway_id="local"))
         c.tier = BusinessTier.FULL
         c.trace_ledger = TraceLedger()
         c.profile_registry = ProfileRegistry(c.trace_ledger, org_store=org_store)
