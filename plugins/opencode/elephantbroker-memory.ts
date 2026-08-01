@@ -339,9 +339,9 @@ class EBClient {
 
 export const ElephantBrokerMemory: Plugin = async ({ client } = {}) => {
   const log: EBLogger = (level, message, extra) => {
-    const appLog = client?.app?.log;
-    if (appLog) {
-      void appLog({ body: { service: "elephantbroker", level, message, extra } }).catch(() => {});
+    const app = client?.app;
+    if (app?.log) {
+      void app.log({ body: { service: "elephantbroker", level, message, extra } }).catch(() => {});
       return;
     }
     const line = `[EB] ${message}`;
