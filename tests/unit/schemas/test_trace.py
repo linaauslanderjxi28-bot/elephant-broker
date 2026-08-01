@@ -9,7 +9,7 @@ from elephantbroker.schemas.trace import TraceEvent, TraceEventType, TraceQuery
 
 class TestTraceEventType:
     def test_all_event_types(self):
-        assert len(TraceEventType) == 51  # 44 (Phase 8) + 3 (Phase 9) + 4 (Phase 5 session goals)
+        assert len(TraceEventType) == 52  # 44 (Phase 8) + 3 (Phase 9) + 4 (Phase 5 session goals)
 
     def test_spec_types_present(self):
         expected = {
@@ -26,6 +26,7 @@ class TestTraceEventType:
             "CONTEXT_WINDOW_REPORTED", "SUCCESSFUL_USE_TRACKED", "SUBAGENT_PARENT_MAPPED",
             # Phase 7 additions
             "GUARD_PASSED", "GUARD_NEAR_MISS", "CONSTRAINT_REINJECTED",
+            "PROCEDURE_ACTIVATED",
             "PROCEDURE_COMPLETION_CHECKED",
             # Phase 8 additions
             "PROFILE_RESOLVED", "ORG_CREATED", "TEAM_CREATED",

@@ -38,6 +38,7 @@ class TraceEventType(StrEnum):
     GUARD_PASSED = "guard_passed"
     GUARD_NEAR_MISS = "guard_near_miss"
     CONSTRAINT_REINJECTED = "constraint_reinjected"
+    PROCEDURE_ACTIVATED = "procedure_activated"
     PROCEDURE_COMPLETION_CHECKED = "procedure_completion_checked"
     # Phase 6 additions
     BOOTSTRAP_COMPLETED = "bootstrap_completed"

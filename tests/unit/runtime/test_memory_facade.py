@@ -615,7 +615,9 @@ class TestMemoryStoreFacadePhase4:
         results = await asyncio.wait_for(facade.search("test", scope=Scope.SESSION), timeout=0.2)
 
         assert [result.id for result in results] == [fact.id]
-        graph.query_cypher.assert_awaited_once()
+        # Structural query runs once; the fire-and-forget use-count update
+        # (TODO-5-008) issues a second graph query for cognee_data_ids.
+        assert graph.query_cypher.await_count == 2
 
     async def test_search_computes_freshness_score(self, monkeypatch, mock_add_data_points, mock_cognee):
         facade, graph, *_ = self._make()
@@ -1680,26 +1682,29 @@ class TestMemoryStoreFacadePhase4:
         mc = fact.memory_class.value if hasattr(fact.memory_class, "value") else str(fact.memory_class)
         metrics.inc_facts_stored.assert_called_once_with(mc, "coding")
 
-    async def test_store_failure_emits_failure_status_and_reraises(
+    async def test_store_cognee_add_exception_preserves_store_and_emits_capture_failure(
         self, monkeypatch, mock_add_data_points,
     ):
-        """cognee.add raises → store re-raises + inc_store("store","failure")
-        emitted. Previously this path incremented no metric at all."""
+        """cognee.add raises → fact still stored (preserve-fact contract from
+        "fix: preserve fact store when Cognee capture fails"), capture failure
+        metric emitted, no reraise."""
         from unittest.mock import MagicMock
         facade, *_ = self._make()
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
         metrics = MagicMock()
         facade._metrics = metrics
-        # Mock cognee.add to blow up mid-store.
+
         class _BoomCognee:
             async def add(self, *args, **kwargs):
                 raise RuntimeError("cognee.add exploded")
             async def cognify(self, *args, **kwargs):
                 return None
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", _BoomCognee())
-        with pytest.raises(RuntimeError, match="cognee.add exploded"):
-            await facade.store(make_fact_assertion())
-        metrics.inc_store.assert_called_once_with("store", "failure")
+        result = await facade.store(make_fact_assertion())
+        assert result.id is not None
+        assert len(mock_add_data_points.calls) == 1
+        metrics.inc_cognee_capture_failure.assert_called_once_with("store")
+        metrics.inc_store.assert_called_once_with("store", "success")
 
     async def test_store_dedup_skip_does_not_emit_failure_status(
         self, monkeypatch, mock_add_data_points, mock_cognee,

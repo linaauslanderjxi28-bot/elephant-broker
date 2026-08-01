@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlparse
 
 from elephantbroker.schemas.config import CogneeConfig, LLMConfig
 
-_SUPPORTED_COGNEE_VERSION = "1.2.2"
+_SUPPORTED_COGNEE_VERSION = "1.4.1"
 
 _log = logging.getLogger("elephantbroker.adapters.cognee.config")
 
