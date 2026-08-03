@@ -1,6 +1,6 @@
 """Consolidation pipeline schemas.
 
-Models for the 9-stage consolidation ("sleep") pipeline, stage results,
+Models for the 10-stage consolidation ("sleep") pipeline, stage results,
 configuration, and reporting.
 """
 from __future__ import annotations
@@ -21,6 +21,8 @@ class ConsolidationConfig(BaseModel):
 
     # Stage 1: Cluster Near-Duplicates
     cluster_similarity_threshold: float = Field(default=0.92, ge=0.5, le=1.0)
+
+    conflict_similarity_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
 
     # Stage 2: Canonicalize
     canonicalize_divergence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
