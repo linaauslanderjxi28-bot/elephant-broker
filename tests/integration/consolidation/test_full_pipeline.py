@@ -1,18 +1,14 @@
-"""Integration tests for the full 9-stage consolidation pipeline.
+"""Integration tests for the full 10-stage consolidation pipeline.
 
 These tests use mocked adapters (no Docker required) but exercise the full
 engine orchestration path with real stage instances.
 """
 from __future__ import annotations
 
-import uuid
 from unittest.mock import AsyncMock, MagicMock
-
-import pytest
 
 from elephantbroker.runtime.consolidation.engine import ConsolidationEngine
 from elephantbroker.runtime.trace.ledger import TraceLedger
-from elephantbroker.schemas.consolidation import ConsolidationConfig
 from elephantbroker.schemas.config import ElephantBrokerConfig
 from elephantbroker.schemas.trace import TraceEventType
 from tests.fixtures.factories import make_fact_assertion
@@ -82,6 +78,7 @@ class TestConsolidationEndToEnd:
         assert report.status in ("completed", "partial", "failed")
         assert report.org_id == "org"
         assert report.gateway_id == "test-gw"
+        assert [result.stage for result in report.stage_results] == list(range(1, 11))
 
     async def test_pipeline_produces_report(self):
         engine, _ = _make_engine()

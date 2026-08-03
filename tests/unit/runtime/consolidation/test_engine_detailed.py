@@ -1,7 +1,6 @@
 """Detailed tests for ConsolidationEngine — individual methods and error paths."""
 from __future__ import annotations
 
-import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,9 +11,9 @@ from elephantbroker.runtime.consolidation.engine import (
     ConsolidationEngine,
 )
 from elephantbroker.runtime.trace.ledger import TraceLedger
-from elephantbroker.schemas.consolidation import ConsolidationContext, StageResult
+from elephantbroker.schemas.consolidation import ConsolidationContext
 from elephantbroker.schemas.config import ElephantBrokerConfig
-from elephantbroker.schemas.fact import FactAssertion, FactCategory
+from elephantbroker.schemas.fact import FactAssertion, FactCategory, FactConflict
 from elephantbroker.schemas.trace import TraceEventType
 
 
@@ -75,6 +74,13 @@ class TestEngineRunConsolidation:
         engine = _make_engine(report_store=store)
         await engine.run_consolidation("org", "gw")
         store.save_report.assert_called_once()
+
+    async def test_full_run_reports_all_ten_stages(self):
+        engine = _make_engine()
+
+        report = await engine.run_consolidation("org", "gw")
+
+        assert [result.stage for result in report.stage_results] == list(range(1, 11))
 
 
 class TestEngineRedisLock:
@@ -139,6 +145,61 @@ class TestEngineRunStage:
         ctx = ConsolidationContext(org_id="org", gateway_id="gw")
         result = await engine.run_stage(99, "org", "gw", ctx)
         assert result.details.get("skipped") is True
+
+    def test_registers_conflict_resolution_only_with_embeddings_and_llm(self):
+        without_llm = _make_engine(embedding_service=AsyncMock(), llm_client=None)
+        without_embeddings = _make_engine(embedding_service=None, llm_client=AsyncMock())
+        with_both = _make_engine(embedding_service=AsyncMock(), llm_client=AsyncMock())
+
+        assert 10 not in without_llm._stages
+        assert 10 not in without_embeddings._stages
+        assert with_both._stages[10].__class__.__name__ == "ConflictResolutionStage"
+
+    async def test_stage_ten_exposes_detected_conflicts_without_mutating_facts(self):
+        engine = _make_engine()
+        stage = AsyncMock()
+        fact_a = FactAssertion(text="Alex prefers Vim", category=FactCategory.GENERAL)
+        fact_b = FactAssertion(text="Alex prefers Emacs", category=FactCategory.GENERAL)
+        conflict = FactConflict(
+            fact_a_id=fact_a.id,
+            fact_b_id=fact_b.id,
+            description="The preferred editors are incompatible.",
+            conflict_type="preference",
+        )
+        stage.run.return_value = [conflict]
+        engine._stages = {10: stage}
+        facts = [fact_a, fact_b]
+        ctx = ConsolidationContext(org_id="org", gateway_id="gw", facts=facts)
+
+        result = await engine.run_stage(10, "org", "gw", ctx)
+
+        stage.run.assert_awaited_once_with(facts, "gw", ctx)
+        assert result.name == "conflict_resolution"
+        assert result.items_processed == 2
+        assert result.items_affected == 1
+        assert result.details["conflicts"] == [conflict.model_dump(mode="json")]
+        assert ctx.facts == facts
+
+    async def test_reports_llm_calls_as_per_stage_delta(self):
+        engine = _make_engine()
+        stage = AsyncMock()
+
+        async def use_two_llm_calls(*_args):
+            ctx.llm_calls_used += 2
+            return []
+
+        stage.run.side_effect = use_two_llm_calls
+        engine._stages = {10: stage}
+        ctx = ConsolidationContext(
+            org_id="org",
+            gateway_id="gw",
+            llm_calls_used=4,
+        )
+
+        result = await engine.run_stage(10, "org", "gw", ctx)
+
+        assert ctx.llm_calls_used == 6
+        assert result.llm_calls_made == 2
 
 
 class TestEngineGetReport:

@@ -1,6 +1,6 @@
-"""ConsolidationEngine — 9-stage 'sleep' pipeline for memory consolidation.
+"""ConsolidationEngine — 10-stage 'sleep' pipeline for memory consolidation.
 
-Orchestrates all 9 stages, manages Redis locking, stores reports, emits
+Orchestrates all 10 stages, manages Redis locking, stores reports, emits
 trace events and metrics. Scoped per (org_id, gateway_id) call — one
 engine instance serves all gateways via the API route.
 
@@ -59,6 +59,7 @@ _STAGE_NAMES = {
     7: "refine_procedures",
     8: "verification_gaps",
     9: "recompute_salience",
+    10: "conflict_resolution",
 }
 
 
@@ -71,7 +72,7 @@ class ConsolidationAlreadyRunningError(Exception):
 
 
 class ConsolidationEngine(IConsolidationEngine):
-    """9-stage consolidation pipeline orchestrator."""
+    """10-stage consolidation pipeline orchestrator."""
 
     def __init__(
         self,
@@ -213,13 +214,20 @@ class ConsolidationEngine(IConsolidationEngine):
         except Exception:
             pass
 
+        try:
+            from elephantbroker.runtime.consolidation.stages.conflict_resolution import ConflictResolutionStage
+            if self._embeddings and self._llm:
+                stages[10] = ConflictResolutionStage(self._embeddings, self._llm, consolidation_cfg)
+        except Exception:
+            pass
+
         return stages
 
     @traced
     async def run_consolidation(
         self, org_id: str, gateway_id: str, profile_id: str | None = None,
     ) -> ConsolidationReport:
-        """Run the full 9-stage consolidation pipeline.
+        """Run the full 10-stage consolidation pipeline.
 
         Scoped to (org_id, gateway_id) pair. Protected by Redis distributed lock.
         """
@@ -284,7 +292,7 @@ class ConsolidationEngine(IConsolidationEngine):
             )
 
             # 7. Run stages 1-9 sequentially
-            for stage_num in range(1, 10):
+            for stage_num in range(1, 11):
                 stage_result = await self._run_single_stage(stage_num, gateway_id, context, profile, report)
                 context.stage_results.append(stage_result)
                 report.stage_results.append(stage_result)
@@ -377,6 +385,7 @@ class ConsolidationEngine(IConsolidationEngine):
         stage_name = _STAGE_NAMES.get(stage_num, f"stage_{stage_num}")
         t0 = time.monotonic()
         result = StageResult(stage=stage_num, name=stage_name)
+        llm_calls_before = context.llm_calls_used
 
         stage = self._stages.get(stage_num)
         if not stage:
@@ -397,7 +406,6 @@ class ConsolidationEngine(IConsolidationEngine):
                     context.facts = reloaded_facts
                 result.items_processed = len(context.clusters)
                 result.items_affected = len(canon_results) if isinstance(canon_results, list) else 0
-                result.llm_calls_made = context.llm_calls_used
 
             elif stage_num == 3:
                 strengthen_results = await stage.run(context.facts, gateway_id)
@@ -431,7 +439,6 @@ class ConsolidationEngine(IConsolidationEngine):
             elif stage_num == 7:
                 suggestions = await stage.run(gateway_id, context)
                 result.items_affected = len(suggestions)
-                result.llm_calls_made = context.llm_calls_used
                 # Store suggestions + metrics
                 if self._report_store:
                     for s in suggestions:
@@ -449,12 +456,19 @@ class ConsolidationEngine(IConsolidationEngine):
             elif stage_num == 9:
                 await self._run_stage_9(context, profile, gateway_id, result)
 
+            elif stage_num == 10:
+                conflicts = await stage.run(context.facts, gateway_id, context)
+                result.items_processed = len(context.facts)
+                result.items_affected = len(conflicts)
+                result.details["conflicts"] = [conflict.model_dump(mode="json") for conflict in conflicts]
+
         except Exception as exc:
             result.details["error"] = str(exc)
             self._log.warning("Stage %d (%s) failed: %s", stage_num, stage_name, exc, exc_info=True)
             if report.status != "failed":
                 report.status = "partial"
 
+        result.llm_calls_made = context.llm_calls_used - llm_calls_before
         result.duration_ms = int((time.monotonic() - t0) * 1000)
 
         # Emit stage completed trace event
