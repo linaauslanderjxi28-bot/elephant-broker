@@ -67,6 +67,6 @@ TRACE_EVENT_DESCRIPTIONS: dict[str, str] = {
     "session_goal_progress": "Session goal progress note — incremental progress recorded",
     # Phase 9
     "consolidation_started": "Consolidation (sleep) pipeline started for gateway",
-    "consolidation_stage_completed": "Single consolidation stage completed (1 of 9)",
-    "consolidation_completed": "Full consolidation pipeline completed (all 9 stages)",
+    "consolidation_stage_completed": "Single consolidation stage completed (1 of 10)",
+    "consolidation_completed": "Full consolidation pipeline completed (all 10 stages)",
 }

@@ -11,7 +11,7 @@ from elephantbroker.schemas.consolidation import (
 
 
 class IConsolidationEngine(ABC):
-    """9-stage 'sleep' pipeline for memory consolidation."""
+    """10-stage 'sleep' pipeline for memory consolidation."""
 
     @abstractmethod
     async def run_consolidation(
