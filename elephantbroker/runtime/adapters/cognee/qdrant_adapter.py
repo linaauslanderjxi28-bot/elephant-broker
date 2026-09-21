@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from uuid import UUID
 
 from cognee.infrastructure.databases.exceptions import MissingQueryParameterError
@@ -40,6 +41,7 @@ class QdrantAdapter(VectorDBInterface):
         embedding_engine,
         database_name: str = "",
         qdrant_path: str | None = None,
+        **kwargs: Any,
     ) -> None:
         self.url = url
         self.api_key = api_key
