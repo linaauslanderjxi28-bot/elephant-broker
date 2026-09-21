@@ -44,7 +44,7 @@ logger = logging.getLogger("elephantbroker.memory.facade")
 
 _FACTS_COLLECTION = "FactDataPoint_text"
 _DEDUP_EMBED_TIMEOUT_SECONDS = 5.0
-_FACADE_GRAPH_COMPLETION_TIMEOUT_SECONDS = 8.0
+_FACADE_GRAPH_COMPLETION_TIMEOUT_SECONDS = 15.0  # Allow graph completion up to 15s before falling back to direct vector search
 
 
 class DedupSkipped(Exception):  # noqa: N818 - public skip exception kept for compatibility.
@@ -354,7 +354,10 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             self._min_score_warned = True
         results: dict[str, FactAssertion] = {}
 
-        # Stage 1: Semantic — Cognee graph-aware search
+
+        # Stage 1: Semantic — Cognee graph-aware search. Best-effort: facts without
+        # Entity nodes (e.g. post-cognify-removal stores) are invisible to graph
+        # completion, so Stage 2 always runs to cover them.
         try:
             cognee_hits = await asyncio.wait_for(
                 cognee.search(
@@ -381,7 +384,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         except Exception as exc:
             exc_type = type(exc).__name__
             self._log.warning(
-                "facade.search Stage 1 (semantic) failed — falling back to direct vector search "
+                "facade.search Stage 1 (semantic) failed — continuing with direct vector search "
                 "(query=%r, exc=%s: %s)",
                 query[:80], exc_type, exc,
             )
@@ -404,42 +407,45 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     },
                 )
             )
-            # Fall back to direct Qdrant vector search
-            try:
-                embedding = await asyncio.wait_for(
-                    self._embeddings.embed_text(query), timeout=10.0,
-                )
-                vector_hits = await self._vector.search_similar(
-                    _FACTS_COLLECTION, embedding, top_k=max_results,
-                )
-                for r in vector_hits:
-                    _payload = r.payload if hasattr(r, "payload") else (r if isinstance(r, dict) else {})
-                    _eb_id = _payload.get("eb_id") or (r.id if hasattr(r, "id") else None)
-                    if not _eb_id:
-                        continue
-                    entity = await self._graph.get_entity(_eb_id)
-                    if entity is None:
-                        continue
-                    props = clean_graph_props(entity)
-                    dp = FactDataPoint(**props)
-                    fact = dp.to_schema()
-                    if not self._matches_search_filters(
-                        fact,
-                        scope=scope,
-                        actor_id=actor_id,
-                        memory_class=memory_class,
-                        session_key=session_key,
-                        entity_type=entity_type,
-                        session_id=session_id,
-                        caller_gateway_id=caller_gateway_id,
-                    ):
-                        continue
-                    results[str(fact.id)] = fact
-            except Exception as vec_exc:
-                self._log.warning(
-                    "facade.search vector fallback also failed — structural-only results "
-                    "(exc=%s: %s)", type(vec_exc).__name__, vec_exc,
-                )
+
+        # Stage 2: direct Qdrant vector search. Always runs (not just on Stage 1
+        # failure) so freshly stored facts without Entity graph nodes remain
+        # semantically retrievable. Results merge with Stage 1 by fact id.
+        try:
+            embedding = await asyncio.wait_for(
+                self._embeddings.embed_text(query), timeout=10.0,
+            )
+            vector_hits = await self._vector.search_similar(
+                _FACTS_COLLECTION, embedding, top_k=max_results,
+            )
+            for r in vector_hits:
+                _payload = r.payload if hasattr(r, "payload") else (r if isinstance(r, dict) else {})
+                _eb_id = _payload.get("eb_id") or (r.id if hasattr(r, "id") else None)
+                if not _eb_id:
+                    continue
+                entity = await self._graph.get_entity(_eb_id)
+                if entity is None:
+                    continue
+                props = clean_graph_props(entity)
+                dp = FactDataPoint(**props)
+                fact = dp.to_schema()
+                if not self._matches_search_filters(
+                    fact,
+                    scope=scope,
+                    actor_id=actor_id,
+                    memory_class=memory_class,
+                    session_key=session_key,
+                    entity_type=entity_type,
+                    session_id=session_id,
+                    caller_gateway_id=caller_gateway_id,
+                ):
+                    continue
+                results[str(fact.id)] = fact
+        except Exception as vec_exc:
+            self._log.warning(
+                "facade.search vector search failed — structural-only results "
+                "(exc=%s: %s)", type(vec_exc).__name__, vec_exc,
+            )
         cypher, params = self._build_structural_query(
             query=query,
             scope=scope, actor_id=actor_id, memory_class=memory_class,

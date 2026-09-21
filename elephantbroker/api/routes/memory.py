@@ -30,7 +30,7 @@ logger = logging.getLogger("elephantbroker.api.routes.memory")
 
 router = APIRouter()
 
-_MEMORY_SEARCH_TIMEOUT_SECONDS = 25.0
+_MEMORY_SEARCH_TIMEOUT_SECONDS = 35.0
 
 
 # --- Request/Response Models ---
