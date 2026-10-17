@@ -98,15 +98,15 @@ async def _improve_once(session_id: str, dataset: str, config: dict) -> bool:
         return False
 
     try:
-        result = persist_session_cache_to_graph_via_http(dataset, session_id)
+        ok = bool(persist_session_cache_to_graph_via_http(dataset, session_id))
         _log(
             "session_bridge_done",
             session=session_id,
             dataset=dataset,
             via="eb_ingest_turn",
-            status=result.status.value,
+            status="completed" if ok else "failed",
         )
-        return result.terminal_success
+        return ok
     except Exception as exc:
         _log("bridge_error", error=str(exc)[:300])
         return False

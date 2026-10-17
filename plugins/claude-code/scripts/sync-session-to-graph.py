@@ -253,16 +253,17 @@ async def _sync(stop_watcher: bool, unregister_on_finish: bool = False):
         _stop_idle_watcher()
         hook_log("sync_stopped_watcher", {"session": session_id, "dataset": dataset})
 
-    result = persist_session_cache_to_graph_via_http(dataset, session_id)
+    synced_ok = bool(persist_session_cache_to_graph_via_http(dataset, session_id))
+    status = "completed" if synced_ok else "failed"
     hook_log(
         "sync_bridge_done",
-        {"session": session_id, "dataset": dataset, "via": "eb_flush", "status": result.status.value},
+        {"session": session_id, "dataset": dataset, "via": "eb_flush", "status": status},
     )
     print(
-        f"cognee-sync: dataset={dataset} session={session_id} via=eb_flush status={result.status.value}",
+        f"cognee-sync: dataset={dataset} session={session_id} via=eb_flush status={status}",
         file=sys.stderr,
     )
-    if unregister_on_finish and result.terminal_success:
+    if unregister_on_finish and synced_ok:
             if not (was_registered or has_eb_auth):
                 hook_log(
                     "agent_unregister_skipped_no_auth",
@@ -275,7 +276,7 @@ async def _sync(stop_watcher: bool, unregister_on_finish: bool = False):
                         "agent_unregister_skipped_no_session_name",
                         {"session": session_id, "dataset": dataset},
                     )
-                    return
+                    return synced_ok
                 ok, active = unregister_agent_via_http(agent_session_name=unregister_name)
                 hook_log(
                     "agent_unregister_result",
@@ -288,7 +289,7 @@ async def _sync(stop_watcher: bool, unregister_on_finish: bool = False):
                         "cached_registered": was_registered,
                     },
                 )
-    return result
+    return synced_ok
 
 
 def main():
@@ -355,12 +356,12 @@ def main():
             final_result = asyncio.run(
                 _sync(stop_watcher=False, unregister_on_finish=unregister_on_finish)
             )
-            if final_result.terminal_success:
+            if final_result:
                 completed_successfully = True
                 return
             hook_log(
                 "sync_failed",
-                {"attempt": attempt, "attempts": attempts, "status": final_result.status.value},
+                {"attempt": attempt, "attempts": attempts, "status": "failed"},
             )
         except Exception as exc:
             # Non-fatal: session sync failure should not crash Codex.

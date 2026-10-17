@@ -75,6 +75,14 @@ def _format_entry(entry: dict) -> str:
             parts.append(f"  output: {mrv}")
         return "\n".join(parts)
 
+    # EB fact assertion (source=hybrid/vector/structural): content lives in
+    # `text`, not in the legacy `question`/`answer` fields.
+    fact_text = str(entry.get("text", "") or "").strip()
+    if fact_text:
+        category = str(entry.get("category") or "").strip()
+        label = f"[fact:{category}]" if category else "[fact]"
+        return f"{label} {fact_text[:TRUNCATE_RETURN]}"
+
     # session (QA) or generic
     q = entry.get("question", "")
     a = entry.get("answer", "")
@@ -91,6 +99,8 @@ def _format_entry(entry: dict) -> str:
 def _has_entry_content(entry: dict) -> bool:
     """Return True when a recall entry has useful content to inject."""
     source = entry.get("source", "")
+    if str(entry.get("text", "") or "").strip():
+        return True
     if source == "graph_context":
         return bool(str(entry.get("content", "") or entry.get("text", "")).strip())
     if source == "trace":
@@ -120,36 +130,24 @@ async def _run(prompt: str) -> dict | None:
 
     saves_last_turn = read_and_reset_save_counter(session_id)
 
-    # Run scopes independently: a failure in one (e.g. graph search hitting an
-    # empty/locked Ladybug DB) must not discard hits already collected from the
-    # others. cognee.recall loops over scopes and re-raises on the first failure,
-    # so we call it once per scope and collect whatever succeeds.
+    # Durable memory only: session-scoped recall is empty during the session
+    # because facts are ingested at SessionEnd.
     results: list = []
-    scope_specs = [
-        (["session"], None),
-        (["trace"], None),
-        (["graph_context"], None),
-        (["graph"], "GRAPH_COMPLETION"),
-    ]
-    for scope_list, qtype in scope_specs:
-        try:
-            part = recall_via_http(
-                prompt,
-                session_id=session_id,
-                top_k=TOP_K,
-                scope=scope_list,
-                only_context=True,
-                search_type=qtype,
-            )
-            if part:
-                results.extend(part)
-        except Exception as exc:
-            hook_log("recall_error", {"scope": scope_list, "error": str(exc)[:200]})
+    try:
+        results = recall_via_http(
+            prompt,
+            session_id=session_id,
+            top_k=TOP_K,
+            scope=["global"],
+            only_context=True,
+        )
+    except Exception as exc:
+        hook_log("recall_error", {"scope": ["global"], "error": str(exc)[:200]})
 
     # Bucket results by _source for human-readable output.
     # Local SDK mode returns Pydantic models (ResponseQAEntry, etc.); cloud
     # mode returns plain dicts via HTTP. Normalize to dicts here.
-    by_source: dict[str, list] = {"session": [], "trace": [], "graph_context": []}
+    by_source: dict[str, list] = {"facts": [], "session": [], "trace": [], "graph_context": []}
     for r in results or []:
         if hasattr(r, "model_dump"):
             r = r.model_dump()
@@ -161,6 +159,9 @@ async def _run(prompt: str) -> dict | None:
         if src == "graph":
             r["source"] = "graph_context"
             src = "graph_context"
+        elif src not in by_source:
+            # EB fact rows carry source=hybrid/vector/structural.
+            src = "facts"
         if not _has_entry_content(r):
             continue
         by_source.setdefault(src, []).append(r)
@@ -196,13 +197,18 @@ async def _run(prompt: str) -> dict | None:
     # recalled right now and what the previous turn persisted.
     header = (
         "Cognee memory: recall "
-        f"{counts['session']} session / {counts['trace']} trace / "
-        f"{counts['graph_context']} graph; saved last turn "
+        f"{counts['facts']} facts / {counts['session']} session / "
+        f"{counts['trace']} trace / {counts['graph_context']} graph; saved last turn "
         f"{saves_last_turn['prompt']} prompt / {saves_last_turn['trace']} trace / "
         f"{saves_last_turn['answer']} answer"
     )
 
     section_lines = []
+    if by_source.get("facts"):
+        section_lines.append("=== Memory facts ===")
+        for e in by_source["facts"]:
+            section_lines.append(_format_entry(e))
+            section_lines.append("")
     if by_source.get("graph_context"):
         section_lines.append("=== Knowledge graph snapshot ===")
         for e in by_source["graph_context"]:

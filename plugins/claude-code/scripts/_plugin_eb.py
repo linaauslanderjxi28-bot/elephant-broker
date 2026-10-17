@@ -240,7 +240,7 @@ def eb_search(
     memory_class: str | None = None,
     auto_recall: bool = False,
     include_audit: bool = False,
-    timeout: float = 22.0,
+    timeout: float = 8.0,
 ) -> list[dict]:
     """Search memory via ``POST /memory/search``.
 

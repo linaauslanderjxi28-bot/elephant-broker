@@ -534,14 +534,40 @@ def recall_via_http(
     scope: list[str],
     only_context: bool = True,
     search_type: str | None = None,
-    timeout: float = 60.0,
+    timeout: float | None = None,
 ) -> list:
+    """Recall through the EB search API.
+
+    ``timeout`` is forwarded to the underlying HTTP request. ``None`` keeps
+    the ``eb_search``/``eb_search_global`` default for the chosen scope.
+    """
     eb = _eb_module()
     scope_set = {str(s).lower() for s in (scope or [])}
+    search_kwargs = {} if timeout is None else {"timeout": timeout}
     if "global" in scope_set and "session" not in scope_set:
-        result = eb.eb_search_global(query, max_results=top_k)
-    else:
-        result = eb.eb_search(query, max_results=top_k, session_key=session_id)
+        # The backend applies the scope filter *after* vector top-k, so a
+        # small top_k can be consumed entirely by session-scoped rows and
+        # leave zero global hits. Over-fetch, dedupe, then trim client-side.
+        fetch_k = max(top_k * 3, 10)
+        result = eb.eb_search_global(query, max_results=fetch_k, **search_kwargs)
+        if not isinstance(result, list):
+            return []
+        seen: set = set()
+        kept: list = []
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            if item.get("archived") or item.get("autorecall_blacklisted"):
+                continue
+            key = item.get("id") or str(item.get("text", ""))[:200]
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append(item)
+            if len(kept) >= top_k:
+                break
+        return kept
+    result = eb.eb_search(query, max_results=top_k, session_key=session_id, **search_kwargs)
     return result if isinstance(result, list) else []
 
 
