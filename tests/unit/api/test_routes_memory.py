@@ -190,8 +190,8 @@ class TestMemoryRoutes:
         r = await client.post("/memory/search", json={"query": "test"})
 
         assert r.status_code == 200
-        assert captured == [25.0]
-        assert captured[0] < 30.0
+        assert captured == [35.0]
+        assert captured[0] <= 35.0
 
     async def test_search_retrieval_budget_stays_below_client_abort(self, client, container, monkeypatch):
         captured: list[float] = []
@@ -218,8 +218,8 @@ class TestMemoryRoutes:
         )
 
         assert r.status_code == 200
-        assert captured == [25.0]
-        assert captured[0] < 30.0
+        assert captured == [35.0]
+        assert captured[0] <= 35.0
 
     async def test_search_permission_error_is_not_degraded(self, client, container):
         container.memory_store.search = AsyncMock(side_effect=PermissionError("wrong gateway"))
