@@ -82,6 +82,7 @@ CONFIG_DIR="/etc/elephantbroker"
 UPGRADE_LOCK=0
 RESTART=1
 SKIP_PLUGINS=0
+NO_GIT=0
 
 # --- Parse flags ---
 while [[ $# -gt 0 ]]; do
@@ -89,6 +90,7 @@ while [[ $# -gt 0 ]]; do
         --upgrade) UPGRADE_LOCK=1; shift ;;
         --no-restart) RESTART=0; shift ;;
         --skip-plugins) SKIP_PLUGINS=1; shift ;;
+        --no-git) NO_GIT=1; shift ;;
         --prefix) PREFIX="$2"; shift 2 ;;
         --service-name) SERVICE_NAME="$2"; shift 2 ;;
         --hitl-service-name) HITL_SERVICE_NAME="$2"; shift 2 ;;
@@ -161,67 +163,77 @@ die()  { printf "\033[1;31mXX\033[0m  %s\n" "$*" >&2; exit 1; }
 
 # --- Pre-flight ---
 [[ $EUID -eq 0 ]] || die "must run as root (use sudo)"
-[[ -d "$PREFIX/.git" ]] || die "$PREFIX is not a git working tree — was the repo cloned in place?"
+if [[ ! -d "$PREFIX/.git" ]]; then
+    warn "$PREFIX is not a git working tree — proceeding in local deployed mode (skipping git pull)"
+    NO_GIT=1
+fi
 [[ -d "$PREFIX/.venv" ]] || die "$PREFIX/.venv not found — run install.sh first"
 command -v uv &>/dev/null || die "uv not found in PATH — run install.sh first (it installs uv)"
 
 cd "$PREFIX"
 
-# Refuse dirty tree (operator might lose uncommitted changes)
-if ! git diff-index --quiet HEAD -- 2>/dev/null; then
-    warn "Working tree at $PREFIX has uncommitted changes:"
-    git status --short
-    warn ""
-    warn "TODO-3-634: if uv.lock is listed above and you are recovering"
-    warn "from a previous --upgrade run that failed validation, revert"
-    warn "uv.lock first:"
-    warn "    sudo git -C $PREFIX checkout uv.lock"
-    warn "then re-run this script."
-    die "refusing to update on a dirty tree — commit or stash your changes first"
-fi
-
-CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-log "Install prefix: $PREFIX"
-log "Current branch: $CURRENT_BRANCH"
-
-# =============================================================================
-log "Step 1/8: git pull"
-# =============================================================================
-BEFORE_SHA="$(git rev-parse HEAD)"
-git pull --ff-only origin "$CURRENT_BRANCH"
-AFTER_SHA="$(git rev-parse HEAD)"
-if [[ "$BEFORE_SHA" == "$AFTER_SHA" ]]; then
-    log "  already up to date ($AFTER_SHA)"
-else
-    log "  $BEFORE_SHA -> $AFTER_SHA"
-fi
-
-# --- Self-update guard ---
-# When update.sh runs, bash loads the OLD script into memory at startup.
-# git pull (above) replaces the file on disk, but bash keeps executing the
-# stale in-memory copy. Any fix that lands IN update.sh itself (e.g. the
-# --all-packages fix in ec7ee67) only takes effect on a SECOND run — the
-# first run still executes the pre-pull version. We hit this during the
-# 2026-04-09 staging deploy: ec7ee67 was on disk but the in-memory old
-# script ran without --all-packages, dropping hitl-middleware and crashing
-# elephantbroker-hitl with 203/EXEC.
-#
-# Fix: after git pull, check if deploy/update.sh itself was modified in the
-# pulled commits. If yes AND the EB_UPDATE_REEXECED env guard is unset,
-# re-execute the script from the new on-disk version via exec "$0" "$@".
-# The guard env var prevents infinite recursion — the re-exec'd instance
-# sees EB_UPDATE_REEXECED=1 and skips the check.
-#
-# HEAD@{1} may not exist on a fresh clone (no reflog entry yet). In that
-# case, skip the self-exec check — fresh clones don't have a stale script
-# in memory since the user just cloned the latest version.
-if [[ -z "${EB_UPDATE_REEXECED:-}" ]]; then
-    PREV_HEAD="$(git rev-parse --verify HEAD@{1} 2>/dev/null || true)"
-    if [[ -n "$PREV_HEAD" ]] && git diff --name-only "$PREV_HEAD"..HEAD -- deploy/update.sh | grep -q .; then
-        log "update.sh changed in this pull — re-executing from new version"
-        export EB_UPDATE_REEXECED=1
-        exec "$0" "$@"
+if [[ "$NO_GIT" -eq 0 ]]; then
+    # Refuse dirty tree (operator might lose uncommitted changes)
+    if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+        warn "Working tree at $PREFIX has uncommitted changes:"
+        git status --short
+        warn ""
+        warn "TODO-3-634: if uv.lock is listed above and you are recovering"
+        warn "from a previous --upgrade run that failed validation, revert"
+        warn "uv.lock first:"
+        warn "    sudo git -C $PREFIX checkout uv.lock"
+        warn "then re-run this script."
+        die "refusing to update on a dirty tree — commit or stash your changes first"
     fi
+
+    CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+    log "Install prefix: $PREFIX"
+    log "Current branch: $CURRENT_BRANCH"
+
+    # =============================================================================
+    log "Step 1/8: git pull"
+    # =============================================================================
+    BEFORE_SHA="$(git rev-parse HEAD)"
+    git pull --ff-only origin "$CURRENT_BRANCH"
+    AFTER_SHA="$(git rev-parse HEAD)"
+    if [[ "$BEFORE_SHA" == "$AFTER_SHA" ]]; then
+        log "  already up to date ($AFTER_SHA)"
+    else
+        log "  $BEFORE_SHA -> $AFTER_SHA"
+    fi
+
+    # --- Self-update guard ---
+    # When update.sh runs, bash loads the OLD script into memory at startup.
+    # git pull (above) replaces the file on disk, but bash keeps executing the
+    # stale in-memory copy. Any fix that lands IN update.sh itself (e.g. the
+    # --all-packages fix in ec7ee67) only takes effect on a SECOND run — the
+    # first run still executes the pre-pull version. We hit this during the
+    # 2026-04-09 staging deploy: ec7ee67 was on disk but the in-memory old
+    # script ran without --all-packages, dropping hitl-middleware and crashing
+    # elephantbroker-hitl with 203/EXEC.
+    #
+    # Fix: after git pull, check if deploy/update.sh itself was modified in the
+    # pulled commits. If yes AND the EB_UPDATE_REEXECED env guard is unset,
+    # re-execute the script from the new on-disk version via exec "$0" "$@".
+    # The guard env var prevents infinite recursion — the re-exec'd instance
+    # sees EB_UPDATE_REEXECED=1 and skips the check.
+    #
+    # HEAD@{1} may not exist on a fresh clone (no reflog entry yet). In that
+    # case, skip the self-exec check — fresh clones don't have a stale script
+    # in memory since the user just cloned the latest version.
+    if [[ -z "${EB_UPDATE_REEXECED:-}" ]]; then
+        PREV_HEAD="$(git rev-parse --verify HEAD@{1} 2>/dev/null || true)"
+        if [[ -n "$PREV_HEAD" ]] && git diff --name-only "$PREV_HEAD"..HEAD -- deploy/update.sh | grep -q .; then
+            log "update.sh changed in this pull — re-executing from new version"
+            export EB_UPDATE_REEXECED=1
+            exec "$0" "$@"
+        fi
+    fi
+else
+    log "Install prefix: $PREFIX"
+    # =============================================================================
+    log "Step 1/8: git pull (skipped in local deployed mode)"
+    # =============================================================================
 fi
 
 # =============================================================================
