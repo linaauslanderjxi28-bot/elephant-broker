@@ -37,10 +37,10 @@ set -e
 cd "$(dirname "$0")/.."
 
 # --- Port configuration (must match docker-compose.test.yml) ---
-TEST_NEO4J_BOLT_PORT=17687
-TEST_NEO4J_HTTP_PORT=17474
-TEST_QDRANT_PORT=16333
-TEST_REDIS_PORT=16379
+TEST_NEO4J_BOLT_PORT=27687
+TEST_NEO4J_HTTP_PORT=27474
+TEST_QDRANT_PORT=26333
+TEST_REDIS_PORT=26379
 
 # --- Pre-flight: detect port conflicts with production infrastructure ---
 check_port() {
@@ -147,6 +147,11 @@ export EB_LLM_MODEL="${EB_LLM_MODEL:-openai/gemini/gemini-2.5-pro}"
 export ENABLE_BACKEND_ACCESS_CONTROL=false
 export COGNEE_SKIP_CONNECTION_TEST=true
 export LLM_API_KEY="${EB_LLM_API_KEY:-test-unused}"
+
+# Explicit opt-in gate: integration conftest cleanup fixtures (cleanup_qdrant,
+# cleanup_neo4j) refuse to run against production-like ports unless this flag
+# is set. The flag is exported ONLY here, by the sanctioned test driver.
+export EB_TEST_INFRA=1
 
 # Disable set -e for pytest — we capture exit codes manually.
 # Cognee caches singleton connections (Neo4j driver, vector engine) on the first

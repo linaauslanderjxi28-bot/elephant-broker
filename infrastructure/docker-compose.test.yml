@@ -2,8 +2,10 @@ services:
   neo4j:
     image: neo4j:5-community
     ports:
-      - "17474:7474"
-      - "17687:7687"
+      # Test-only ports — MUST NOT overlap production (17474/17687).
+      # Production compose: infrastructure/docker-compose.yml
+      - "27474:7474"
+      - "27687:7687"
     environment:
       # Dev/test credentials — ephemeral tmpfs containers, not used in production
       NEO4J_AUTH: neo4j/testpassword
@@ -22,8 +24,8 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.17.0
     ports:
-      - "16333:6333"
-      - "16334:6334"
+      - "26333:6333"
+      - "26334:6334"
     tmpfs:
       - /qdrant/storage
     healthcheck:
@@ -36,7 +38,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "16379:6379"
+      - "26379:6379"
     command: redis-server
     tmpfs:
       - /data

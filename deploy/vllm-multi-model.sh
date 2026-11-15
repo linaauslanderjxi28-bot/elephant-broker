@@ -8,9 +8,10 @@ docker run -d --name vllm-embedding \
   -v /home/openclaw/docker/vllm_cache/torch_compile_cache:/root/.cache/vllm/torch_compile_cache \
   -v /home/openclaw/docker/vllm_cache/modelinfos:/root/.cache/vllm/modelinfos \
   -p 8001:8001 -p 8004:8004 --restart unless-stopped --memory 8g \
-  opendatalab/mineru:latest \
-  bash -c "
-vllm serve /models/embedding --host 0.0.0.0 --port 8001 --task embed --max-model-len 16384 --gpu-memory-utilization 0.45 --enforce-eager &
+  --entrypoint bash \
+  vllm/vllm-openai:v0.29.0 \
+  -c "
+vllm serve /models/embedding --host 0.0.0.0 --port 8001 --runner pooling --convert embed --max-model-len 16384 --gpu-memory-utilization 0.45 --enforce-eager &
 sleep 90
-vllm serve /models/reranker --host 0.0.0.0 --port 8004 --task score --max-model-len 4096 --gpu-memory-utilization 0.28 --enforce-eager --hf_overrides '{\"architectures\":[\"Qwen3ForSequenceClassification\"],\"classifier_from_token\":[\"no\",\"yes\"],\"is_original_qwen3_reranker\":true}' &
+vllm serve /models/reranker --host 0.0.0.0 --port 8004 --runner pooling --convert classify --max-model-len 4096 --gpu-memory-utilization 0.28 --enforce-eager --hf-overrides '{\"architectures\":[\"Qwen3ForSequenceClassification\"],\"classifier_from_token\":[\"no\",\"yes\"],\"is_original_qwen3_reranker\":true}' &
 wait"

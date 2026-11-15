@@ -16,11 +16,11 @@ from elephantbroker.schemas.config import ElephantBrokerConfig, LLMConfig
 # These allow running `pytest tests/integration/` directly without the shell
 # script.  The shell script exports the same values, so setdefault is safe.
 # ---------------------------------------------------------------------------
-os.environ.setdefault("EB_NEO4J_URI", "bolt://localhost:17687")
+os.environ.setdefault("EB_NEO4J_URI", "bolt://localhost:27687")
 os.environ.setdefault("EB_NEO4J_USER", "neo4j")
 os.environ.setdefault("EB_NEO4J_PASSWORD", "elephant_dev")
-os.environ.setdefault("EB_QDRANT_URL", "http://localhost:16333")
-os.environ.setdefault("EB_REDIS_URL", "redis://localhost:16379")
+os.environ.setdefault("EB_QDRANT_URL", "http://localhost:26333")
+os.environ.setdefault("EB_REDIS_URL", "redis://localhost:26379")
 # Pin embedding model + dims to known-working OpenAI values regardless of
 # what the schema default happens to be at any given time. Cognee uses tiktoken
 # for tokenization and tiktoken only knows OpenAI model names — passing it a
@@ -28,6 +28,21 @@ os.environ.setdefault("EB_REDIS_URL", "redis://localhost:16379")
 # Tests must be deterministic, so we pin to a tiktoken-mappable name.
 os.environ.setdefault("EB_EMBEDDING_MODEL", "openai/text-embedding-3-large")
 os.environ.setdefault("EB_EMBEDDING_DIMENSIONS", "1024")
+
+
+PRODUCTION_PORTS = ("16333", "16334", "17687", "16379")
+
+
+def _cleanup_allowed(url: str) -> bool:
+    """Cleanup fixtures may only run against explicitly-gated test infra.
+
+    Two independent guards, both must pass:
+    1. EB_TEST_INFRA=1 — exported only by scripts/run-integration-tests.sh.
+    2. Target URL must not reference production ports (16333/16334/17687/16379).
+    """
+    if os.environ.get("EB_TEST_INFRA") != "1":
+        return False
+    return not any(f":{port}" in url for port in PRODUCTION_PORTS)
 
 
 @pytest.fixture(scope="session")
@@ -123,7 +138,7 @@ async def neo4j_driver(_neo4j_cleanup_driver):
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def cleanup_neo4j(request, _neo4j_cleanup_driver):
+async def cleanup_neo4j(request, cognee_config, _neo4j_cleanup_driver):
     """Delete all nodes and relationships after each test.
 
     Uses the session-scoped driver to avoid connection churn.
@@ -133,6 +148,8 @@ async def cleanup_neo4j(request, _neo4j_cleanup_driver):
     """
     yield
     if request.node.get_closest_marker("pipeline"):
+        return
+    if not _cleanup_allowed(cognee_config.neo4j_uri):
         return
     try:
         async with _neo4j_cleanup_driver.session() as session:
@@ -166,6 +183,8 @@ async def cleanup_qdrant(request, cognee_config):
     """
     yield
     if request.node.get_closest_marker("pipeline"):
+        return
+    if not _cleanup_allowed(cognee_config.qdrant_url):
         return
     try:
         from qdrant_client import AsyncQdrantClient, models

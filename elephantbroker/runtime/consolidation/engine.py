@@ -252,6 +252,7 @@ class ConsolidationEngine(IConsolidationEngine):
                 await self._redis.set(
                     status_key,
                     json.dumps({"running": True, "started_at": report.started_at.isoformat(), "current_stage": 0}),
+                    ex=3600,
                 )
 
             # 3. Emit CONSOLIDATION_STARTED
@@ -308,6 +309,7 @@ class ConsolidationEngine(IConsolidationEngine):
                                 "started_at": report.started_at.isoformat(),
                                 "current_stage": stage_num,
                             }),
+                            ex=3600,
                         )
                     except Exception:
                         pass
@@ -360,6 +362,7 @@ class ConsolidationEngine(IConsolidationEngine):
                     await self._redis.set(
                         status_key,
                         json.dumps({"running": False, "last_run_at": datetime.now(UTC).isoformat()}),
+                        ex=86400,
                     )
                 except Exception:
                     pass
